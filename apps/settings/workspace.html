@@ -1939,16 +1939,32 @@ button:focus:not(:focus-visible) {
   font-size: 0.88em;
 }
 .ollama-details-summary {
-  display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  display: flex;
   align-items: center;
   gap: 1em;
   cursor: pointer;
   user-select: none;
 }
-.ollama-summary-left { justify-self: start; }
-.ollama-summary-mid { justify-self: center; }
-.ollama-summary-right { justify-self: end; }
+.ollama-summary-left {
+  flex: 1;
+  min-width: 0;
+}
+.ollama-summary-right {
+  display: flex;
+  align-items: center;
+  gap: 0.75em;
+  flex-shrink: 0;
+}
+.ollama-summary-speedgroup,
+.ollama-summary-togglegroup {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+}
+.ollama-summary-togglegroup {
+  padding-left: 0.8em;
+  border-left: 1px solid var(--settings-card-border, #d0d0d0);
+}
 .ollama-summary-prefix {
   font-size: 0.82em;
   color: var(--settings-muted, #888);
@@ -6363,13 +6379,15 @@ function renderDetailsPanel(model, requiredCap, tasksCatalog) {
         <strong>${escapeHtml(model.label || model.model_id)}</strong>
         ${notInstalled}${notFits}
       </span>
-      <span class="ollama-summary-mid">
-        <span class="ollama-speed">${escapeHtml(tokS)}</span>
-        <span class="ollama-confidence ${confClass}">${escapeHtml(est.confidence || 'unknown')}</span>
-      </span>
       <span class="ollama-summary-right">
-        <span class="ollama-toggle-label">Toggle for Details</span>
-        <span class="ollama-details-toggle"></span>
+        <span class="ollama-summary-speedgroup">
+          <span class="ollama-speed">${escapeHtml(tokS)}</span>
+          <span class="ollama-confidence ${confClass}">${escapeHtml(est.confidence || 'unknown')}</span>
+        </span>
+        <span class="ollama-summary-togglegroup">
+          <span class="ollama-toggle-label">Toggle for Details</span>
+          <span class="ollama-details-toggle"></span>
+        </span>
       </span>
     </div>
     <div class="ollama-details-content">
