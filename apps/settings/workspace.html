@@ -6373,7 +6373,7 @@ function renderDetailsPanel(model, requiredCap, tasksCatalog) {
   return `
     <div class="ollama-details-summary" onclick="this.parentElement.classList.toggle('open')">
       <span class="ollama-summary-left">
-        <span class="ollama-summary-prefix">Benchmark for:</span>
+        <span class="ollama-summary-prefix">Benchmark:</span>
         <strong>${escapeHtml(model.label || model.model_id)}</strong>
         ${notInstalled}${notFits}
       </span>
