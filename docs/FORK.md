@@ -3,6 +3,13 @@
 This document tracks significant changes made on this fork of Solstone.
 
 
+## Field Journal Test Content
+
+**Files:** `setup_field_journal.sh`, `docs/FIELD_JOURNAL.md`
+
+This fork uses [solpbc/field_journal](https://github.com/solpbc/field_journal) — a public-domain media corpus — as its journal content, making this instance a dedicated testing and development environment rather than a personal capture one. `setup_field_journal.sh` at the repo root copies days from a local field_journal clone (default `~/Field_Journal/`) into `journal/chronicle/`. Setup lives in a standalone script rather than the `Makefile` so shared files stay convergent with upstream. See `docs/FIELD_JOURNAL.md` for the full workflow.
+
+
 ## Fixed Convey Port (3000)
 
 **File:** `think/supervisor.py` (~line 1380)
