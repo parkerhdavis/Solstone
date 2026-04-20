@@ -1,23 +1,36 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2026 sol pbc
 
-"""Benchmark harness — measure a model's output tok/s on this host.
+"""Benchmark harness — measure a model's speed on this host.
 
 Maintainer-only. Run by hand to seed ``models.json`` with real
 measurements; not invoked by the live pipeline.
 
+Two modes:
+
+1. **Synthetic benchmark** (default) — sends a fixed prompt, records
+   output tok/s and prompt tok/s. Good for populating the baseline
+   tok/s used by the formula estimator.
+
+2. **Task benchmark** (``--task <task_id>``) — reads the fixture under
+   ``fixtures/<task_id>.txt``, runs it end-to-end, records wall-clock
+   seconds. Output pastes directly into the model's
+   ``benchmarks.<class>.tasks.<task_id>`` entry. This is the
+   ground-truth source for task-time heuristics — no token formulas,
+   no interpolation.
+
 Usage::
 
+    # Synthetic tok/s benchmark
     python -m think.benchmark.harness --model ollama-local/qwen3.5:9b \\
         --class rtx-4090
 
-The script sends a fixed prompt to the local Ollama instance, records
-output tok/s using Ollama's ``eval_count`` / ``eval_duration`` fields,
-and prints a JSON snippet ready to paste into
-``models.json -> models.<model_id>.benchmarks.<class>``.
+    # Task-time benchmark (vision flag auto-applied when task.mode=vision)
+    python -m think.benchmark.harness --model ollama-local/qwen3.5:9b \\
+        --class rtx-4090 --task chat_reply
 
-It deliberately does **not** write ``models.json`` itself — the
-maintainer reviews the output before committing.
+The script never writes ``models.json`` directly — the maintainer
+reviews the output snippet before committing.
 """
 
 from __future__ import annotations
@@ -27,8 +40,12 @@ import base64
 import io
 import json
 import sys
+import time
 from datetime import date
+from pathlib import Path
 from typing import Any
+
+_FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 # Fixed text prompt used for text-mode runs. ~150-200 tokens of input,
 # asks for ~200 tokens of output.
@@ -104,26 +121,36 @@ def _build_canned_image_b64() -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def run_once(model: str, *, vision: bool = False) -> dict[str, Any]:
-    """Send one completion request; return the raw Ollama response body.
+def run_once(
+    model: str,
+    *,
+    vision: bool = False,
+    prompt_override: str | None = None,
+    max_output_tokens: int = _MAX_OUTPUT_TOKENS,
+) -> tuple[dict[str, Any], float]:
+    """Send one completion request; return ``(response_body, wall_clock_s)``.
 
     When ``vision=True``, include a canned image in the user message so
-    the prompt-eval count captures image-encoder cost.
+    the prompt-eval count captures image-encoder cost. When
+    ``prompt_override`` is set, use that text instead of the default
+    benchmark prompt — used by task-mode runs that read a fixture.
     """
     from think.providers.ollama import _get_client, _strip_model_prefix
 
     bare_model = _strip_model_prefix(model)
     client = _get_client()
 
+    prompt_text = prompt_override or (_VISION_PROMPT if vision else _TEXT_PROMPT)
     if vision:
         message: dict[str, Any] = {
             "role": "user",
-            "content": _VISION_PROMPT,
+            "content": prompt_text,
             "images": [_build_canned_image_b64()],
         }
     else:
-        message = {"role": "user", "content": _TEXT_PROMPT}
+        message = {"role": "user", "content": prompt_text}
 
+    start = time.perf_counter()
     response = client.post(
         "/api/chat",
         json={
@@ -133,14 +160,38 @@ def run_once(model: str, *, vision: bool = False) -> dict[str, Any]:
             "think": False,
             "options": {
                 "temperature": 0.2,
-                "num_predict": _MAX_OUTPUT_TOKENS,
+                "num_predict": max_output_tokens,
                 "num_ctx": _BENCHMARK_NUM_CTX,
             },
         },
         timeout=600.0,
     )
+    elapsed = time.perf_counter() - start
     response.raise_for_status()
-    return response.json()
+    return response.json(), elapsed
+
+
+def _load_task(task_id: str) -> dict[str, Any]:
+    """Load a task spec from ``tasks.json`` by id."""
+    tasks_file = Path(__file__).parent / "tasks.json"
+    catalog = json.loads(tasks_file.read_text()).get("tasks", {})
+    if task_id not in catalog:
+        raise SystemExit(
+            f"Task '{task_id}' not in tasks.json. Available: "
+            f"{', '.join(sorted(catalog.keys()))}"
+        )
+    return catalog[task_id]
+
+
+def _load_fixture(task_id: str) -> str:
+    """Load the fixture prompt text for ``task_id``."""
+    path = _FIXTURES_DIR / f"{task_id}.txt"
+    if not path.exists():
+        raise SystemExit(
+            f"No fixture at {path}. Add one before running task-mode harness "
+            f"for '{task_id}'."
+        )
+    return path.read_text()
 
 
 def ensure_installed(model: str, *, allow_pull: bool) -> None:
@@ -217,13 +268,30 @@ def main() -> int:
         action="store_true",
         help=(
             "Vision mode: include a canned image in the prompt. Use for VLMs "
-            "so prompt-eval captures image-encoder cost."
+            "so prompt-eval captures image-encoder cost. Auto-enabled when "
+            "--task specifies a vision-mode task."
+        ),
+    )
+    parser.add_argument(
+        "--task",
+        help=(
+            "Task id from tasks.json. Runs the fixture under "
+            "fixtures/<task_id>.txt end-to-end and records wall-clock seconds "
+            "as the measured task-time (printed as a paste-ready snippet)."
         ),
     )
     args = parser.parse_args()
 
     ensure_installed(args.model, allow_pull=args.pull)
 
+    if args.task:
+        return _run_task_mode(args)
+
+    return _run_tok_s_mode(args)
+
+
+def _run_tok_s_mode(args: argparse.Namespace) -> int:
+    """Synthetic-prompt tok/s benchmark."""
     mode = "vision" if args.vision else "text_only"
     print(
         f"Benchmarking {args.model} on class '{args.hw_class}' in {mode} mode "
@@ -239,7 +307,7 @@ def main() -> int:
     prompt_rates: list[float] = []
     for i in range(_MEASURE_RUNS):
         print(f"  run {i + 1}/{_MEASURE_RUNS}…", file=sys.stderr)
-        body = run_once(args.model, vision=args.vision)
+        body, _elapsed = run_once(args.model, vision=args.vision)
         out_rate, prompt_rate = tok_s_from_response(body)
         output_rates.append(out_rate)
         prompt_rates.append(prompt_rate)
@@ -262,6 +330,73 @@ def main() -> int:
     print(
         f"\n# Paste into think/benchmark/models.json "
         f"-> models['{args.model}'].benchmarks:",
+        file=sys.stderr,
+    )
+    print(json.dumps(snippet, indent=2))
+    return 0
+
+
+def _run_task_mode(args: argparse.Namespace) -> int:
+    """End-to-end task-fixture benchmark; records wall-clock seconds."""
+    task_spec = _load_task(args.task)
+    fixture = _load_fixture(args.task)
+    vision = task_spec.get("mode") == "vision" or args.vision
+    expected_output_tokens = int(task_spec.get("output_tokens") or 400)
+
+    print(
+        f"Benchmarking task '{args.task}' with {args.model} on class "
+        f"'{args.hw_class}' (mode={task_spec.get('mode')}, presence="
+        f"{task_spec.get('presence')}); {_WARMUP_RUNS} warmup + "
+        f"{_MEASURE_RUNS} measured runs…",
+        file=sys.stderr,
+    )
+
+    for i in range(_WARMUP_RUNS):
+        print(f"  warmup {i + 1}/{_WARMUP_RUNS}…", file=sys.stderr)
+        run_once(
+            args.model,
+            vision=vision,
+            prompt_override=fixture,
+            max_output_tokens=expected_output_tokens,
+        )
+
+    elapsed_samples: list[float] = []
+    prompt_token_samples: list[int] = []
+    output_token_samples: list[int] = []
+    for i in range(_MEASURE_RUNS):
+        print(f"  run {i + 1}/{_MEASURE_RUNS}…", file=sys.stderr)
+        body, elapsed = run_once(
+            args.model,
+            vision=vision,
+            prompt_override=fixture,
+            max_output_tokens=expected_output_tokens,
+        )
+        prompt_tokens = int(body.get("prompt_eval_count") or 0)
+        output_tokens = int(body.get("eval_count") or 0)
+        elapsed_samples.append(elapsed)
+        prompt_token_samples.append(prompt_tokens)
+        output_token_samples.append(output_tokens)
+        print(
+            f"    wall={elapsed:.2f}s  prompt_tokens={prompt_tokens}  "
+            f"output_tokens={output_tokens}",
+            file=sys.stderr,
+        )
+
+    median_elapsed = sorted(elapsed_samples)[len(elapsed_samples) // 2]
+    median_prompt_tokens = sorted(prompt_token_samples)[len(prompt_token_samples) // 2]
+    median_output_tokens = sorted(output_token_samples)[len(output_token_samples) // 2]
+
+    snippet = {
+        args.task: {
+            "seconds": round(median_elapsed, 2),
+            "prompt_tokens": median_prompt_tokens,
+            "output_tokens": median_output_tokens,
+            "measured_at": date.today().isoformat(),
+        }
+    }
+    print(
+        f"\n# Paste into think/benchmark/models.json "
+        f"-> models['{args.model}'].benchmarks['{args.hw_class}'].tasks:",
         file=sys.stderr,
     )
     print(json.dumps(snippet, indent=2))

@@ -1,0 +1,33 @@
+Extract named entities from the following transcript segment. Return a JSON object with four arrays: `people`, `companies`, `projects`, `tools`. Each entry should have `name` and an optional `context` string (<= 15 words) describing why they appeared. Skip URLs, filenames, and paths.
+
+---
+
+[00:00] Parker: Okay, so the Carelaw Colorado intake rework — I talked to Mara yesterday and she wants us to commit to the new schema by end of week. Devika is on board too.
+
+[00:18] Kai: Before we get into that, can we loop in Jordan from the legal-ops side? Last time we changed the intake fields without her review we ended up rolling back twice. I don't want a repeat of what happened with the Anthers onboarding last fall.
+
+[00:41] Parker: Fair. I'll ping her in Slack. Also — Jess mentioned the design changes for Daisy are ready for review. She wants feedback before next Tuesday because she's traveling to see her sister in Portland after that.
+
+[01:02] Kai: On Daisy, are we still using Playwright for the screenshot tests, or did you switch to Puppeteer like you were threatening?
+
+[01:10] Parker: Stuck with Playwright. Puppeteer would have been a bigger rewrite than it was worth. But I did swap out the old Jest setup for Vitest and it's much faster.
+
+[01:25] Kai: Good. Okay, back to Carelaw. What's the migration strategy for the existing intake rows? There's what, 12,000 in the Carelaw Colorado prod table?
+
+[01:38] Parker: Closer to 14,000 now. I'm planning to do a blue-green field mapping — write the new columns alongside the old ones for a week, let the application read from both with a fallback, then cut over. The migration script will backfill old rows from the existing `notes` JSON blob.
+
+[02:00] Kai: And the observability? If reads start failing on the new columns mid-cutover, how do you know?
+
+[02:08] Parker: Grafana dashboard at grafana.internal/d/carelaw-intake — I'll add a panel for new-column read success rate. Datadog alert if it drops below 99%.
+
+[02:24] Kai: Okay. Two more things. One — Mara asked if we can extend this same pattern to Anthers when they onboard in May. I said yes provisionally. Two — Devika wants to know if the new fields are going to affect the billing export job. Short answer?
+
+[02:42] Parker: Yes on both. Anthers will be a lift-and-shift, straightforward. For billing — the export job pulls from the `intake_legacy` view, which I'll update to continue producing the old shape during the transition. Post-cutover we can decide whether to migrate billing too or leave the view permanently.
+
+[03:05] Kai: One more — the Sol PBC folks wanted an update on the Solstone benchmarking work. Where's that?
+
+[03:12] Parker: Phase 1 is merged. I have task-time heuristics going in today. Should have a PR up by end of day.
+
+[03:20] Kai: Great. Send it to me when it's up, I'll review before end of tomorrow.
+
+[03:28] Parker: Will do.

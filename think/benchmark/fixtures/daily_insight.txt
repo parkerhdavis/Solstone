@@ -1,0 +1,83 @@
+Generate a daily insight narrative for the owner. You have access to the day's activity clusters, transcripts, muse outputs, and entity mentions. Produce a structured Markdown document with: a one-paragraph summary of the day at the top (3-5 sentences, second person, direct tone), a "What mattered" section (2-4 bullets highlighting the most significant work, decisions, or personal moments), a "Loose ends" section (2-3 bullets — things the owner started but didn't finish, or commitments that came up), and a "Tomorrow" section (2-3 forward-looking bullets). Do not editorialize or add motivational content. Stick to what actually happened.
+
+---
+
+=== Day metadata ===
+Date: 2026-04-20
+Owner: Parker Davis
+Active facets: work, personal
+Weather: sunny, 68F/20C, Denver CO
+
+=== Activity clusters ===
+
+09:00-12:00 (deep_work): Solstone Phase 2 implementation.
+- Merged PR #9 to fork.
+- Created branch benchmark-phase-2.
+- Wrote tasks.json catalog with presence field (foreground/background).
+- Implemented task-time estimator in think/benchmark/estimate.py.
+- Added fixture prompts for 6 task types.
+- Minimal Slack context switches (4 brief checks, all <45s).
+
+12:52-14:40 (deep_work): Continued Phase 2.
+- Wrote additional fixtures (meeting_summary, activity_clustering).
+- Extended apps/benchmark/call.py with --task flag and tasks verb.
+- Ran list-models to validate new task-time column output.
+- Note: the 2pm meeting with Kai was rescheduled, which freed a 90-minute focused block.
+
+14:40-17:00 (deep_work): Task-time measurement extension.
+- Extended harness with task-measurement mode.
+- Added unit tests for task-time estimator — 20 tests passing.
+- Ran make ci, all green.
+- Committed and pushed the Phase 2 backend.
+
+17:05-21:45 (personal): Evening wind-down.
+- Brief HN skim (12 min).
+- Dinner with partner, conversation about weekend plans (a hiking trip to Rocky Mountain NP on Saturday).
+- Movie evening.
+
+=== Key conversations (transcript highlights) ===
+
+10:12 Chat exchange with Sol:
+- Query: "can you remind me what I was working on yesterday afternoon around 2pm?"
+- Sol answered with the specific Zoom meeting context (Carelaw intake) and the subsequent editor work.
+- Follow-up: "did I ever finish documenting that change?" — unanswered in this transcript.
+
+11:52 Slack reply to Mara:
+- Re: Carelaw intake schema. Parker: "looks good, I'll have the migration ready by Thursday."
+
+Evening dinner conversation excerpt (partner, inferred from ambient audio):
+- Weekend plans for RMNP hike on Saturday. Partner asked about Sunday — Parker said "probably recovery, I don't want to plan anything."
+
+=== Muse outputs ===
+
+entities.md (generated 12:00):
+- New: "Jordan Bleeker" (Person, legal-ops, first mention in today's Q2 meeting transcript)
+- Reinforced: "Mara Chen", "Kai Ortiz", "Devika Raman", "Jess", "Carelaw Colorado", "Solstone", "Anthers"
+- Signal strength: very high for Solstone (13 mentions), high for Carelaw (9 mentions)
+
+todos.md (generated 12:00, delta):
+- Added: "Respond to Jess re: Daisy copy edits" — due 2026-04-27 (next Monday)
+- Added: "Send Kai wireframes for benchmark UI" — due 2026-04-21 (tomorrow)
+- Added: "Coordinate with Jordan on legal review for local-inference claims" — no deadline
+- Carried over: "Wire Carelaw intake field-mapping migration" — due 2026-04-23 (Thursday)
+- Carried over: "Follow up with Mara re: pricing model conversation" — no deadline
+
+activities.md (generated 17:00):
+- Today's focused-work ratio: 73% (highest this week)
+- Slack context-switch count: 7 (unusually low for a Monday)
+- One canceled meeting (Kai 2pm → Wednesday), which preserved a contiguous afternoon block.
+
+=== Open commitments as of end-of-day ===
+
+1. Wireframes to Kai — by tomorrow morning.
+2. Daisy copy reply to Jess — by next Monday.
+3. Carelaw migration — by Thursday EOD.
+4. Anthers onboarding estimate — by Thursday next week.
+5. (Phase 3 scope doc for Solstone — self-imposed, no hard deadline)
+
+=== Environment context ===
+
+- Current branch: benchmark-phase-2 (3 commits ahead of main)
+- CI status: green
+- No production incidents
+- No oncall triggers

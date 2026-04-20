@@ -1,0 +1,11 @@
+The user is searching their personal journal with the query: "when did I talk to Mara about the pricing model"
+
+Return a JSON object shaped like:
+{
+  "expanded_queries": [<2-4 alternate phrasings to also search>],
+  "facet_hint": <"work" | "personal" | null>,
+  "time_hint": <"recent" | "this_week" | "this_month" | "all" >,
+  "entity_hints": [<likely entity slugs, e.g. "mara", "acme-corp">]
+}
+
+Return only the JSON, no prose.

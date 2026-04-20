@@ -1,0 +1,43 @@
+Extract actionable todos and commitments from the following conversation. Return a JSON array where each entry has: `text` (the action, imperative form), `owner` (person responsible, or null if ambiguous), `deadline` (ISO date or null), `context` (<= 20 words). Only include things the speaker explicitly committed to or that were clearly assigned — skip general discussion, musings, or conditional "we could maybe..." items.
+
+---
+
+[00:00] Parker: Okay, end-of-week review. Let me run through the Carelaw intake work. Mara, can you confirm you're good with the field-mapping schema we agreed on Tuesday?
+
+[00:14] Mara: Yes, approved. I'll send you the final copy for the field labels by tomorrow afternoon so you can wire them in.
+
+[00:28] Parker: Great. I'll get the migration script and the dual-write layer in by Thursday EOD. Jordan from legal-ops needs to sign off before we deploy to prod, Kai said. Mara, can you coordinate that or should I?
+
+[00:46] Mara: I'll handle Jordan. I owe her a separate check-in anyway.
+
+[00:53] Parker: Perfect. Devika — billing export. You wanted the old shape preserved during transition. I've got the `intake_legacy` view updated to produce the old shape. Can you run your test suite against it before Thursday?
+
+[01:15] Devika: Yes, I'll run it Wednesday morning and flag anything weird. Also — I need you to add a `facet_source` column to the billing view for the multi-facet work we're scoping for Q3.
+
+[01:32] Parker: Noted, but that's not this sprint. Let me open a ticket for it so we don't lose it — I'll file it today.
+
+[01:44] Kai: Switching topics — Daisy portfolio. Jess sent copy edits on the 17th. Parker, you haven't responded yet. She said she's out Tuesday through Thursday, so if you want her to iterate, you need to reply by Monday.
+
+[02:02] Parker: Right, I'll respond by Monday morning. Thanks for the nudge.
+
+[02:08] Kai: Also on Daisy — the Playwright tests are flaky on the CI side. Do you want me to look at it or should I punt to whoever picks up the sprint-after-next?
+
+[02:22] Parker: Punt it. I'll add it to the backlog.
+
+[02:28] Devika: Oh, one more. The Anthers onboarding in May. We agreed to reuse the Carelaw intake pattern. I need an estimate from you by next Friday so I can include it in the onboarding plan. Even a rough one.
+
+[02:44] Parker: I'll get you a written estimate by Thursday next week. Rough order of magnitude, not fixed-scope.
+
+[02:55] Mara: And for tomorrow's check-in with Jordan, I want to propose we tighten the intake-field review cadence to weekly instead of ad-hoc. Parker, do you have a preference?
+
+[03:08] Parker: Weekly works. I'd rather it be a standing 15 minutes than ad-hoc.
+
+[03:14] Mara: Cool. I'll set that up.
+
+[03:20] Kai: Alright, that's time. Everyone good?
+
+[03:22] Devika: Good.
+
+[03:23] Mara: Good.
+
+[03:24] Parker: Good. Thanks all.

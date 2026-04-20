@@ -491,6 +491,95 @@ def get_providers() -> Any:
         ), 500
 
 
+@settings_bp.route("/api/benchmark/models")
+def get_benchmark_models() -> Any:
+    """Return pre-vetted Ollama models with task-time estimates.
+
+    Powers the Ollama tier annotations + "recommended models you don't
+    have yet" section in the providers UI.
+
+    Response shape::
+
+        {
+          "hardware": {"probed": bool, "class": str, "label": str | null,
+                       "platform": str, "ram_gb": float, "gpus": [...]},
+          "tasks": {<task_id>: {label, description, mode, presence,
+                                tier_role, ui_priority}},
+          "models": [
+            {"model_id": ..., "label": ..., "tier_hint": 1|2|3,
+             "installed": bool, "fits_in_vram": bool, "size_gb": N,
+             "capabilities": [...], "notes": ..., "vram_required_gb": N,
+             "estimate": {"tok_s": N, "confidence": str,
+                          "hardware_class": str, "source_class": str},
+             "tasks": {<task_id>: {label, seconds, confidence,
+                                   ui_priority, tier_role}}}
+          ]
+        }
+    """
+    try:
+        from think.benchmark import list_prevetted_models, load_tasks
+        from think.benchmark.estimate import load_reference
+        from think.hardware import load_hardware, probe_hardware
+    except ImportError as exc:
+        return jsonify({"error": f"benchmark module unavailable: {exc}"}), 500
+
+    hardware = load_hardware()
+    if hardware is None:
+        try:
+            hardware = probe_hardware()
+        except Exception as exc:
+            logger.warning("hardware probe failed: %s", exc)
+            hardware = None
+
+    rows = list_prevetted_models(hardware)
+
+    # Attach installed flag from Ollama /api/tags. Unreachable -> all False.
+    installed_ids = _list_installed_ollama_models()
+    for row in rows:
+        row["installed"] = row["model_id"] in installed_ids
+
+    # Resolve hardware class once for UI convenience.
+    hw_class = rows[0]["estimate"]["hardware_class"] if rows else "cpu-only"
+    ref_label = load_reference().get("classes", {}).get(hw_class, {}).get("label")
+
+    return jsonify(
+        {
+            "hardware": {
+                "probed": hardware is not None,
+                "class": hw_class,
+                "label": ref_label,
+                "platform": (hardware or {}).get("platform"),
+                "ram_gb": (hardware or {}).get("ram_gb"),
+                "gpus": (hardware or {}).get("gpus", []),
+            },
+            "tasks": load_tasks().get("tasks", {}),
+            "models": rows,
+        }
+    )
+
+
+def _list_installed_ollama_models() -> set[str]:
+    """Query Ollama /api/tags; return ollama-local/<name> ids. Empty on failure."""
+    try:
+        from think.providers.ollama import _OLLAMA_LOCAL_PREFIX, _get_client
+    except ImportError:
+        return set()
+    try:
+        client = _get_client()
+        response = client.get("/api/tags", timeout=3.0)
+        response.raise_for_status()
+        data = response.json()
+    except Exception as exc:
+        logger.debug("Ollama /api/tags unreachable: %s", exc)
+        return set()
+    installed: set[str] = set()
+    for entry in data.get("models", []) or []:
+        name = entry.get("name")
+        if name:
+            installed.add(f"{_OLLAMA_LOCAL_PREFIX}{name}")
+    return installed
+
+
 @settings_bp.route("/api/validate-keys", methods=["POST"])
 def validate_all_keys() -> Any:
     """Re-validate all configured provider API keys.
