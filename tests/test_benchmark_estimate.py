@@ -209,28 +209,59 @@ class TestListPrevettedModels:
 
 
 class TestEstimateTaskTime:
-    def test_measured_task_time(self):
-        # measured-model:1b on rtx-3090 has prompt_tok_s=1000, output_tok_s=50.
+    def test_formula_task_time_is_interpolated_even_with_measured_tok_s(self):
+        # measured-model:1b on rtx-3090 has measured tok/s but no direct
+        # task measurement. Formula-derived time => "interpolated".
         # chat_reply: 500 prompt / 200 output
         # seconds = 500/1000 + 200/50 = 0.5 + 4.0 = 4.5
         est = estimate_task_time_s(
             "ollama-local/measured-model:1b", "rtx-3090", "chat_reply"
         )
-        assert est.confidence == "measured"
+        assert est.confidence == "interpolated"
         assert est.seconds is not None
         assert abs(est.seconds - 4.5) < 0.01
+
+    def test_direct_task_measurement_yields_measured(self):
+        # Stub a direct task measurement on measured-model:1b for rtx-3090.
+        registry = {
+            "models": {
+                "ollama-local/measured-model:1b": {
+                    **FAKE_REGISTRY["models"]["ollama-local/measured-model:1b"],
+                    "benchmarks": {
+                        "rtx-3090": {
+                            "output_tok_s": 50.0,
+                            "prompt_tok_s": 1000.0,
+                            "tasks": {
+                                "chat_reply": {"seconds": 3.8},
+                            },
+                        },
+                    },
+                },
+            },
+        }
+        # Override the autouse loader for just this test.
+        original = est_mod.load_registry
+        est_mod.load_registry = lambda: registry
+        try:
+            est = estimate_task_time_s(
+                "ollama-local/measured-model:1b", "rtx-3090", "chat_reply"
+            )
+        finally:
+            est_mod.load_registry = original
+        assert est.confidence == "measured"
+        assert est.seconds == 3.8
         assert est.source_class == "rtx-3090"
 
-    def test_interpolated_task_time(self):
-        # Same model, but rtx-4090 has no measurement — interpolates from rtx-3090.
+    def test_interpolated_task_time_cross_hardware(self):
+        # rtx-4090 has no direct measurement — falls back to formula with
+        # interpolated tok/s, which is also "interpolated" confidence.
         est = estimate_task_time_s(
             "ollama-local/measured-model:1b", "rtx-4090", "chat_reply"
         )
         assert est.confidence == "interpolated"
         assert est.seconds is not None
         assert est.seconds > 0
-        # Should be FASTER than rtx-3090 since rtx-4090 has more throughput.
-        assert est.seconds < 4.5
+        assert est.seconds < 4.5  # rtx-4090 is faster than rtx-3090
 
     def test_unknown_when_model_has_no_benchmarks(self):
         est = estimate_task_time_s(
@@ -257,9 +288,10 @@ class TestEstimateTaskTime:
         # huge-vision:72b has prompt_tok_s=200, output_tok_s=30 on dgx-spark.
         # screen_frame: 200 prompt / 400 output
         # seconds = 200/200 + 400/30 = 1 + 13.33 = 14.33
+        # Formula-derived => "interpolated" even with measured tok/s.
         est = estimate_task_time_s(
             "ollama-local/huge-vision:72b", "dgx-spark", "screen_frame"
         )
-        assert est.confidence == "measured"
+        assert est.confidence == "interpolated"
         assert est.seconds is not None
         assert 13 < est.seconds < 16

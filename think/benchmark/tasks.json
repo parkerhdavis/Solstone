@@ -1,57 +1,103 @@
 {
-  "_comment": "Reference Solstone workloads used to translate raw tok/s benchmarks into practical task-time estimates. Token counts are hand-curated conservative estimates (not sampled from live traffic) and should be treated as first-order heuristics, not guarantees. Revise when measurements disagree with reality. A 'vision' task's prompt cost includes an implicit fixed-image-encoder cost captured in the model's measured prompt_tok_s (see harness.py vision mode).",
+  "_comment": "Reference Solstone workloads used to translate raw tok/s benchmarks into practical task-time estimates. Each task has a 'presence' field: 'foreground' tasks block a human (chat, voice, interactive agents) — speed is UX-critical. 'background' tasks run autonomously (muse generators, indexers, describe pipeline) — total throughput matters more than individual-task latency. prompt_tokens/output_tokens mirror the actual sizes of think/benchmark/fixtures/<task>.txt — the canonical definition of each task. They drive the formula-based fallback; direct wall-clock measurements (see harness --task) always win when present in models.json. When production workloads diverge from fixture sizes (e.g., after pulling real journal content), rewrite the fixtures and re-run the harness.",
   "tasks": {
     "chat_reply": {
       "label": "Chat reply",
       "description": "One conversational turn from the Sol chat agent.",
-      "prompt_tokens": 500,
-      "output_tokens": 200,
+      "prompt_tokens": 262,
+      "output_tokens": 150,
       "mode": "text",
+      "presence": "foreground",
       "tier_role": "cogitate",
       "ui_priority": 1
     },
-    "agent_turn": {
-      "label": "Agent turn",
-      "description": "One round of the cogitate briefing/research agent (pre-tool-call).",
-      "prompt_tokens": 3000,
-      "output_tokens": 400,
+    "voice_brain_turn": {
+      "label": "Voice reply",
+      "description": "One voice-brain conversational turn. Users tolerate much less latency than text chat.",
+      "prompt_tokens": 183,
+      "output_tokens": 80,
       "mode": "text",
+      "presence": "foreground",
       "tier_role": "cogitate",
       "ui_priority": 2
+    },
+    "search_query": {
+      "label": "Search query",
+      "description": "Journal search result synthesis / query rewriting.",
+      "prompt_tokens": 144,
+      "output_tokens": 120,
+      "mode": "text",
+      "presence": "foreground",
+      "tier_role": "generate",
+      "ui_priority": 3
+    },
+    "agent_turn": {
+      "label": "Agent turn",
+      "description": "One round of the cogitate briefing / research agent (pre-tool-call).",
+      "prompt_tokens": 714,
+      "output_tokens": 400,
+      "mode": "text",
+      "presence": "foreground",
+      "tier_role": "cogitate",
+      "ui_priority": 4
     },
     "entity_extraction": {
       "label": "Entity extraction",
       "description": "Extract entities from one ~5-minute segment transcript.",
-      "prompt_tokens": 2500,
+      "prompt_tokens": 779,
       "output_tokens": 700,
       "mode": "text",
+      "presence": "background",
       "tier_role": "generate",
       "ui_priority": 1
+    },
+    "todo_extraction": {
+      "label": "Todo extraction",
+      "description": "Extract actionable todos and commitments from a segment transcript.",
+      "prompt_tokens": 814,
+      "output_tokens": 320,
+      "mode": "text",
+      "presence": "background",
+      "tier_role": "generate",
+      "ui_priority": 2
     },
     "meeting_summary": {
       "label": "Meeting summary",
       "description": "Synthesize a single meeting narrative from its transcript.",
-      "prompt_tokens": 4000,
-      "output_tokens": 500,
+      "prompt_tokens": 1209,
+      "output_tokens": 450,
       "mode": "text",
+      "presence": "background",
       "tier_role": "generate",
-      "ui_priority": 2
+      "ui_priority": 3
+    },
+    "activity_clustering": {
+      "label": "Activity clustering",
+      "description": "Cluster observed events into higher-level activity narratives for the day.",
+      "prompt_tokens": 921,
+      "output_tokens": 750,
+      "mode": "text",
+      "presence": "background",
+      "tier_role": "generate",
+      "ui_priority": 4
     },
     "daily_insight": {
       "label": "Daily insights",
       "description": "Aggregate the day's events, transcripts, and muse outputs into a daily narrative.",
-      "prompt_tokens": 8000,
-      "output_tokens": 1500,
+      "prompt_tokens": 1115,
+      "output_tokens": 450,
       "mode": "text",
+      "presence": "background",
       "tier_role": "generate",
-      "ui_priority": 3
+      "ui_priority": 5
     },
     "screen_frame": {
       "label": "Screen frame",
       "description": "Describe one screen-recording frame (vision pipeline).",
-      "prompt_tokens": 200,
-      "output_tokens": 400,
+      "prompt_tokens": 442,
+      "output_tokens": 150,
       "mode": "vision",
+      "presence": "background",
       "tier_role": "vision",
       "ui_priority": 1
     }

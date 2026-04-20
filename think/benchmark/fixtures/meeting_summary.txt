@@ -1,0 +1,59 @@
+Summarize this meeting transcript. Produce a JSON object with: `title` (<= 10 words), `summary` (2-3 sentences, plain prose), `decisions` (array of strings, each <= 25 words), `action_items` (array of {text, owner}), and `risks` (array of strings, each <= 25 words). The summary should capture what the meeting *achieved*, not just what was discussed.
+
+---
+
+Meeting: Solstone Q2 Planning
+Date: 2026-04-20
+Attendees: Parker Davis, Mara Chen (PM), Kai Ortiz (design), Devika Raman (infra), Jordan Bleeker (legal-ops)
+
+[00:00] Mara: Okay, Q2 is shaping up around three things: Carelaw intake stabilization, Anthers onboarding, and the Solstone local-inference milestone. Parker, give us a read on the local-inference work.
+
+[00:18] Parker: Phase 1 — hardware probe and benchmark registry — is merged. I'm in Phase 2 now, which is the UI for picking models and translating the raw benchmarks into task-time estimates that users actually understand. After that, Phase 3 is actually wiring the local provider into production tier resolution. That's the bigger lift.
+
+[00:45] Kai: On the UI piece, have we decided what goes in the tier dropdowns? Last time this came up it was either a text blurb or a full expandable panel.
+
+[00:58] Parker: Collapsed-by-default panel, raw tok/s always visible as the primary number, task breakdown on expand. I'd rather err on the side of progressive disclosure.
+
+[01:14] Devika: Infrastructure question — if users start running big local models, that's a GPU utilization pattern we haven't profiled at all. Do we have any numbers on what happens if a Qwen 72B is resident while someone also tries to transcribe live audio through Whisper?
+
+[01:34] Parker: No. That's a genuinely open question. My guess is it'll work on Spark-class hardware because the memory is huge enough that both models can coexist, but on a 24GB consumer GPU we'd probably have to evict one to run the other.
+
+[01:52] Devika: We should measure it. I'll set aside a day next week to profile concurrent workloads — transcribe + generate + vision — on both the Spark and the RTX 4090 test rig.
+
+[02:10] Mara: Good. Jordan, anything from the legal side that should feed into Q2 planning?
+
+[02:18] Jordan: Two things. One — the local-inference work has implications for our privacy posture, because users can now process their full journal entirely on-device. That's a marketing angle I want us to handle deliberately. I'll draft copy for the positioning by next Friday. Two — the Carelaw intake work. I've reviewed the new schema. It's fine. Mara's weekly cadence proposal for field changes — I support it.
+
+[02:48] Mara: Great. Kai, design capacity for Q2?
+
+[02:54] Kai: Tight. Daisy portfolio polish is eating maybe 30% of my time through end of April. If we're adding a benchmark UI, I need to start sketches this week or it'll slip into May.
+
+[03:10] Parker: I can send you wireframes tomorrow morning. Just the two screens — the settings page annotations and the "recommended models" section.
+
+[03:22] Kai: Works.
+
+[03:26] Mara: Anthers onboarding — Devika, where are we?
+
+[03:30] Devika: Pending the Carelaw cutover. Once that lands, I can fork the intake pattern for Anthers. Probably a two-week effort.
+
+[03:42] Mara: Good. Okay, risks for the quarter. Two I'm seeing: one, the Carelaw cutover has the tightest deadline and any slip cascades. Two, local-inference adoption depends on hardware the user has — we can't promise performance without the benchmark surface working end-to-end.
+
+[04:10] Parker: Agreed on both. For local-inference, the benchmark work is specifically mitigating risk two — it's why I'm building it.
+
+[04:18] Mara: Anything else?
+
+[04:22] Jordan: One more thing. Any user-visible claim about performance of local models has to go through me before it ships. Especially anything like "your Qwen 9B runs at N tokens per second." I don't want us accidentally making representations we can't back up across the hardware spectrum.
+
+[04:38] Parker: Understood. The UI will say "measured" vs "estimated" vs "unknown" explicitly, and anything interpolated will be labeled as such.
+
+[04:48] Jordan: Good.
+
+[04:50] Mara: Alright, we're at time. Parker, wireframes to Kai by tomorrow. Devika, concurrent-workload profiling next week. Jordan, privacy positioning copy by next Friday. I'll send the notes out. Thanks all.
+
+[05:05] Kai: Thanks.
+
+[05:06] Parker: Thanks.
+
+[05:07] Devika: Thanks.
+
+[05:08] Jordan: Thanks.

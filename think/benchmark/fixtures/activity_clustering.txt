@@ -1,0 +1,52 @@
+Cluster the following day's observed events into higher-level activity narratives. Return JSON: an array where each entry is {title, start, end, category, summary, participants}. Category must be one of: meeting, deep_work, admin, personal, transit, break. Skip events shorter than 5 minutes unless they clearly bracket a distinct activity. Merge consecutive events of the same type into one narrative when they're about the same thing.
+
+---
+
+Observed events — 2026-04-20 (America/Denver)
+
+08:45 Mac wake. Terminal, Safari (calendar.internal), Slack opened.
+08:47 Slack — read 14 messages in #eng-coffee, #carelaw-intake, #eng-platform.
+08:53 Safari active — reviewed calendar for the day.
+09:01 Safari → GitHub. Viewed PR #9 (Solstone benchmark Phase 1).
+09:04 Merged PR #9 to fork main.
+09:12 Terminal — `git checkout -b benchmark-phase-2` in /home/parker/Solstone.
+09:15 Editor (VS Code) — opened think/benchmark/tasks.json, think/benchmark/estimate.py.
+09:22 Deep-work mode. Typing heavy, context switching minimal.
+09:47 Brief Slack check (45 seconds) — no response required.
+09:49 Back to editor.
+10:12 Typed a message to Sol: "can you remind me what I was working on yesterday afternoon around 2pm?"
+10:13 Sol responded, brief exchange.
+10:18 Back to editor, different file now (apps/benchmark/call.py).
+10:44 Another Slack check — replied to Devika re: billing export.
+10:48 Back to editor.
+11:00 Coffee break. Mac idle.
+11:12 Mac active again. Editor. Focused work.
+11:30 GitHub — opened PR #9 page to confirm merge (already merged).
+11:34 Editor — new file: think/benchmark/fixtures/chat_reply.txt.
+11:52 Brief Slack reply — 20 seconds, to Mara.
+11:54 Editor.
+12:05 Kitchen noise pickup via microphone — likely lunch prep.
+12:08 Mac idle (lunch).
+12:52 Mac active again.
+12:55 Calendar — reviewed 2pm slot.
+12:57 Editor — resumed work on fixtures.
+13:22 Brief reading break — Safari, a technical blog post (rendered-page hints: "attention mechanisms").
+13:30 Back to editor.
+13:45 Opened a new terminal window. Ran `.venv/bin/python -m sol call benchmark list-models`.
+13:48 Editor — tweaking estimate.py.
+14:00 Scheduled meeting start time — but calendar shows "canceled / moved".
+14:03 Kai's Slack: "rescheduled to Wednesday, see invite".
+14:05 Back to editor.
+14:40 Long focused-work stretch begins — 90 minutes without Slack/Safari context switches.
+16:10 Standing break. Mac active but away from keyboard (ambient audio: walking, tap water).
+16:18 Back at desk.
+16:20 Editor — extended fixtures, added task-time estimator tests.
+16:55 Ran `make ci`, passed.
+17:00 Committed, pushed branch.
+17:05 End of workday shift. Switched facet to "personal".
+17:07 Safari → news.ycombinator.com, 12 minutes skimming.
+17:20 Kitchen audio — dinner prep.
+17:45 Audio + ambient conversation with partner about weekend plans.
+18:30 Mac wake for 2 minutes — checked one thing on phone calendar mirror. Did not engage.
+19:15 Living room TV audio — movie.
+21:45 Brief Mac wake — closed laptop, end of day.

@@ -139,6 +139,9 @@ class TestEstimate:
         payload = json.loads(result.output)
         assert payload["task_id"] == "chat_reply"
         assert payload["seconds"] is not None
+        # dgx-spark has direct task measurements seeded in models.json
+        # so this should resolve to "measured" (ground truth). If that
+        # ever regresses to a formula path, confidence would drop.
         assert payload["confidence"] == "measured"
 
     def test_task_time_rejects_unknown_task(self, journal_override):

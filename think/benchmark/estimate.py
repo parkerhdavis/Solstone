@@ -219,11 +219,17 @@ def estimate_task_time_s(
 ) -> TaskEstimate:
     """Estimate wall-clock seconds for ``task_id`` on this model+hardware.
 
-    Combines prompt-eval time (``prompt_tokens / prompt_tok_s``) with
-    generation time (``output_tokens / output_tok_s``). Confidence is
-    the weaker of the two underlying tok/s estimates. Returns
-    ``seconds=None`` with ``confidence="unknown"`` when either side
-    can't be estimated.
+    Resolution order:
+
+    1. **Measured** — if a direct wall-clock measurement exists at
+       ``models.json -> models[model].benchmarks[hw_class].tasks[task].seconds``,
+       return it. This is the ground-truth source (see
+       ``harness.py --task``).
+    2. **Interpolated** — use ``prompt_tokens / prompt_tok_s +
+       output_tokens / output_tok_s`` with the estimator's fallback
+       interpolation across hardware classes. Confidence is the weaker
+       of the two underlying tok/s estimates.
+    3. **Unknown** — either side can't be estimated.
     """
     tasks = load_tasks().get("tasks", {})
     task = tasks.get(task_id)
@@ -236,6 +242,22 @@ def estimate_task_time_s(
             confidence="unknown",
             source_class=None,
         )
+
+    registry = load_registry()
+    model = registry.get("models", {}).get(model_id)
+    if model is not None:
+        bench = (model.get("benchmarks") or {}).get(hardware_class) or {}
+        measured = (bench.get("tasks") or {}).get(task_id) or {}
+        direct_seconds = measured.get("seconds")
+        if isinstance(direct_seconds, (int, float)):
+            return TaskEstimate(
+                model_id=model_id,
+                task_id=task_id,
+                hardware_class=hardware_class,
+                seconds=float(direct_seconds),
+                confidence="measured",
+                source_class=hardware_class,
+            )
 
     prompt_tokens = float(task.get("prompt_tokens") or 0)
     output_tokens = float(task.get("output_tokens") or 0)
@@ -260,17 +282,12 @@ def estimate_task_time_s(
 
     seconds = (prompt_tokens / prompt_est.tok_s) + (output_tokens / output_est.tok_s)
 
-    # Confidence is the weaker of the two underlying estimates:
-    # measured > interpolated > unknown.
+    # Formula-derived task times are always "interpolated" at best —
+    # "measured" is reserved for direct task-time measurements (handled
+    # earlier via the benchmarks[hw].tasks[task].seconds path).
     rank = {"measured": 2, "interpolated": 1, "unknown": 0}
     combined_rank = min(rank[prompt_est.confidence], rank[output_est.confidence])
-    combined_conf: Confidence = (
-        "measured"
-        if combined_rank == 2
-        else "interpolated"
-        if combined_rank == 1
-        else "unknown"
-    )
+    combined_conf: Confidence = "interpolated" if combined_rank >= 1 else "unknown"
 
     # When either leg was interpolated, the source class is the one
     # that was actually interpolated from (prefer output since it's the
