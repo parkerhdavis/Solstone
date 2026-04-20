@@ -1968,6 +1968,11 @@ button:focus:not(:focus-visible) {
 .ollama-details.open .ollama-details-content { display: block; }
 .ollama-details.open .ollama-details-toggle::after { content: " ▴"; }
 .ollama-details:not(.open) .ollama-details-toggle::after { content: " ▾"; }
+.ollama-toggle-label {
+  font-size: 0.78em;
+  color: var(--settings-muted, #888);
+  margin-left: 0.6em;
+}
 .ollama-task-group-title {
   font-size: 0.82em;
   text-transform: uppercase;
@@ -6358,6 +6363,7 @@ function renderDetailsPanel(model, requiredCap, tasksCatalog) {
       <span>
         <span class="ollama-speed">${escapeHtml(tokS)}</span>
         <span class="ollama-confidence ${confClass}">${escapeHtml(est.confidence || 'unknown')}</span>
+        <span class="ollama-toggle-label">Benchmarking:</span>
         <span class="ollama-details-toggle"></span>
       </span>
     </div>
