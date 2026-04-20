@@ -61,7 +61,7 @@ ENDPOINTS = [
     {
         "app": "sol",
         "name": "preview",
-        "path": "/app/sol/api/preview/unified",
+        "path": "/app/sol/api/preview/chat",
         "params": {},
         "status": 200,
     },
@@ -86,6 +86,28 @@ ENDPOINTS = [
         "params": {},
         "status": 200,
         "sandbox_only": True,  # live indexer computes differently than Flask test client
+    },
+    # convey/chat.py
+    {
+        "app": "chat",
+        "name": "session",
+        "path": "/api/chat/session",
+        "params": {},
+        "status": 200,
+    },
+    {
+        "app": "chat",
+        "name": "stream",
+        "path": "/api/chat/stream/20260304",
+        "params": {"limit": "20"},
+        "status": 200,
+    },
+    {
+        "app": "chat",
+        "name": "result",
+        "path": "/api/chat/result/1700000000001",
+        "params": {},
+        "status": 404,
     },
     # apps/activities/routes.py
     {
@@ -196,6 +218,7 @@ ENDPOINTS = [
         "path": "/app/search/api/search",
         "params": {"q": "romeo", "limit": "5", "offset": "0"},
         "status": 200,
+        "sandbox_only": True,
     },
     {
         "app": "search",
@@ -203,6 +226,7 @@ ENDPOINTS = [
         "path": "/app/search/api/day_results",
         "params": {"q": "meeting", "day": "20260304", "offset": "0", "limit": "5"},
         "status": 200,
+        "sandbox_only": True,
     },
     # apps/settings/routes.py
     {
@@ -385,6 +409,7 @@ ENDPOINTS = [
         "path": "/app/graph/api/graph",
         "params": {},
         "status": 200,
+        "sandbox_only": True,
     },
 ]
 
@@ -574,11 +599,18 @@ def verify_all(client: Any, journal_path: str) -> list[str]:
     return failures
 
 
-def update_all(client: Any, journal_path: str) -> int:
+def update_all(
+    client: Any,
+    journal_path: str,
+    *,
+    include_sandbox_only: bool,
+) -> int:
     """Refresh all endpoint baselines from current responses."""
 
     updated = 0
     for endpoint in ENDPOINTS:
+        if endpoint.get("sandbox_only") and not include_sandbox_only:
+            continue
         identifier = f"{endpoint['app']}/{endpoint['name']}"
         path = baseline_path(endpoint)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -695,7 +727,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"API baseline verification passed for {len(ENDPOINTS)} endpoints.")
             return 0
 
-        updated = update_all(client, journal_path)
+        updated = update_all(
+            client,
+            journal_path,
+            include_sandbox_only=bool(args.base_url),
+        )
         print(f"Updated {updated} baseline files.")
         return 0
 

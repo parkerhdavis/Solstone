@@ -70,7 +70,7 @@ def app_with_agent(tmp_path, monkeypatch):
 
 def test_resolve_agent_path_system_agent():
     """Test _resolve_talent_path returns correct path for system agents."""
-    agent_dir, agent_name = _resolve_talent_path("unified")
+    agent_dir, agent_name = _resolve_talent_path("chat")
 
     assert agent_name == "chat"
     assert agent_dir.name == "talent"
@@ -96,9 +96,9 @@ def test_resolve_agent_path_app_agent_with_underscores():
 
 def test_get_agent_system_agent(fixture_journal):
     """Test get_talent loads system agents correctly."""
-    config = get_talent("unified")
+    config = get_talent("chat")
 
-    assert config["name"] == "unified"
+    assert config["name"] == "chat"
     assert "user_instruction" in config
     assert len(config["user_instruction"]) > 0
 
@@ -109,6 +109,12 @@ def test_get_agent_nonexistent_raises():
         get_talent("nonexistent_agent_xyz")
 
     assert "nonexistent_agent_xyz" in str(exc_info.value)
+
+
+def test_get_agent_legacy_alias_raises():
+    """The legacy chat alias is removed in the chat backend cutover."""
+    with pytest.raises(FileNotFoundError):
+        get_talent("uni" + "fied")
 
 
 def test_get_agent_nonexistent_app_agent_raises():
@@ -124,10 +130,10 @@ def test_get_talent_configs_includes_system_agents(fixture_journal):
     agents = get_talent_configs(type="cogitate")
 
     # Should include known system agents with frontmatter metadata
-    assert "chat" in agents
-    assert agents["chat"]["source"] == "system"
-    assert "title" in agents["chat"]
-    assert "path" in agents["chat"]
+    assert "exec" in agents
+    assert agents["exec"]["source"] == "system"
+    assert "title" in agents["exec"]
+    assert "path" in agents["exec"]
 
 
 def test_get_talent_configs_system_agents_have_metadata(fixture_journal):
@@ -135,11 +141,22 @@ def test_get_talent_configs_system_agents_have_metadata(fixture_journal):
     agents = get_talent_configs(type="cogitate")
 
     # Check a known system agent
-    chat = agents.get("chat")
-    assert chat is not None
-    assert chat["source"] == "system"
-    assert "title" in chat
-    assert "color" in chat
+    exec_talent = agents.get("exec")
+    assert exec_talent is not None
+    assert exec_talent["source"] == "system"
+    assert "title" in exec_talent
+    assert "color" in exec_talent
+
+
+def test_digest_talent_discovery_and_schedule_exclusion(fixture_journal):
+    agents = get_talent_configs(type="cogitate")
+
+    assert "digest" in agents
+    assert agents["digest"]["tier"] == 3
+    assert agents["digest"]["schedule"] == "none"
+
+    for schedule in ("daily", "segment", "activity", "weekly"):
+        assert "digest" not in get_talent_configs(type="cogitate", schedule=schedule)
 
 
 def test_get_talent_configs_excludes_private_apps(
@@ -194,7 +211,7 @@ class TestResolveOutputPath:
         """Without output_path, derives from day/name/segment fields."""
         event = {
             "day": "20260214",
-            "name": "unified",
+            "name": "chat",
             "segment": "100",
             "facet": "health",
         }
@@ -205,13 +222,13 @@ class TestResolveOutputPath:
 
     def test_returns_none_without_day_or_output_path(self):
         """Returns None when neither output_path nor day is present."""
-        event = {"name": "unified"}
+        event = {"name": "chat"}
         result = _resolve_output_path(event, "/journal")
         assert result is None
 
     def test_empty_output_path_falls_through(self, fixture_journal):
         """Empty string output_path falls through to derivation."""
-        event = {"output_path": "", "day": "20260214", "name": "unified"}
+        event = {"output_path": "", "day": "20260214", "name": "chat"}
         result = _resolve_output_path(event, "tests/fixtures/journal")
         # Empty string is falsy, so falls through to derivation
         assert result is not None
@@ -220,7 +237,7 @@ class TestResolveOutputPath:
         """SOL_STREAM from env is passed through to get_output_path."""
         event = {
             "day": "20260214",
-            "name": "unified",
+            "name": "chat",
             "env": {"SOL_STREAM": "mystream"},
         }
         result = _resolve_output_path(event, "tests/fixtures/journal")
@@ -231,7 +248,7 @@ class TestResolveOutputPath:
         event = {
             "output_path": "/custom/path/output.md",
             "day": "20260214",
-            "name": "unified",
+            "name": "chat",
             "segment": "100",
         }
         result = _resolve_output_path(event, "/journal")

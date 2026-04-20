@@ -211,7 +211,7 @@ class CortexService:
                 return
 
         # Create _active.jsonl file (exclusive creation to prevent race conditions)
-        name = request.get("name", "unified")
+        name = request["name"]
         safe_name = name.replace(":", "--")
         talent_subdir = self.talents_dir / safe_name
         talent_subdir.mkdir(parents=True, exist_ok=True)
@@ -293,7 +293,7 @@ class CortexService:
             if process_type == "talent":
                 from think.talent import get_talent
 
-                talent_key = str(config.get("name", "unified"))
+                talent_key = str(config["name"])
                 talent_config = get_talent(talent_key)
                 if talent_config.get("type") == "cogitate":
                     # Resolve here because prepare_config() runs inside think.talents.
@@ -417,18 +417,6 @@ class CortexService:
                             _req = self.use_requests.get(agent.use_id)
                         if _req and "name" not in event:
                             event["name"] = _req.get("name", "")
-                        # Inject display mode for triage talent finish events
-                        if event.get("event") == "finish" and _req:
-                            try:
-                                from apps.home.events import TRIAGE_AGENT_NAMES
-                                from convey.triage import compute_display_mode
-
-                                if _req.get("name", "") in TRIAGE_AGENT_NAMES:
-                                    event["display"] = compute_display_mode(
-                                        event.get("result", "")
-                                    )
-                            except Exception:
-                                pass  # Display is cosmetic; don't break finish handling
 
                         # Append to JSONL file
                         with open(agent.log_path, "a") as f:
@@ -692,7 +680,7 @@ class CortexService:
 
             summary = {
                 "use_id": use_id,
-                "name": request.get("name", "unified"),
+                "name": request["name"],
                 "day": day,
                 "facet": request.get("facet"),
                 "ts": start_ts,

@@ -340,7 +340,7 @@ def _resolve_talent_path(name: str) -> tuple[Path, str]:
     Parameters
     ----------
     name:
-        Talent name - either system talent (e.g., "unified") or
+        Talent name - either system talent (e.g., "chat") or
         app-namespaced talent (e.g., "support:support").
 
     Returns
@@ -352,10 +352,6 @@ def _resolve_talent_path(name: str) -> tuple[Path, str]:
         # App talent: "support:support" -> apps/support/talent/support
         app, talent_name = name.split(":", 1)
         talent_dir = Path(__file__).parent.parent / "apps" / app / "talent"
-    elif name == "unified":
-        # Chat talent: "unified" -> talent/chat
-        talent_dir = TALENT_DIR
-        talent_name = "chat"
     else:
         # System talent: bare name -> talent/{name}
         talent_dir = TALENT_DIR
@@ -498,7 +494,7 @@ def _load_talent_schema(
 
 
 def get_talent(
-    name: str = "unified",
+    name: str = "chat",
     facet: str | None = None,
     analysis_day: str | None = None,
 ) -> dict:
@@ -511,7 +507,7 @@ def get_talent(
     Parameters
     ----------
     name:
-        Talent name to load. Can be a system talent (e.g., "unified")
+        Talent name to load. Can be a system talent (e.g., "chat")
         or an app-namespaced talent (e.g., "support:support" for apps/support/talent/support).
     facet:
         Optional facet name to focus on. Controls $facets template variable.
