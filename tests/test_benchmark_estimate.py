@@ -10,6 +10,7 @@ import pytest
 from think.benchmark import estimate as est_mod
 from think.benchmark.estimate import (
     estimate_output_tok_s,
+    estimate_task_time_s,
     list_prevetted_models,
     resolve_hardware_class,
 )
@@ -83,11 +84,34 @@ FAKE_REGISTRY = {
 }
 
 
+FAKE_TASKS = {
+    "tasks": {
+        "chat_reply": {
+            "label": "Chat reply",
+            "prompt_tokens": 500,
+            "output_tokens": 200,
+            "mode": "text",
+            "tier_role": "cogitate",
+            "ui_priority": 1,
+        },
+        "screen_frame": {
+            "label": "Screen frame",
+            "prompt_tokens": 200,
+            "output_tokens": 400,
+            "mode": "vision",
+            "tier_role": "vision",
+            "ui_priority": 1,
+        },
+    },
+}
+
+
 @pytest.fixture(autouse=True)
 def patch_loaders(monkeypatch):
     """Replace the cached loaders with fixtures for every test."""
     monkeypatch.setattr(est_mod, "load_reference", lambda: FAKE_REFERENCE)
     monkeypatch.setattr(est_mod, "load_registry", lambda: FAKE_REGISTRY)
+    monkeypatch.setattr(est_mod, "load_tasks", lambda: FAKE_TASKS)
 
 
 class TestResolveHardwareClass:
@@ -166,3 +190,76 @@ class TestListPrevettedModels:
         for row in rows:
             assert row["estimate"]["hardware_class"] == "cpu-only"
             assert row["estimate"]["confidence"] == "unknown"
+
+    def test_attaches_task_times_by_capability(self):
+        hardware = {"gpus": [{"name": "NVIDIA GeForce RTX 3090", "vram_gb": 24}]}
+        rows = list_prevetted_models(hardware)
+        by_id = {row["model_id"]: row for row in rows}
+
+        # Text-capable model: gets chat_reply but not screen_frame (vision-only)
+        measured = by_id["ollama-local/measured-model:1b"]
+        assert "chat_reply" in measured["tasks"]
+        assert "screen_frame" not in measured["tasks"]
+        assert measured["tasks"]["chat_reply"]["seconds"] is not None
+
+        # Vision-only model: gets screen_frame but not chat_reply (text task)
+        vision = by_id["ollama-local/huge-vision:72b"]
+        assert "chat_reply" not in vision["tasks"]
+        assert "screen_frame" in vision["tasks"]
+
+
+class TestEstimateTaskTime:
+    def test_measured_task_time(self):
+        # measured-model:1b on rtx-3090 has prompt_tok_s=1000, output_tok_s=50.
+        # chat_reply: 500 prompt / 200 output
+        # seconds = 500/1000 + 200/50 = 0.5 + 4.0 = 4.5
+        est = estimate_task_time_s(
+            "ollama-local/measured-model:1b", "rtx-3090", "chat_reply"
+        )
+        assert est.confidence == "measured"
+        assert est.seconds is not None
+        assert abs(est.seconds - 4.5) < 0.01
+        assert est.source_class == "rtx-3090"
+
+    def test_interpolated_task_time(self):
+        # Same model, but rtx-4090 has no measurement — interpolates from rtx-3090.
+        est = estimate_task_time_s(
+            "ollama-local/measured-model:1b", "rtx-4090", "chat_reply"
+        )
+        assert est.confidence == "interpolated"
+        assert est.seconds is not None
+        assert est.seconds > 0
+        # Should be FASTER than rtx-3090 since rtx-4090 has more throughput.
+        assert est.seconds < 4.5
+
+    def test_unknown_when_model_has_no_benchmarks(self):
+        est = estimate_task_time_s(
+            "ollama-local/unmeasured:9b", "rtx-4090", "chat_reply"
+        )
+        assert est.confidence == "unknown"
+        assert est.seconds is None
+
+    def test_unknown_for_missing_task(self):
+        est = estimate_task_time_s(
+            "ollama-local/measured-model:1b", "rtx-3090", "no_such_task"
+        )
+        assert est.confidence == "unknown"
+        assert est.seconds is None
+
+    def test_unknown_for_missing_model(self):
+        est = estimate_task_time_s(
+            "ollama-local/not-in-registry:1b", "rtx-3090", "chat_reply"
+        )
+        assert est.confidence == "unknown"
+        assert est.seconds is None
+
+    def test_vision_task_uses_vision_prompt_tok_s(self):
+        # huge-vision:72b has prompt_tok_s=200, output_tok_s=30 on dgx-spark.
+        # screen_frame: 200 prompt / 400 output
+        # seconds = 200/200 + 400/30 = 1 + 13.33 = 14.33
+        est = estimate_task_time_s(
+            "ollama-local/huge-vision:72b", "dgx-spark", "screen_frame"
+        )
+        assert est.confidence == "measured"
+        assert est.seconds is not None
+        assert 13 < est.seconds < 16

@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 _DATA_DIR = Path(__file__).parent
 _REFERENCE_FILE = _DATA_DIR / "reference.json"
 _REGISTRY_FILE = _DATA_DIR / "models.json"
+_TASKS_FILE = _DATA_DIR / "tasks.json"
 
 
 Confidence = Literal["measured", "interpolated", "unknown"]
@@ -37,6 +38,18 @@ class Estimate:
     model_id: str
     hardware_class: str
     tok_s: float | None
+    confidence: Confidence
+    source_class: str | None
+
+
+@dataclass(frozen=True)
+class TaskEstimate:
+    """Wall-clock time estimate for a specific task on a specific model."""
+
+    model_id: str
+    task_id: str
+    hardware_class: str
+    seconds: float | None
     confidence: Confidence
     source_class: str | None
 
@@ -56,6 +69,12 @@ def load_reference() -> dict[str, Any]:
 def load_registry() -> dict[str, Any]:
     """Load ``models.json`` (cached)."""
     return json.loads(_REGISTRY_FILE.read_text())
+
+
+@lru_cache(maxsize=1)
+def load_tasks() -> dict[str, Any]:
+    """Load ``tasks.json`` (cached)."""
+    return json.loads(_TASKS_FILE.read_text())
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +126,15 @@ def _class_throughput(class_key: str) -> float:
 
 def estimate_output_tok_s(model_id: str, hardware_class: str) -> Estimate:
     """Estimate output tok/s for ``model_id`` on ``hardware_class``."""
+    return _estimate_metric_tok_s(model_id, hardware_class, "output_tok_s")
+
+
+def _estimate_metric_tok_s(model_id: str, hardware_class: str, metric: str) -> Estimate:
+    """Generic tok/s estimate for any metric in a model's benchmark entry.
+
+    Used for both ``output_tok_s`` (generation speed) and ``prompt_tok_s``
+    (prompt-eval speed, which captures image-encoder cost in vision mode).
+    """
     registry = load_registry()
     model = registry.get("models", {}).get(model_id)
     if model is None:
@@ -121,7 +149,7 @@ def estimate_output_tok_s(model_id: str, hardware_class: str) -> Estimate:
     benchmarks: dict[str, dict[str, Any]] = model.get("benchmarks", {}) or {}
 
     if hardware_class in benchmarks:
-        tok_s = benchmarks[hardware_class].get("output_tok_s")
+        tok_s = benchmarks[hardware_class].get(metric)
         if isinstance(tok_s, (int, float)):
             return Estimate(
                 model_id=model_id,
@@ -154,7 +182,7 @@ def estimate_output_tok_s(model_id: str, hardware_class: str) -> Estimate:
     best_source_throughput: float = 0.0
     best_distance: float = float("inf")
     for source_class, bench in benchmarks.items():
-        tok_s = bench.get("output_tok_s")
+        tok_s = bench.get(metric)
         if not isinstance(tok_s, (int, float)):
             continue
         source_throughput = _class_throughput(source_class)
@@ -175,7 +203,7 @@ def estimate_output_tok_s(model_id: str, hardware_class: str) -> Estimate:
             source_class=None,
         )
 
-    source_tok_s = float(benchmarks[best_source]["output_tok_s"])
+    source_tok_s = float(benchmarks[best_source][metric])
     scaled = source_tok_s * (target / best_source_throughput)
     return Estimate(
         model_id=model_id,
@@ -186,31 +214,129 @@ def estimate_output_tok_s(model_id: str, hardware_class: str) -> Estimate:
     )
 
 
+def estimate_task_time_s(
+    model_id: str, hardware_class: str, task_id: str
+) -> TaskEstimate:
+    """Estimate wall-clock seconds for ``task_id`` on this model+hardware.
+
+    Combines prompt-eval time (``prompt_tokens / prompt_tok_s``) with
+    generation time (``output_tokens / output_tok_s``). Confidence is
+    the weaker of the two underlying tok/s estimates. Returns
+    ``seconds=None`` with ``confidence="unknown"`` when either side
+    can't be estimated.
+    """
+    tasks = load_tasks().get("tasks", {})
+    task = tasks.get(task_id)
+    if task is None:
+        return TaskEstimate(
+            model_id=model_id,
+            task_id=task_id,
+            hardware_class=hardware_class,
+            seconds=None,
+            confidence="unknown",
+            source_class=None,
+        )
+
+    prompt_tokens = float(task.get("prompt_tokens") or 0)
+    output_tokens = float(task.get("output_tokens") or 0)
+
+    prompt_est = _estimate_metric_tok_s(model_id, hardware_class, "prompt_tok_s")
+    output_est = _estimate_metric_tok_s(model_id, hardware_class, "output_tok_s")
+
+    if (
+        prompt_est.tok_s is None
+        or output_est.tok_s is None
+        or prompt_est.tok_s <= 0
+        or output_est.tok_s <= 0
+    ):
+        return TaskEstimate(
+            model_id=model_id,
+            task_id=task_id,
+            hardware_class=hardware_class,
+            seconds=None,
+            confidence="unknown",
+            source_class=None,
+        )
+
+    seconds = (prompt_tokens / prompt_est.tok_s) + (output_tokens / output_est.tok_s)
+
+    # Confidence is the weaker of the two underlying estimates:
+    # measured > interpolated > unknown.
+    rank = {"measured": 2, "interpolated": 1, "unknown": 0}
+    combined_rank = min(rank[prompt_est.confidence], rank[output_est.confidence])
+    combined_conf: Confidence = (
+        "measured"
+        if combined_rank == 2
+        else "interpolated"
+        if combined_rank == 1
+        else "unknown"
+    )
+
+    # When either leg was interpolated, the source class is the one
+    # that was actually interpolated from (prefer output since it's the
+    # longer leg usually).
+    source_class = (
+        output_est.source_class
+        if output_est.confidence == "interpolated"
+        else prompt_est.source_class
+    )
+
+    return TaskEstimate(
+        model_id=model_id,
+        task_id=task_id,
+        hardware_class=hardware_class,
+        seconds=round(seconds, 2),
+        confidence=combined_conf,
+        source_class=source_class,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Registry listing
 # ---------------------------------------------------------------------------
 
 
 def list_prevetted_models(hardware: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """Return each pre-vetted model with an estimate + VRAM fit flag.
+    """Return each pre-vetted model with estimates + VRAM fit flag.
+
+    Each row carries the raw ``estimate`` (output tok/s) plus a
+    ``tasks`` dict mapping task_id → task-time estimate (see
+    ``estimate_task_time_s``). Only tasks whose mode matches a
+    capability of the model are attached.
 
     ``hardware`` is the cached probe from ``think.hardware.load_hardware()``;
     pass ``None`` for a hardware-agnostic listing (estimates all unknown).
     """
     hardware_class, user_vram_gb = _user_hardware(hardware)
     registry = load_registry()
+    tasks = load_tasks().get("tasks", {})
     rows: list[dict[str, Any]] = []
 
     for model_id, spec in registry.get("models", {}).items():
         vram_required = float(spec.get("vram_required_gb") or 0)
         estimate = estimate_output_tok_s(model_id, hardware_class)
+
+        capabilities = spec.get("capabilities", []) or []
+        task_rows: dict[str, dict[str, Any]] = {}
+        for task_id, task_spec in tasks.items():
+            if not _task_applies_to_model(task_spec, capabilities):
+                continue
+            task_est = estimate_task_time_s(model_id, hardware_class, task_id)
+            task_rows[task_id] = {
+                "label": task_spec.get("label"),
+                "seconds": task_est.seconds,
+                "confidence": task_est.confidence,
+                "ui_priority": task_spec.get("ui_priority"),
+                "tier_role": task_spec.get("tier_role"),
+            }
+
         rows.append(
             {
                 "model_id": model_id,
                 "label": spec.get("label"),
                 "tier_hint": spec.get("tier_hint"),
                 "size_gb": spec.get("size_gb"),
-                "capabilities": spec.get("capabilities", []),
+                "capabilities": capabilities,
                 "vram_required_gb": vram_required,
                 "fits_in_vram": (user_vram_gb is None or user_vram_gb >= vram_required),
                 "notes": spec.get("notes"),
@@ -220,9 +346,19 @@ def list_prevetted_models(hardware: dict[str, Any] | None) -> list[dict[str, Any
                     "source_class": estimate.source_class,
                     "hardware_class": estimate.hardware_class,
                 },
+                "tasks": task_rows,
             }
         )
     return rows
+
+
+def _task_applies_to_model(task_spec: dict[str, Any], capabilities: list[str]) -> bool:
+    """A vision task requires a vision capability; other tasks apply broadly."""
+    mode = task_spec.get("mode", "text")
+    if mode == "vision":
+        return "vision" in capabilities
+    # Text tasks: apply to any model that can generate text (generate or cogitate).
+    return any(cap in ("generate", "cogitate") for cap in capabilities)
 
 
 def _user_hardware(

@@ -119,3 +119,51 @@ class TestEstimate:
         assert payload["hardware_class"] == "rtx-4090"
         # Without seed measurements, confidence is unknown for now.
         assert payload["confidence"] in ("unknown", "measured", "interpolated")
+
+    def test_task_time_estimate(self, journal_override):
+        stdout = "NVIDIA DGX Spark, 0, 580.142\n"
+        with patch.object(subprocess, "run", return_value=_fake_smi_result(stdout)):
+            runner.invoke(call_app, ["benchmark", "profile"])
+        result = runner.invoke(
+            call_app,
+            [
+                "benchmark",
+                "estimate",
+                "ollama-local/qwen3.5:9b",
+                "--task",
+                "chat_reply",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["task_id"] == "chat_reply"
+        assert payload["seconds"] is not None
+        assert payload["confidence"] == "measured"
+
+    def test_task_time_rejects_unknown_task(self, journal_override):
+        with patch.object(subprocess, "run", side_effect=FileNotFoundError):
+            runner.invoke(call_app, ["benchmark", "profile"])
+        result = runner.invoke(
+            call_app,
+            [
+                "benchmark",
+                "estimate",
+                "ollama-local/qwen3.5:9b",
+                "--task",
+                "definitely_not_a_task",
+            ],
+        )
+        assert result.exit_code == 1
+
+
+class TestTasks:
+    def test_lists_catalog(self):
+        result = runner.invoke(call_app, ["benchmark", "tasks", "--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert "tasks" in payload
+        # At minimum, the seed catalog should include chat_reply and screen_frame.
+        assert "chat_reply" in payload["tasks"]
+        assert "screen_frame" in payload["tasks"]
+        assert payload["tasks"]["screen_frame"]["mode"] == "vision"

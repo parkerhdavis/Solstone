@@ -20,18 +20,24 @@ Public API:
 
 from think.benchmark.estimate import (
     Estimate,
+    TaskEstimate,
     estimate_output_tok_s,
+    estimate_task_time_s,
     list_prevetted_models,
     load_reference,
     load_registry,
+    load_tasks,
     resolve_hardware_class,
 )
 
 __all__ = [
     "Estimate",
+    "TaskEstimate",
     "estimate_output_tok_s",
+    "estimate_task_time_s",
     "list_prevetted_models",
     "load_reference",
     "load_registry",
+    "load_tasks",
     "resolve_hardware_class",
 ]
