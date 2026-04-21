@@ -191,6 +191,33 @@
   font-size: 0.85rem;
 }
 
+.pulse-reflection {
+  padding: 1.25rem;
+  background: #fff;
+  border-radius: 10px;
+  border: 1px solid #d1d5db;
+}
+
+.pulse-reflection-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: #b45309;
+  font-size: 0.95rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.pulse-reflection-link:hover {
+  text-decoration: underline;
+}
+
+.pulse-reflection-link:focus-visible {
+  outline: 2px solid #b45309;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
 /* Today Section */
 .pulse-today {
   padding: 1.25rem;
@@ -854,6 +881,7 @@
 /* Shared left padding for indicator gutter */
 .pulse-vitals,
 .pulse-narrative,
+.pulse-reflection,
 .pulse-today,
 .pulse-needs,
 .pulse-routines,
@@ -933,6 +961,7 @@
   }
 
   .pulse-narrative,
+  .pulse-reflection,
   .pulse-routines,
   .pulse-skills,
   .pulse-today,
@@ -951,6 +980,7 @@
 
   .pulse-vitals,
   .pulse-narrative,
+  .pulse-reflection,
   .pulse-today,
   .pulse-needs,
   .pulse-routines,
@@ -1187,6 +1217,15 @@
   </div>
   {% endif %}
 
+  {% if latest_weekly_reflection %}
+  <div class="pulse-reflection">
+    <h2 class="pulse-section-header">weekly reflection</h2>
+    <a class="pulse-reflection-link" href="{{ latest_weekly_reflection.url }}">
+      week of {{ latest_weekly_reflection.label }} →
+    </a>
+  </div>
+  {% endif %}
+
   <!-- Today -->
   {% if anticipated_activities or activities %}
   <div class="pulse-today" id="pulse-today" data-section-collapsed="true">
@@ -1302,9 +1341,14 @@
   var briefingSections = {{ briefing_sections|tojson|safe }};
   var skillContent = {{ skills_content|default({})|tojson|safe }};
   var sectionOrder = ['your_day', 'yesterday', 'forward_look', 'reading'];
+
+  function renderMarkdown(raw) {
+    return DOMPurify.sanitize(marked.parse(raw || '', { breaks: true, gfm: true }));
+  }
+
   if (narrativeRaw) {
     const el = document.getElementById('pulse-narrative-content');
-    if (el) el.innerHTML = marked.parse(narrativeRaw, {breaks: true, gfm: true});
+    if (el) el.innerHTML = renderMarkdown(narrativeRaw);
   }
 
   function renderBriefingSections(sections) {
@@ -1316,7 +1360,7 @@
         el.innerHTML = '';
         return;
       }
-      el.innerHTML = marked.parse(raw, {breaks: true, gfm: true});
+      el.innerHTML = renderMarkdown(raw);
       if (key === 'reading') {
         el.querySelectorAll('li').forEach(function(li) {
           var strong = li.querySelector('strong');
@@ -1369,14 +1413,14 @@
   renderBriefingSections(briefingSections);
 
   function toggleSkillDetail(skillId) {
-    var detail = document.getElementById('skill-detail-' + skillId);
-    if (!detail) return;
-    if (detail.style.display === 'none') {
-      if (skillContent[skillId]) {
-        detail.innerHTML = marked.parse(skillContent[skillId], {breaks: true, gfm: true});
-      }
-      detail.style.display = 'block';
-    } else {
+      var detail = document.getElementById('skill-detail-' + skillId);
+      if (!detail) return;
+      if (detail.style.display === 'none') {
+        if (skillContent[skillId]) {
+          detail.innerHTML = renderMarkdown(skillContent[skillId]);
+        }
+        detail.style.display = 'block';
+      } else {
       detail.style.display = 'none';
     }
   }
@@ -1574,7 +1618,7 @@
       .then(data => {
         const el = document.getElementById('pulse-narrative-content');
         if (el && data.narrative_content) {
-          el.innerHTML = marked.parse(data.narrative_content, {breaks: true, gfm: true});
+          el.innerHTML = renderMarkdown(data.narrative_content);
           const hdr = document.querySelector('.pulse-narrative .pulse-section-header');
           if (hdr && data.narrative_header) hdr.textContent = data.narrative_header;
           const meta = document.querySelector('.pulse-narrative .pulse-narrative-meta');

@@ -64,6 +64,7 @@ dependencies = [
     "pypdf",
     "pdf2image",
     "pytesseract",
+    "weasyprint",
     "icalendar",
     "blessed>=1.20.0",
     "psutil",
@@ -71,6 +72,7 @@ dependencies = [
     "python-slugify",
     "rapidfuzz",
     "typer",
+    "userpath>=1.9.2,<2",
 
     # Audio processing
     "soundfile",

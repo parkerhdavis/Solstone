@@ -338,6 +338,13 @@
       "tier": 3,
       "type": "cogitate"
     },
+    "talent.system.reflection": {
+      "disabled": false,
+      "group": "Think",
+      "label": "Reflection",
+      "tier": 3,
+      "type": "cogitate"
+    },
     "talent.system.routine": {
       "disabled": false,
       "group": "Think",
@@ -392,6 +399,14 @@
       "schedule": "activity",
       "tier": 2,
       "type": "generate"
+    },
+    "talent.system.weekly_reflection": {
+      "disabled": false,
+      "group": "Think",
+      "label": "Weekly Reflection",
+      "schedule": "weekly",
+      "tier": 2,
+      "type": "cogitate"
     },
     "talent.todos.daily": {
       "disabled": false,

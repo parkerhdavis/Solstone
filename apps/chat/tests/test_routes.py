@@ -120,7 +120,7 @@ def test_chat_day_renders_all_event_kinds(journal_copy, monkeypatch):
         use_id="use-1",
         text="sol reply",
         notes="full note",
-        requested_exec=False,
+        requested_target=None,
         requested_task=None,
     )
     append_chat_event(
@@ -151,6 +151,12 @@ def test_chat_day_renders_all_event_kinds(journal_copy, monkeypatch):
         reason="network",
         use_id="use-4",
     )
+    append_chat_event(
+        "reflection_ready",
+        ts=_ms(2099, 1, 2, 9, 6),
+        day="20981228",
+        url="/app/reflections/20981228",
+    )
 
     response = env.client.get(f"/app/chat/{day}")
     html = response.get_data(as_text=True)
@@ -161,6 +167,8 @@ def test_chat_day_renders_all_event_kinds(journal_copy, monkeypatch):
     assert 'title="full note"' in html
     assert 'data-talent-use-id="use-2"' in html
     assert 'data-talent-use-id="use-3"' in html
+    assert "weekly reflection ready" in html
+    assert 'href="/app/reflections/20981228"' in html
     assert "chat had trouble" in html
 
 
@@ -182,7 +190,7 @@ def test_chat_event_anchor_ids_are_stable(journal_copy, monkeypatch):
         use_id="use-5",
         text="second",
         notes="",
-        requested_exec=False,
+        requested_target=None,
         requested_task=None,
     )
 
@@ -213,7 +221,7 @@ def test_chat_time_separator_is_inserted_client_side(journal_copy, monkeypatch):
         use_id="use-6",
         text="later",
         notes="",
-        requested_exec=False,
+        requested_target=None,
         requested_task=None,
     )
 

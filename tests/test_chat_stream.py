@@ -99,7 +99,7 @@ def test_append_broadcasts_on_chat_tract_with_stored_event_payload(
         use_id="1713626000000",
         text="hello",
         notes="ready",
-        requested_exec=False,
+        requested_target=None,
         requested_task=None,
     )
 
@@ -296,7 +296,7 @@ def test_reduce_chat_state_extracts_latest_sol_and_active_talents(
         use_id="chat-1",
         text="dispatching",
         notes="planning",
-        requested_exec=True,
+        requested_target="exec",
         requested_task="compare drafts",
     )
     append_chat_event(
@@ -335,6 +335,12 @@ def test_reduce_chat_state_extracts_latest_sol_and_active_talents(
         reason="chat had trouble — try again",
         use_id=None,
     )
+    append_chat_event(
+        "reflection_ready",
+        ts=start + 7_000,
+        day="20260308",
+        url="/app/reflections/20260308",
+    )
 
     reduced = reduce_chat_state("20260420")
 
@@ -343,7 +349,7 @@ def test_reduce_chat_state_extracts_latest_sol_and_active_talents(
         "use_id": "chat-1",
         "text": "dispatching",
         "notes": "planning",
-        "requested_exec": True,
+        "requested_target": "exec",
         "requested_task": "compare drafts",
     }
     assert reduced["active_talents"] == [
@@ -363,6 +369,22 @@ def test_reduce_chat_state_extracts_latest_sol_and_active_talents(
             "finished_at": start + 3_000,
         }
     ]
+
+
+def test_append_reflection_ready_event(tmp_path, monkeypatch):
+    _setup_journal(tmp_path, monkeypatch)
+    ts = _ms(2026, 4, 20, 12, 0, 0)
+
+    event = append_chat_event(
+        "reflection_ready",
+        ts=ts,
+        day="20260308",
+        url="/app/reflections/20260308",
+    )
+
+    assert event["kind"] == "reflection_ready"
+    assert event["day"] == "20260308"
+    assert event["url"] == "/app/reflections/20260308"
 
 
 def test_find_unresponded_trigger_owner_message(tmp_path, monkeypatch):
@@ -402,7 +424,7 @@ def test_find_unresponded_trigger_talent_finished(tmp_path, monkeypatch):
         use_id="chat-1",
         text="working",
         notes="",
-        requested_exec=False,
+        requested_target=None,
         requested_task=None,
     )
     append_chat_event(
@@ -436,7 +458,7 @@ def test_find_unresponded_trigger_resolved(tmp_path, monkeypatch):
         use_id="chat-1",
         text="thanks",
         notes="",
-        requested_exec=False,
+        requested_target=None,
         requested_task=None,
     )
 
