@@ -21,9 +21,10 @@ Three modes:
    no interpolation.
 
 3. **Transcriber RTF** (``--transcriber <backend> --audio-fixture
-   <path>``) — runs the configured STT backend against an audio file
-   of any length and records ``RTF = wall_seconds / audio_seconds``.
-   Output pastes into ``transcribers.json`` →
+   <path>``) — runs the configured in-process STT backend against an
+   audio file of any length and records
+   ``RTF = wall_seconds / audio_seconds``. Output pastes into
+   ``transcribers.json`` →
    ``transcribers[backend].benchmarks[<class>]``. Powers the audio
    lane of the segment-time semantic benchmark.
 
@@ -38,8 +39,8 @@ Usage::
         --class rtx-4090 --task chat_reply
 
     # Transcriber RTF (point at any mono 16kHz audio file)
-    python -m think.benchmark.harness --transcriber parakeet \\
-        --audio-fixture /path/to/audio.wav --class rtx-4090
+    python -m think.benchmark.harness --transcriber whisper \\
+        --audio-fixture /path/to/audio.wav --class dgx-spark
 
 The script never writes ``models.json`` or ``transcribers.json``
 directly — the maintainer reviews the output snippet before committing.
@@ -446,7 +447,8 @@ def _preflight_transcriber(transcriber: str, hw_class: str) -> dict[str, Any]:
       meaningful RTF to capture for cloud backends.
     - ``hw_class`` not in ``supported_hardware`` (and the list is not
       ``["*"]``) → fail. This is what stops a Spark machine from
-      "successfully" benchmarking the wrong parakeet backend.
+      "successfully" benchmarking the in-process parakeet backend
+      (which doesn't run on aarch64).
 
     Returns the resolved transcriber spec for downstream use.
     """
@@ -483,53 +485,9 @@ def _preflight_transcriber(transcriber: str, hw_class: str) -> dict[str, Any]:
     return spec
 
 
-def _ensure_nim_reachable(transcriber: str, spec: dict[str, Any]) -> None:
-    """For NIM-backed transcribers, hard-fail if the endpoint is unreachable.
-
-    Silent fallback to another backend would corrupt the benchmark
-    signal — the whole point of cross-backend RTF capture is comparing
-    backends honestly. If the NIM container isn't running, the right
-    answer is "fix the deployment", not "measure something else".
-    """
-    if spec.get("kind") != "local-http":
-        return
-
-    import os
-
-    if transcriber == "parakeet-nim":
-        url = os.environ.get("PARAKEET_NIM_URL", "http://localhost:9000")
-    else:
-        # Generic local-http: require an explicit env var per transcriber.
-        env_key = f"{transcriber.upper().replace('-', '_')}_URL"
-        url = os.environ.get(env_key)
-        if not url:
-            raise SystemExit(
-                f"Transcriber '{transcriber}' is local-http but no endpoint "
-                f"URL is configured (set {env_key})."
-            )
-
-    try:
-        import httpx
-    except ImportError as exc:
-        raise SystemExit(
-            f"Cannot reach {transcriber}: httpx not installed ({exc})"
-        ) from exc
-
-    try:
-        with httpx.Client(timeout=5.0) as client:
-            client.get(url)
-    except Exception as exc:
-        raise SystemExit(
-            f"{transcriber} container not running at {url} ({exc.__class__.__name__}: "
-            f"{exc}). Hard-fail: harness will not silently fall back to another "
-            f"backend, since that would corrupt the cross-backend RTF signal."
-        ) from exc
-
-
 def _run_transcriber_mode(args: argparse.Namespace) -> int:
     """Real-time-factor benchmark for an STT backend on an audio fixture."""
-    spec = _preflight_transcriber(args.transcriber, args.hw_class)
-    _ensure_nim_reachable(args.transcriber, spec)
+    _preflight_transcriber(args.transcriber, args.hw_class)
 
     audio_path = Path(args.audio_fixture)
     if not audio_path.exists():

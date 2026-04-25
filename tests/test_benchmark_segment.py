@@ -141,14 +141,6 @@ FAKE_TRANSCRIBERS = {
                 "rtx-3090": {"rtf": 0.05},
             },
         },
-        "parakeet-nim": {
-            "label": "Parakeet TDT (NIM)",
-            "kind": "local-http",
-            "supported_hardware": ["dgx-spark"],
-            "fallback": False,
-            "benchmarkable": True,
-            "benchmarks": {},
-        },
         "whisper": {
             "label": "Whisper (local)",
             "kind": "local",
@@ -453,33 +445,15 @@ class TestHarnessPreflight:
             harness._preflight_transcriber("gemini", "dgx-spark")
 
     def test_wrong_hardware_for_parakeet_hard_fails(self, monkeypatch, tmp_path):
-        # The exact bug that triggered the architectural correction:
-        # bundled parakeet must refuse to run on dgx-spark.
+        # The bug that originally triggered the schema work: the bundled
+        # parakeet path is CoreML / linux-x86_64 ONNX only, so it must
+        # refuse to RTF-capture on dgx-spark.
         harness = self._patch(monkeypatch, tmp_path)
         with pytest.raises(SystemExit, match="does not support hardware class 'dgx-spark'"):
             harness._preflight_transcriber("parakeet", "dgx-spark")
 
-    def test_wrong_hardware_for_parakeet_nim_hard_fails(self, monkeypatch, tmp_path):
-        # Symmetric guard: parakeet-nim must refuse to run on rtx-3090.
-        harness = self._patch(monkeypatch, tmp_path)
-        with pytest.raises(SystemExit, match="does not support hardware class 'rtx-3090'"):
-            harness._preflight_transcriber("parakeet-nim", "rtx-3090")
-
     def test_whisper_wildcard_supports_any_class(self, monkeypatch, tmp_path):
         harness = self._patch(monkeypatch, tmp_path)
-        # Should not raise.
+        # Should not raise — whisper is the universal floor.
         spec = harness._preflight_transcriber("whisper", "dgx-spark")
         assert spec["fallback"] is True
-
-    def test_parakeet_nim_unreachable_hard_fails(self, monkeypatch):
-        # Independent of preflight: when the NIM endpoint is down, the
-        # harness must fail with a clear "container not running" error
-        # rather than letting transcription proceed (which would
-        # eventually fall through some other path).
-        from think.benchmark import harness
-
-        # Point at a port nothing is listening on.
-        monkeypatch.setenv("PARAKEET_NIM_URL", "http://127.0.0.1:1")
-        spec = {"kind": "local-http"}
-        with pytest.raises(SystemExit, match="container not running at"):
-            harness._ensure_nim_reachable("parakeet-nim", spec)
