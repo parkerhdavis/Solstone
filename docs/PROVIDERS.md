@@ -385,6 +385,115 @@ which balloons memory for large models). Output includes a ``mode``
 field (``text_only`` vs ``vision``). The harness prints a JSON snippet
 to paste into ``models.json``; it does not edit the registry itself.
 
+## ASR Providers (think/providers/asr/)
+
+A separate provider package houses speech-to-text backends that talk to
+**remote / containerized model services** rather than running inference
+in-process. The package exists to keep Solstone's Python codebase
+platform-portable: the bundled in-process backends
+(``observe/transcribe/parakeet.py``, ``observe/transcribe/whisper.py``)
+couple model code to platform-specific wheels (CoreML, ONNX,
+faster-whisper); the providers under ``think/providers/asr/`` only see
+HTTP, so the platform-specific complexity lives behind the network
+boundary.
+
+This is structurally parallel to the LLM provider pattern in this doc
+but uses a different per-provider entry point (ASR providers expose
+``transcribe(audio, sample_rate, config) -> list[Statement]``, not the
+``run_generate`` / ``run_cogitate`` triple).
+
+The ``observe.transcribe.BACKEND_REGISTRY`` dispatcher imports these
+providers by module path, so end-user code keeps calling
+``observe.transcribe.transcribe(backend_name, ...)`` regardless of
+which package the backend lives in. Existing in-tree backends
+(``parakeet`` / ``whisper`` / ``revai`` / ``gemini``) are unchanged
+and stay under ``observe/transcribe/``.
+
+### parakeet-nim — Parakeet TDT via NVIDIA NIM container
+
+Required on ``linux/aarch64`` + Blackwell hosts (DGX Spark) where the
+bundled ``parakeet`` path doesn't run. **Never collapse this with the
+bundled** ``parakeet`` **backend** — they have different
+``supported_hardware`` and different deployment vectors. See the
+project's *Transcription Backend Architecture* doc for the full
+rationale.
+
+**Endpoint**: ``http://localhost:9000`` by default. Override via the
+``PARAKEET_NIM_URL`` env var or
+``transcribe.parakeet-nim.endpoint`` in ``journal.json``.
+
+**Container image**: ``nvcr.io/nim/nvidia/parakeet-0-6b-tdt`` (NVIDIA
+NIM, requires ``ngc.nvidia.com`` credentials and the NVIDIA Container
+Toolkit). Sortformer speaker diarization and Silero VAD are bundled.
+
+**Healthcheck**: ``scripts/parakeet_nim_healthcheck.sh`` prints OK / a
+specific error and exits 0 / 1, so it can be wired into Cumulus's
+container readiness probe. The Solstone harness already hard-fails on
+unreachable NIM (see ``think/benchmark/harness.py`` preflight); the
+healthcheck script is the equivalent for production runtime.
+
+**Config example** (``journal.json``)::
+
+    {
+      "transcribe": {
+        "backend": "parakeet-nim",
+        "parakeet-nim": {
+          "endpoint": "http://localhost:9000",
+          "language": "en-US",
+          "timeout_s": 600
+        }
+      }
+    }
+
+**Cumulus docker-compose snippet** — drop into the Cumulus repo's
+compose file (this snippet is documentation, not a file checked into
+Solstone, because the Cumulus stack is a separate repo and Solstone
+must not own its compose surface)::
+
+    services:
+      parakeet-nim:
+        image: nvcr.io/nim/nvidia/parakeet-0-6b-tdt:latest
+        container_name: parakeet-nim
+        restart: unless-stopped
+        runtime: nvidia
+        ports:
+          - "9000:9000"
+          - "50051:50051"
+        environment:
+          - NGC_API_KEY=${NGC_API_KEY}
+        volumes:
+          - parakeet-nim-cache:/opt/nim/.cache
+        deploy:
+          resources:
+            reservations:
+              devices:
+                - driver: nvidia
+                  count: 1
+                  capabilities: [gpu]
+        healthcheck:
+          test: ["CMD", "curl", "-fs", "http://localhost:9000/v1/health/ready"]
+          interval: 30s
+          timeout: 5s
+          retries: 5
+          start_period: 60s
+    volumes:
+      parakeet-nim-cache: {}
+
+### Anti-patterns to avoid
+
+- **Importing NeMo or NVIDIA SDKs into Solstone Python.** The HTTP
+  boundary is what keeps the rest of the codebase platform-portable.
+- **Silently falling back to whisper when the NIM is unreachable.**
+  The provider raises ``ParakeetNimError``; harness preflight raises
+  ``SystemExit``. Silent fallback would corrupt the cross-backend
+  benchmarking signal.
+- **Treating the existence of** ``observe/transcribe/parakeet.py`` **as
+  evidence that Parakeet runs on aarch64.** It does not — that file is
+  the CoreML / x86-ONNX path. The Spark needs the NIM.
+- **"Unifying"** ``parakeet`` **and** ``parakeet-nim`` **as cleanup.**
+  They share a model name and almost nothing else operationally.
+
+
 ## Checklist for New Providers
 
 **Core implementation:**
