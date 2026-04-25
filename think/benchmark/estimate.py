@@ -26,6 +26,7 @@ _DATA_DIR = Path(__file__).parent
 _REFERENCE_FILE = _DATA_DIR / "reference.json"
 _REGISTRY_FILE = _DATA_DIR / "models.json"
 _TASKS_FILE = _DATA_DIR / "tasks.json"
+_SEGMENTS_FILE = _DATA_DIR / "segment.json"
 
 
 Confidence = Literal["measured", "interpolated", "unknown"]
@@ -54,6 +55,30 @@ class TaskEstimate:
     source_class: str | None
 
 
+@dataclass(frozen=True)
+class SegmentEstimate:
+    """Estimated wall-clock time to fully process one 5-minute segment.
+
+    Decomposed into three lanes — audio (local STT), video (screen-frame
+    description × qualified_frames), and talent (segment-scoped LLM
+    talents) — plus a fixed orchestration/decode overhead. ``per_talent``
+    maps each talent task_id to its computed seconds (count × per-call
+    estimate). ``confidence`` is the weakest leg; if any required leg is
+    unknown, ``total_seconds`` is None.
+    """
+
+    scenario: str
+    hardware_class: str
+    total_seconds: float | None
+    audio_seconds: float | None
+    video_seconds: float | None
+    talent_seconds: float | None
+    overhead_seconds: float
+    per_talent: dict[str, float]
+    confidence: Confidence
+    notes: tuple[str, ...]
+
+
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
@@ -75,6 +100,12 @@ def load_registry() -> dict[str, Any]:
 def load_tasks() -> dict[str, Any]:
     """Load ``tasks.json`` (cached)."""
     return json.loads(_TASKS_FILE.read_text())
+
+
+@lru_cache(maxsize=1)
+def load_segments() -> dict[str, Any]:
+    """Load ``segment.json`` (cached)."""
+    return json.loads(_SEGMENTS_FILE.read_text())
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +336,167 @@ def estimate_task_time_s(
         seconds=round(seconds, 2),
         confidence=combined_conf,
         source_class=source_class,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Segment-time estimation
+# ---------------------------------------------------------------------------
+
+
+_CONFIDENCE_RANK: dict[Confidence, int] = {
+    "measured": 2,
+    "interpolated": 1,
+    "unknown": 0,
+}
+
+
+def estimate_segment_time_s(
+    tier_models: dict[str, str],
+    hardware_class: str,
+    scenario: str = "solo_active",
+) -> SegmentEstimate:
+    """Estimate wall-clock seconds to process one 5-min segment.
+
+    ``tier_models`` maps a task's ``tier_role`` (``vision`` / ``generate``
+    / ``cogitate``) to the model_id that handles that tier on this host.
+    The segment recipe (frame count, talent list, fixed overhead) comes
+    from ``segment.json``. The returned ``SegmentEstimate`` exposes a
+    per-lane breakdown so callers can render the headline number plus
+    the structural detail behind it.
+
+    Audio lane is reserved for Phase 3 (transcriber RTF measurements);
+    Phase 1 always returns ``audio_seconds=None`` and downgrades total
+    confidence accordingly, with an explanatory note attached.
+    """
+    segments = load_segments().get("scenarios", {})
+    spec = segments.get(scenario)
+    if spec is None:
+        return SegmentEstimate(
+            scenario=scenario,
+            hardware_class=hardware_class,
+            total_seconds=None,
+            audio_seconds=None,
+            video_seconds=None,
+            talent_seconds=None,
+            overhead_seconds=0.0,
+            per_talent={},
+            confidence="unknown",
+            notes=(f"unknown scenario '{scenario}'",),
+        )
+
+    tasks_catalog = load_tasks().get("tasks", {})
+    notes: list[str] = []
+    leg_confidences: list[Confidence] = []
+
+    # --- Video lane ---------------------------------------------------------
+    qualified_frames = int(spec.get("qualified_frames") or 0)
+    video_seconds: float | None = 0.0
+    if qualified_frames > 0:
+        screen_frame_spec = tasks_catalog.get("screen_frame", {})
+        vision_model = tier_models.get(
+            screen_frame_spec.get("tier_role") or "vision"
+        )
+        if vision_model is None:
+            video_seconds = None
+            leg_confidences.append("unknown")
+            notes.append(
+                "video lane unknown: no vision-tier model provided for screen_frame"
+            )
+        else:
+            per_frame = estimate_task_time_s(
+                vision_model, hardware_class, "screen_frame"
+            )
+            if per_frame.seconds is None:
+                video_seconds = None
+                leg_confidences.append("unknown")
+                notes.append(
+                    f"video lane unknown: no estimate for screen_frame on "
+                    f"{vision_model}"
+                )
+            else:
+                video_seconds = round(per_frame.seconds * qualified_frames, 2)
+                leg_confidences.append(per_frame.confidence)
+
+    # --- Talent lane --------------------------------------------------------
+    per_talent: dict[str, float] = {}
+    talent_seconds: float | None = 0.0
+    talent_unknown = False
+    for entry in spec.get("talents", []) or []:
+        task_id = entry.get("task_id")
+        count = int(entry.get("count") or 1)
+        task_spec = tasks_catalog.get(task_id)
+        if task_spec is None:
+            talent_unknown = True
+            leg_confidences.append("unknown")
+            notes.append(f"talent '{task_id}' missing from tasks.json")
+            continue
+        tier_role = task_spec.get("tier_role")
+        model_id = tier_models.get(tier_role)
+        if model_id is None:
+            talent_unknown = True
+            leg_confidences.append("unknown")
+            notes.append(
+                f"talent '{task_id}' unknown: no '{tier_role}'-tier model provided"
+            )
+            continue
+        per_call = estimate_task_time_s(model_id, hardware_class, task_id)
+        if per_call.seconds is None:
+            talent_unknown = True
+            leg_confidences.append("unknown")
+            notes.append(
+                f"talent '{task_id}' unknown: no estimate on {model_id}"
+            )
+            continue
+        seconds = round(per_call.seconds * count, 2)
+        per_talent[task_id] = seconds
+        leg_confidences.append(per_call.confidence)
+
+    if talent_unknown:
+        talent_seconds = None
+    else:
+        talent_seconds = round(sum(per_talent.values()), 2)
+
+    # --- Audio lane (Phase 3 placeholder) -----------------------------------
+    audio_seconds: float | None = None
+    leg_confidences.append("unknown")
+    notes.append(
+        "audio lane not yet measured: transcriber RTF lookup is Phase 3 "
+        "(see Benchmark Segment-Time Plan)"
+    )
+
+    overhead_seconds = float(spec.get("fixed_overhead_s") or 0.0)
+
+    if (
+        audio_seconds is None
+        or video_seconds is None
+        or talent_seconds is None
+    ):
+        total_seconds: float | None = None
+    else:
+        total_seconds = round(
+            audio_seconds + video_seconds + talent_seconds + overhead_seconds, 2
+        )
+
+    if not leg_confidences:
+        combined: Confidence = "unknown"
+    else:
+        worst_rank = min(_CONFIDENCE_RANK[c] for c in leg_confidences)
+        combined = next(
+            c for c, rank in _CONFIDENCE_RANK.items() if rank == worst_rank
+        )
+
+    return SegmentEstimate(
+        scenario=scenario,
+        hardware_class=hardware_class,
+        total_seconds=total_seconds,
+        audio_seconds=audio_seconds,
+        video_seconds=video_seconds,
+        talent_seconds=talent_seconds,
+        overhead_seconds=overhead_seconds,
+        per_talent=per_talent,
+        confidence=combined,
+        notes=tuple(notes),
     )
 
 

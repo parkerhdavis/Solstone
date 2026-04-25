@@ -1,0 +1,45 @@
+{
+  "_comment": "Per-segment scenarios for the semantic 'time to process one 5-minute segment' benchmark. Each scenario is a recipe of (a) audio length (always 5 min by definition), (b) qualified screen-recording frames that get described, (c) per-segment talent invocations, and (d) a fixed overhead constant covering frame decode + orchestration that doesn't fit a tok/s model. Frame counts and talent lists are inspectable approximations sourced from the live pipeline (observe/describe.py dHash threshold + talent/ schedule:segment files); retune as the pipeline changes. Talent counts default to 1; conditional talents include an 'optional_reason' for the inclusion/exclusion rationale.",
+  "scenarios": {
+    "solo_active": {
+      "label": "Solo active",
+      "description": "Solo coding/reading session, no meeting. Active screen activity, single speaker.",
+      "audio_minutes": 5,
+      "qualified_frames": 18,
+      "fixed_overhead_s": 3.0,
+      "talents": [
+        {"task_id": "segment_sense", "count": 1},
+        {"task_id": "entity_extraction", "count": 1},
+        {"task_id": "screen_record", "count": 1, "optional_reason": "fires when sense reports density=active and recommends screen recording"},
+        {"task_id": "awareness_tender", "count": 1},
+        {"task_id": "pulse", "count": 1}
+      ]
+    },
+    "meeting_active": {
+      "label": "Meeting",
+      "description": "Meeting transcript with multiple speakers; sparse screen activity (focus on conversation).",
+      "audio_minutes": 5,
+      "qualified_frames": 6,
+      "fixed_overhead_s": 3.0,
+      "talents": [
+        {"task_id": "segment_sense", "count": 1},
+        {"task_id": "entity_extraction", "count": 1},
+        {"task_id": "speaker_attribution_llm", "count": 1, "optional_reason": "runs only when sense reports meeting_detected=true"},
+        {"task_id": "awareness_tender", "count": 1},
+        {"task_id": "pulse", "count": 1}
+      ]
+    },
+    "idle": {
+      "label": "Idle",
+      "description": "Minimal activity (idle desktop, no conversation). Housekeeping talents still run.",
+      "audio_minutes": 5,
+      "qualified_frames": 1,
+      "fixed_overhead_s": 3.0,
+      "talents": [
+        {"task_id": "segment_sense", "count": 1},
+        {"task_id": "awareness_tender", "count": 1},
+        {"task_id": "pulse", "count": 1}
+      ]
+    }
+  }
+}
