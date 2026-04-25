@@ -3,10 +3,11 @@
 
 """Benchmark harness — measure a model's speed on this host.
 
-Maintainer-only. Run by hand to seed ``models.json`` with real
-measurements; not invoked by the live pipeline.
+Maintainer-only. Run by hand to seed ``models.json`` /
+``transcribers.json`` with real measurements; not invoked by the live
+pipeline.
 
-Two modes:
+Three modes:
 
 1. **Synthetic benchmark** (default) — sends a fixed prompt, records
    output tok/s and prompt tok/s. Good for populating the baseline
@@ -19,6 +20,13 @@ Two modes:
    ground-truth source for task-time heuristics — no token formulas,
    no interpolation.
 
+3. **Transcriber RTF** (``--transcriber <backend> --audio-fixture
+   <path>``) — runs the configured STT backend against an audio file
+   of any length and records ``RTF = wall_seconds / audio_seconds``.
+   Output pastes into ``transcribers.json`` →
+   ``transcribers[backend].benchmarks[<class>]``. Powers the audio
+   lane of the segment-time semantic benchmark.
+
 Usage::
 
     # Synthetic tok/s benchmark
@@ -29,8 +37,12 @@ Usage::
     python -m think.benchmark.harness --model ollama-local/qwen3.5:9b \\
         --class rtx-4090 --task chat_reply
 
-The script never writes ``models.json`` directly — the maintainer
-reviews the output snippet before committing.
+    # Transcriber RTF (point at any mono 16kHz audio file)
+    python -m think.benchmark.harness --transcriber parakeet \\
+        --audio-fixture /path/to/audio.wav --class rtx-4090
+
+The script never writes ``models.json`` or ``transcribers.json``
+directly — the maintainer reviews the output snippet before committing.
 """
 
 from __future__ import annotations
@@ -249,8 +261,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark a local Ollama model.")
     parser.add_argument(
         "--model",
-        required=True,
-        help="Model ID, e.g. ollama-local/qwen3.5:9b",
+        help="Model ID, e.g. ollama-local/qwen3.5:9b. Required unless --transcriber is set.",
     )
     parser.add_argument(
         "--class",
@@ -280,7 +291,29 @@ def main() -> int:
             "as the measured task-time (printed as a paste-ready snippet)."
         ),
     )
+    parser.add_argument(
+        "--transcriber",
+        help=(
+            "STT backend to benchmark for RTF (parakeet, whisper, gemini, "
+            "revai). Mutually exclusive with --model. Requires --audio-fixture."
+        ),
+    )
+    parser.add_argument(
+        "--audio-fixture",
+        help=(
+            "Path to an audio file (any length, mono 16kHz preferred). "
+            "Used with --transcriber to measure real-time-factor."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.transcriber:
+        if not args.audio_fixture:
+            raise SystemExit("--transcriber requires --audio-fixture <path>")
+        return _run_transcriber_mode(args)
+
+    if not args.model:
+        raise SystemExit("--model is required (or use --transcriber)")
 
     ensure_installed(args.model, allow_pull=args.pull)
 
@@ -397,6 +430,165 @@ def _run_task_mode(args: argparse.Namespace) -> int:
     print(
         f"\n# Paste into think/benchmark/models.json "
         f"-> models['{args.model}'].benchmarks['{args.hw_class}'].tasks:",
+        file=sys.stderr,
+    )
+    print(json.dumps(snippet, indent=2))
+    return 0
+
+
+def _preflight_transcriber(transcriber: str, hw_class: str) -> dict[str, Any]:
+    """Validate (transcriber, hardware_class) pair against transcribers.json.
+
+    Hard-fails with a specific error before any transcription work runs:
+
+    - Unknown transcriber name → fail with the available list.
+    - ``benchmarkable: false`` (cloud backends) → fail; harness has no
+      meaningful RTF to capture for cloud backends.
+    - ``hw_class`` not in ``supported_hardware`` (and the list is not
+      ``["*"]``) → fail. This is what stops a Spark machine from
+      "successfully" benchmarking the wrong parakeet backend.
+
+    Returns the resolved transcriber spec for downstream use.
+    """
+    transcribers_file = Path(__file__).parent / "transcribers.json"
+    catalog = json.loads(transcribers_file.read_text()).get("transcribers", {})
+
+    if transcriber not in catalog:
+        names = ", ".join(sorted(catalog.keys())) or "(none)"
+        raise SystemExit(
+            f"Unknown transcriber '{transcriber}'. Available: {names}"
+        )
+
+    spec = catalog[transcriber]
+
+    if not spec.get("benchmarkable", False):
+        kind = spec.get("kind", "?")
+        raise SystemExit(
+            f"Transcriber '{transcriber}' is not benchmarkable (kind={kind}). "
+            f"Cloud backends use a flat wall_seconds_per_5min rule of thumb "
+            f"in transcribers.json — RTF capture is meaningless when network "
+            f"latency dominates wall-clock."
+        )
+
+    supported = spec.get("supported_hardware") or []
+    if supported != ["*"] and hw_class not in supported:
+        listed = ", ".join(supported) if supported else "(none)"
+        raise SystemExit(
+            f"Transcriber '{transcriber}' does not support hardware class "
+            f"'{hw_class}'. Supported: {listed}.\n"
+            f"This guard prevents corrupting the benchmarking signal by "
+            f"running the wrong backend on a host it can't actually serve."
+        )
+
+    return spec
+
+
+def _ensure_nim_reachable(transcriber: str, spec: dict[str, Any]) -> None:
+    """For NIM-backed transcribers, hard-fail if the endpoint is unreachable.
+
+    Silent fallback to another backend would corrupt the benchmark
+    signal — the whole point of cross-backend RTF capture is comparing
+    backends honestly. If the NIM container isn't running, the right
+    answer is "fix the deployment", not "measure something else".
+    """
+    if spec.get("kind") != "local-http":
+        return
+
+    import os
+
+    if transcriber == "parakeet-nim":
+        url = os.environ.get("PARAKEET_NIM_URL", "http://localhost:9000")
+    else:
+        # Generic local-http: require an explicit env var per transcriber.
+        env_key = f"{transcriber.upper().replace('-', '_')}_URL"
+        url = os.environ.get(env_key)
+        if not url:
+            raise SystemExit(
+                f"Transcriber '{transcriber}' is local-http but no endpoint "
+                f"URL is configured (set {env_key})."
+            )
+
+    try:
+        import httpx
+    except ImportError as exc:
+        raise SystemExit(
+            f"Cannot reach {transcriber}: httpx not installed ({exc})"
+        ) from exc
+
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            client.get(url)
+    except Exception as exc:
+        raise SystemExit(
+            f"{transcriber} container not running at {url} ({exc.__class__.__name__}: "
+            f"{exc}). Hard-fail: harness will not silently fall back to another "
+            f"backend, since that would corrupt the cross-backend RTF signal."
+        ) from exc
+
+
+def _run_transcriber_mode(args: argparse.Namespace) -> int:
+    """Real-time-factor benchmark for an STT backend on an audio fixture."""
+    spec = _preflight_transcriber(args.transcriber, args.hw_class)
+    _ensure_nim_reachable(args.transcriber, spec)
+
+    audio_path = Path(args.audio_fixture)
+    if not audio_path.exists():
+        raise SystemExit(f"Audio fixture not found: {audio_path}")
+
+    # Lazy imports — observe.transcribe pulls heavy deps that aren't
+    # needed for the LLM benchmark modes.
+    from observe.transcribe import transcribe as stt_transcribe
+    from observe.utils import SAMPLE_RATE, load_audio
+    from think.utils import get_config
+
+    audio = load_audio(audio_path, sample_rate=SAMPLE_RATE)
+    sample_rate = SAMPLE_RATE
+    audio_seconds = float(len(audio)) / float(sample_rate)
+    if audio_seconds <= 0:
+        raise SystemExit(f"Audio fixture has zero duration: {audio_path}")
+
+    config = get_config()
+    backend_config = (config.get("transcribe") or {}).get(args.transcriber, {}) or {}
+
+    print(
+        f"Benchmarking transcriber '{args.transcriber}' on class "
+        f"'{args.hw_class}' against {audio_path.name} ({audio_seconds:.1f}s "
+        f"audio); {_WARMUP_RUNS} warmup + {_MEASURE_RUNS} measured runs…",
+        file=sys.stderr,
+    )
+
+    for i in range(_WARMUP_RUNS):
+        print(f"  warmup {i + 1}/{_WARMUP_RUNS}…", file=sys.stderr)
+        stt_transcribe(args.transcriber, audio, sample_rate, backend_config)
+
+    elapsed_samples: list[float] = []
+    for i in range(_MEASURE_RUNS):
+        print(f"  run {i + 1}/{_MEASURE_RUNS}…", file=sys.stderr)
+        start = time.perf_counter()
+        stt_transcribe(args.transcriber, audio, sample_rate, backend_config)
+        elapsed = time.perf_counter() - start
+        elapsed_samples.append(elapsed)
+        rtf = elapsed / audio_seconds
+        print(
+            f"    wall={elapsed:.2f}s  audio={audio_seconds:.1f}s  "
+            f"rtf={rtf:.3f}",
+            file=sys.stderr,
+        )
+
+    median_elapsed = sorted(elapsed_samples)[len(elapsed_samples) // 2]
+    median_rtf = median_elapsed / audio_seconds
+
+    snippet = {
+        args.hw_class: {
+            "rtf": round(median_rtf, 3),
+            "audio_seconds_measured": round(audio_seconds, 1),
+            "wall_seconds_measured": round(median_elapsed, 2),
+            "measured_at": date.today().isoformat(),
+        }
+    }
+    print(
+        f"\n# Paste into think/benchmark/transcribers.json "
+        f"-> transcribers['{args.transcriber}'].benchmarks:",
         file=sys.stderr,
     )
     print(json.dumps(snippet, indent=2))

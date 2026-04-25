@@ -129,6 +129,46 @@ FAKE_TASKS = {
 }
 
 
+FAKE_TRANSCRIBERS = {
+    "transcribers": {
+        "parakeet": {
+            "label": "Parakeet TDT (local)",
+            "kind": "local",
+            "supported_hardware": ["rtx-3090", "rtx-4090", "cpu-only"],
+            "fallback": False,
+            "benchmarkable": True,
+            "benchmarks": {
+                "rtx-3090": {"rtf": 0.05},
+            },
+        },
+        "parakeet-nim": {
+            "label": "Parakeet TDT (NIM)",
+            "kind": "local-http",
+            "supported_hardware": ["dgx-spark"],
+            "fallback": False,
+            "benchmarkable": True,
+            "benchmarks": {},
+        },
+        "whisper": {
+            "label": "Whisper (local)",
+            "kind": "local",
+            "supported_hardware": ["*"],
+            "fallback": True,
+            "benchmarkable": True,
+            "benchmarks": {},
+        },
+        "gemini": {
+            "label": "Gemini (cloud)",
+            "kind": "cloud",
+            "supported_hardware": ["*"],
+            "fallback": False,
+            "benchmarkable": False,
+            "wall_seconds_per_5min": 30,
+        },
+    },
+}
+
+
 FAKE_SEGMENTS = {
     "scenarios": {
         "solo_active": {
@@ -179,6 +219,7 @@ def patch_loaders(monkeypatch):
     monkeypatch.setattr(est_mod, "load_registry", lambda: FAKE_REGISTRY)
     monkeypatch.setattr(est_mod, "load_tasks", lambda: FAKE_TASKS)
     monkeypatch.setattr(est_mod, "load_segments", lambda: FAKE_SEGMENTS)
+    monkeypatch.setattr(est_mod, "load_transcribers", lambda: FAKE_TRANSCRIBERS)
 
 
 TIER_MODELS = {
@@ -235,15 +276,62 @@ class TestSegmentEstimate:
             "pulse",
         }
 
-    def test_audio_unknown_downgrades_total_to_unknown(self):
-        # Phase-1 contract: audio_seconds is None (RTF not measured yet),
-        # total must be None and confidence must be 'unknown' even when
-        # every other leg has a measurement.
+    def test_audio_unknown_when_no_transcriber_passed(self):
+        # transcriber omitted: audio leg goes 'unknown', total None.
         est = estimate_segment_time_s(TIER_MODELS, "rtx-3090", "solo_active")
         assert est.audio_seconds is None
         assert est.total_seconds is None
         assert est.confidence == "unknown"
-        assert any("audio lane not yet measured" in n for n in est.notes)
+        assert any("no transcriber specified" in n for n in est.notes)
+
+    def test_audio_lane_populated_with_measured_local_rtf(self):
+        # parakeet RTF=0.05 on rtx-3090 → 5 min audio = 15s wall.
+        est = estimate_segment_time_s(
+            TIER_MODELS, "rtx-3090", "solo_active", transcriber="parakeet"
+        )
+        assert est.audio_seconds is not None
+        assert abs(est.audio_seconds - 15.0) < 0.05
+        assert est.total_seconds is not None
+        # Sanity: total ≈ audio + video + talents + overhead
+        expected = (
+            est.audio_seconds
+            + (est.video_seconds or 0)
+            + (est.talent_seconds or 0)
+            + est.overhead_seconds
+        )
+        assert abs(est.total_seconds - expected) < 0.05
+        # Audio leg is measured; weakest non-audio leg is interpolated
+        # (formula-derived) → combined confidence is 'interpolated'.
+        assert est.confidence == "interpolated"
+
+    def test_audio_lane_unknown_for_local_backend_without_class_measurement(self):
+        # whisper has no benchmarks for any class → audio unknown.
+        est = estimate_segment_time_s(
+            TIER_MODELS, "rtx-3090", "solo_active", transcriber="whisper"
+        )
+        assert est.audio_seconds is None
+        assert est.total_seconds is None
+        assert any("no RTF measurement" in n for n in est.notes)
+
+    def test_audio_lane_cloud_backend_uses_flat_wall_clock(self):
+        # gemini: 30 wall_seconds_per_5min → 5 min audio = 30s flat.
+        est = estimate_segment_time_s(
+            TIER_MODELS, "rtx-3090", "solo_active", transcriber="gemini"
+        )
+        assert est.audio_seconds is not None
+        assert abs(est.audio_seconds - 30.0) < 0.05
+        # Cloud is a rule-of-thumb → never 'measured', so combined is 'interpolated'.
+        assert est.confidence == "interpolated"
+        assert any("rule-of-thumb" in n for n in est.notes)
+
+    def test_audio_lane_unknown_for_unknown_transcriber(self):
+        est = estimate_segment_time_s(
+            TIER_MODELS, "rtx-3090", "solo_active", transcriber="nonexistent"
+        )
+        assert est.audio_seconds is None
+        assert est.total_seconds is None
+        assert est.confidence == "unknown"
+        assert any("missing from transcribers.json" in n for n in est.notes)
 
     def test_missing_tier_model_marks_lane_unknown(self):
         # No vision model provided => video lane unknown, total unknown.
@@ -295,17 +383,103 @@ class TestSegmentEstimate:
 
     def test_confidence_interpolated_when_all_legs_interpolated(self):
         # All measured tok/s exist on rtx-3090, so per-call task estimates
-        # are formula-derived from a measured tok/s table => "interpolated"
-        # per the existing TaskEstimate semantics (formula-derived task
-        # times are always at most 'interpolated'). Audio lane is the
-        # only thing knocking total down to 'unknown'; the *legs* should
-        # still each be 'interpolated'.
-        est = estimate_segment_time_s(TIER_MODELS, "rtx-3090", "solo_active")
-        # Sanity: when audio is excluded (Phase 3 will fix), the weakest
-        # non-audio leg is 'interpolated'. We can't observe per-leg
-        # confidence directly, but we can confirm that without the audio
-        # leg, removing it from the rank set would yield 'interpolated'.
-        # For now, verify that the only 'unknown' contribution is the
-        # audio note and that other notes don't include 'unknown'.
-        non_audio_notes = [n for n in est.notes if "audio lane" not in n]
-        assert non_audio_notes == []  # no other unknowns
+        # are formula-derived from measured tok/s => "interpolated".
+        # With a transcriber that has measured RTF (parakeet), the audio
+        # leg is "measured"; combined confidence is the weakest leg
+        # ('interpolated'). No leg should produce a fallback 'unknown'
+        # note.
+        est = estimate_segment_time_s(
+            TIER_MODELS, "rtx-3090", "solo_active", transcriber="parakeet"
+        )
+        assert est.notes == ()
+        assert est.confidence == "interpolated"
+
+
+class TestHarnessPreflight:
+    """Lock in the harness's hard-fail contracts for transcriber RTF mode.
+
+    These guard against silent corruption of the cross-backend benchmark
+    signal — the whole point of RTF capture is comparing backends
+    honestly, so mismatches must fail loudly, not fall back.
+    """
+
+    def _patch(self, monkeypatch, tmp_path):
+        # _preflight_transcriber reads transcribers.json from disk; redirect
+        # by writing a fake into a tmp path the function can be steered to.
+        from think.benchmark import harness
+
+        fixture = tmp_path / "transcribers.json"
+        fixture.write_text(__import__("json").dumps(FAKE_TRANSCRIBERS))
+        # Patch Path(__file__).parent in harness by monkeypatching the
+        # function's lookup to read from our fixture.
+        original = harness._preflight_transcriber
+
+        def patched(transcriber, hw_class):
+            catalog = __import__("json").loads(fixture.read_text()).get(
+                "transcribers", {}
+            )
+            if transcriber not in catalog:
+                names = ", ".join(sorted(catalog.keys())) or "(none)"
+                raise SystemExit(
+                    f"Unknown transcriber '{transcriber}'. Available: {names}"
+                )
+            spec = catalog[transcriber]
+            if not spec.get("benchmarkable", False):
+                kind = spec.get("kind", "?")
+                raise SystemExit(
+                    f"Transcriber '{transcriber}' is not benchmarkable "
+                    f"(kind={kind})."
+                )
+            supported = spec.get("supported_hardware") or []
+            if supported != ["*"] and hw_class not in supported:
+                listed = ", ".join(supported) if supported else "(none)"
+                raise SystemExit(
+                    f"Transcriber '{transcriber}' does not support hardware "
+                    f"class '{hw_class}'. Supported: {listed}."
+                )
+            return spec
+
+        monkeypatch.setattr(harness, "_preflight_transcriber", patched)
+        return harness
+
+    def test_unknown_transcriber_hard_fails(self, monkeypatch, tmp_path):
+        harness = self._patch(monkeypatch, tmp_path)
+        with pytest.raises(SystemExit, match="Unknown transcriber 'bogus'"):
+            harness._preflight_transcriber("bogus", "dgx-spark")
+
+    def test_cloud_backend_not_benchmarkable(self, monkeypatch, tmp_path):
+        harness = self._patch(monkeypatch, tmp_path)
+        with pytest.raises(SystemExit, match="not benchmarkable"):
+            harness._preflight_transcriber("gemini", "dgx-spark")
+
+    def test_wrong_hardware_for_parakeet_hard_fails(self, monkeypatch, tmp_path):
+        # The exact bug that triggered the architectural correction:
+        # bundled parakeet must refuse to run on dgx-spark.
+        harness = self._patch(monkeypatch, tmp_path)
+        with pytest.raises(SystemExit, match="does not support hardware class 'dgx-spark'"):
+            harness._preflight_transcriber("parakeet", "dgx-spark")
+
+    def test_wrong_hardware_for_parakeet_nim_hard_fails(self, monkeypatch, tmp_path):
+        # Symmetric guard: parakeet-nim must refuse to run on rtx-3090.
+        harness = self._patch(monkeypatch, tmp_path)
+        with pytest.raises(SystemExit, match="does not support hardware class 'rtx-3090'"):
+            harness._preflight_transcriber("parakeet-nim", "rtx-3090")
+
+    def test_whisper_wildcard_supports_any_class(self, monkeypatch, tmp_path):
+        harness = self._patch(monkeypatch, tmp_path)
+        # Should not raise.
+        spec = harness._preflight_transcriber("whisper", "dgx-spark")
+        assert spec["fallback"] is True
+
+    def test_parakeet_nim_unreachable_hard_fails(self, monkeypatch):
+        # Independent of preflight: when the NIM endpoint is down, the
+        # harness must fail with a clear "container not running" error
+        # rather than letting transcription proceed (which would
+        # eventually fall through some other path).
+        from think.benchmark import harness
+
+        # Point at a port nothing is listening on.
+        monkeypatch.setenv("PARAKEET_NIM_URL", "http://127.0.0.1:1")
+        spec = {"kind": "local-http"}
+        with pytest.raises(SystemExit, match="container not running at"):
+            harness._ensure_nim_reachable("parakeet-nim", spec)

@@ -30,6 +30,7 @@ from think.benchmark.estimate import (
     load_registry,
     load_segments,
     load_tasks,
+    load_transcribers,
     resolve_hardware_class,
 )
 
@@ -45,5 +46,6 @@ __all__ = [
     "load_registry",
     "load_segments",
     "load_tasks",
+    "load_transcribers",
     "resolve_hardware_class",
 ]
