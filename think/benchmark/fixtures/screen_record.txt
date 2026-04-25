@@ -1,0 +1,62 @@
+You are analyzing a segment from Parker's journal on Wednesday, April 22 2026 (20260422), covering 14:00:00 to 14:05:00.
+
+# Segment Screen Record
+
+## Objective
+
+Create a detailed documentary record of what occurred on screen during this segment. Produce a comprehensive, factual chronological account that preserves important details, excerpts, and entities for future reference. Focus on the "what" — what windows were open, what code was edited, what pages were viewed, what messages were sent.
+
+## Output format
+
+Markdown. Begin with a one-line summary of overall activity. Then a section per distinct application or context, in chronological order. Inside each section, list the relevant frames with timestamps and a 1-3 sentence description of the visible content. Preserve quoted text from screen content when it is informative (variable names, function signatures, error messages, headlines). End with a short "Entities" subsection listing every named tool, project, person, or company that appears on screen.
+
+## Input
+
+### Audio transcript (for context — describe screen, not audio)
+
+[14:00:04] Parker: Hey Mara, sorry I'm a minute late.
+[14:00:18] Parker: So the Carelaw Colorado intake schema migration — where are we?
+[14:01:02] Parker: What about the billing export?
+[14:01:33] Parker: Yes, I'll do it after this.
+
+### Screen frames
+
+Frame 14:00:00 (monitor 0, 1920x1200) — VS Code editor, file path bar shows `~/code/carelaw-colorado/migrations/0042_carelaw_intake.sql`. The file is ~80 lines. Visible content includes:
+  - `BEGIN;` at line 1
+  - `ALTER TABLE intake ADD COLUMN intake_v2_payload JSONB NOT NULL DEFAULT '{}';` at line 14
+  - `ALTER TABLE intake ADD COLUMN intake_v2_status TEXT NOT NULL DEFAULT 'pending';` at line 18
+  - A comment block at lines 24-30 referencing "blue-green field mapping" and "intake_legacy view"
+  - The status bar shows branch `intake-v2-migration` and 3 unstaged changes.
+
+Frame 14:00:45 (monitor 0) — Browser, Firefox, tab title "Datadog | Monitors — intake_read_success_rate". Two graph panels visible:
+  - Top panel labeled "intake_read_success_rate (5m)" with a flat green line at ~99.4% over the last 24h.
+  - Bottom panel labeled "intake_v2 column reads" with a dashed line at zero (no traffic yet — the column doesn't exist in prod).
+  - A sidebar shows the alert threshold is currently undefined.
+
+Frame 14:00:50 (monitor 1, 2560x1440) — Slack, channel `#carelaw-colorado-intake`. Visible message history:
+  - 13:42 from Mara: "uploaded the migration plan, take a look when you get a sec"
+  - 13:55 from Devika: "running it on staging now"
+  - 13:58 from Devika: "no errors, looks clean"
+  - The current draft message field shows "okay let's add @Jordan to the channel".
+
+Frame 14:01:30 (monitor 0) — VS Code, file switched to `~/code/carelaw-colorado/app/billing/export.py`. Cursor at line 142. Visible content:
+  - Function signature: `def export_billing(start: date, end: date) -> list[BillingRow]:`
+  - Line 145: `rows = db.session.query(IntakeLegacyView).filter(...)`
+  - Comment at line 138: "# reads from intake_legacy view; safe across migration"
+  - File-tree pane on left shows the project structure: `app/`, `migrations/`, `tests/`, with `migrations/` expanded and `0042_carelaw_intake.sql` highlighted.
+
+Frame 14:02:00 (monitor 1) — Slack again, channel `#carelaw-colorado-intake`. The draft is now sent and visible: "okay let's add @Jordan to the channel". Below it, a new system message: "Jordan Reyes was added to the channel by Parker Davis".
+
+Frame 14:02:30 (monitor 0) — Browser tab switched to "Anthers — onboarding playbook (draft)". A Notion-style page is visible with section headings:
+  - "Phase 1: data discovery"
+  - "Phase 2: schema mapping (use Carelaw Colorado intake-v2 pattern)"
+  - "Phase 3: cutover"
+  - The cursor is inside Phase 2 and the heading "schema mapping" has been just edited to add "(use Carelaw Colorado intake-v2 pattern)".
+
+Frame 14:03:00 (monitor 0) — VS Code, back to `0042_carelaw_intake.sql`, scrolled to lines 50-80 showing the COMMIT block and a trailing comment: "-- TODO: backfill intake_v2_payload from notes JSON; separate migration".
+
+Frame 14:04:30 (monitor 1) — Slack, a new message from Mara: "I'll have the Datadog thresholds proposal in the channel by Friday." Parker has not yet replied on screen.
+
+## Style
+
+Be factual and concrete. Quote text directly when it is informative. Avoid editorial commentary. Use action verbs to describe Parker's interactions where they are visible on screen. Cap the entire record at ~1500 words.

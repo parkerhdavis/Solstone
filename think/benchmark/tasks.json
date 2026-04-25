@@ -104,57 +104,52 @@
     "segment_sense": {
       "label": "Segment sense",
       "description": "Lite per-segment classification: density, content_type, activity summary, entities, facets, speakers, emotional register. Runs once per segment (talent/sense.md).",
-      "prompt_tokens": 900,
+      "prompt_tokens": 1312,
       "output_tokens": 400,
       "mode": "text",
       "presence": "background",
       "tier_role": "generate",
-      "ui_priority": 6,
-      "_provisional": true
+      "ui_priority": 6
     },
     "speaker_attribution_llm": {
       "label": "Speaker attribution (LLM)",
       "description": "Layer 4 contextual fallback for speaker labelling — runs only when embedding-based layers fail and sense reports meeting_detected (talent/speaker_attribution.md).",
-      "prompt_tokens": 1100,
+      "prompt_tokens": 888,
       "output_tokens": 350,
       "mode": "text",
       "presence": "background",
       "tier_role": "generate",
-      "ui_priority": 7,
-      "_provisional": true
+      "ui_priority": 7
     },
     "screen_record": {
       "label": "Screen record",
       "description": "Chronological documentary record of a segment combining transcript and screen descriptions. Conditional on density=active (talent/screen.md).",
-      "prompt_tokens": 1500,
+      "prompt_tokens": 1300,
       "output_tokens": 1500,
       "mode": "text",
       "presence": "background",
       "tier_role": "generate",
-      "ui_priority": 8,
-      "_provisional": true
+      "ui_priority": 8
     },
     "awareness_tender": {
       "label": "Awareness tender",
-      "description": "Per-segment housekeeping snapshot of identity / calendar / routines / recent entities (talent/awareness_tender.md).",
-      "prompt_tokens": 800,
+      "description": "Per-segment housekeeping snapshot of identity / calendar / routines / recent entities (talent/awareness_tender.md). Talent caps output at 600 tokens.",
+      "prompt_tokens": 670,
       "output_tokens": 500,
       "mode": "text",
       "presence": "background",
       "tier_role": "cogitate",
-      "ui_priority": 9,
-      "_provisional": true
+      "ui_priority": 9
     },
     "pulse": {
       "label": "Pulse",
-      "description": "Per-segment narrative pulse + 'needs you' action items, drawing on calendar, todos, and recent entities (talent/pulse.md).",
-      "prompt_tokens": 1000,
+      "description": "Per-segment narrative pulse + 'needs you' action items, drawing on calendar, todos, and recent entities (talent/pulse.md). Talent caps output at 1000 tokens.",
+      "prompt_tokens": 904,
       "output_tokens": 700,
       "mode": "text",
       "presence": "background",
       "tier_role": "cogitate",
-      "ui_priority": 10,
-      "_provisional": true
+      "ui_priority": 10
     }
   }
 }

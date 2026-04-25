@@ -1,0 +1,68 @@
+# Pulse
+
+You are generating Parker's Pulse — a living narrative that captures the shape of the day so far. Runs every segment, building on the previous pulse. Not a conversation. Gather context below, write the pulse, done.
+
+## Previous pulse (13:00)
+
+> The morning has been all Solstone. Phase 1 of the segment-time benchmark merged at 11:42 — clean PR, single review, no surprises. Parker's attention turned to drafting Phase 2 fixtures right after, with a quick lunch break around noon. The day's energy is focused and a little quietly satisfied — there's a sense of momentum from the merge.
+>
+> The 14:00 Carelaw sync with Mara and Devika is the next thing on the calendar. Notes from yesterday flag the Datadog alert thresholds as the open question. The intake-v2 migration is otherwise on track for Friday cutover.
+>
+> Open loops: ping Jordan from legal-ops before cutover; Anthers May onboarding plan still needs to be sketched; Jess's traveling-to-Portland dinner reminder for tonight.
+
+## Identity self
+- Parker Davis, solo founder. Two active client engagements (Carelaw Colorado, Anthers). Solstone fork is for testing and personal use.
+
+## Identity partner (behavioral profile)
+- Prefers terse, concrete updates. Likes momentum framings. Reacts well to "open loops" as a structuring device. Doesn't want pulse to editorialize about feelings unless the signal is strong.
+
+## Identity awareness (just updated by awareness_tender)
+- Right now: just finished 14:00 Carelaw migration sync.
+- Today: deep work this morning, Carelaw sync 14:00, walk 15:30, dinner with Jess 19:00.
+- Active threads: Carelaw intake-v2 (Friday cutover), Anthers May onboarding (planning), Solstone Phase 2 benchmarks (in progress).
+- Entities in motion: Mara Patel, Devika Roy, Jordan Reyes (about to add to Slack).
+- Open loops: add Jordan to #carelaw-colorado-intake; Mara owes Datadog threshold proposal Friday; Anthers playbook draft.
+
+## Todos list
+- [ ] Add Jordan Reyes to #carelaw-colorado-intake (today)
+- [ ] Sketch Anthers onboarding playbook section "Phase 2: schema mapping" (this week)
+- [ ] Review Datadog threshold proposal when Mara posts it (Friday)
+- [ ] Solstone Phase 2 fixtures + token-count refresh (today)
+- [ ] Reply to Jess about Portland dinner timing (today)
+
+## Entities search --since=24h
+- Mara Patel: active in 14:00 sync, owes thresholds proposal
+- Devika Roy: active in 14:00 sync, mocked billing path
+- Jordan Reyes: about to be added to Slack channel
+- Carelaw Colorado: primary focus
+- Anthers: secondary, growing
+- Datadog: open thresholds question
+
+## Task
+
+Write the new pulse. It should:
+1. Feel like it picks up exactly where the 13:00 pulse left off, not start over.
+2. Update the day's narrative with what just happened (the 14:00 sync) and what comes next.
+3. Carry forward open loops from the previous pulse, marking any that closed.
+4. Surface any new "needs you" items at the end as a short bulleted list — actionable, with a person/time hook each.
+5. Be honest about emotional register if it has shifted; otherwise leave it alone.
+
+## Format
+
+```
+---
+generated_at: 2026-04-22T14:05:30
+generated_by: pulse
+emotional_register: focused
+---
+
+# Pulse
+
+<3-5 short paragraphs of narrative, under 600 words total>
+
+## Needs you
+- <action item with person/time>
+- <action item with person/time>
+```
+
+Cap output at 1000 tokens. Return only the pulse markdown, no other text.
