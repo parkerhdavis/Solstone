@@ -79,6 +79,11 @@ html {
   --facet-color: #b06a1a;
   --facet-bg: transparent;
   --facet-border: #e5e0db;
+  /* Semantic status palette — observer is the first consumer. */
+  --status-active: #16a34a;
+  --status-stale: #d97706;
+  --status-error: #dc2626;
+  --status-inactive: #6b7280;
 
   /* Layout dimensions */
   --facet-bar-height: 64px;
@@ -107,6 +112,10 @@ body {
   margin-top: var(--facet-bar-height);
   padding-top: 8px;
   margin-left: var(--menu-bar-width-minimal);
+}
+
+body.menu-full .workspace {
+  margin-left: var(--menu-bar-width-full);
 }
 
 body.has-app-bar .workspace {
@@ -249,7 +258,7 @@ body:has(.status-pane.visible) .facet-bar::after {
 }
 
 .facet-bar #hamburger {
-  display: none;
+  display: flex;
   font-size: 24px;
   cursor: pointer;
   padding: 8px;
@@ -265,12 +274,6 @@ body:has(.status-pane.visible) .facet-bar::after {
 
 .facet-bar #hamburger:active {
   background: rgba(0, 0, 0, 0.10);
-}
-
-@media (max-width: 768px) {
-  .facet-bar #hamburger {
-    display: flex;
-  }
 }
 
 .facet-bar .status-icon {
@@ -456,6 +459,7 @@ body:has(.status-pane.visible) .facet-bar::after {
 }
 
 .date-nav-label {
+  position: relative;
   text-align: center;
   color: inherit;
   text-decoration: none;
@@ -474,6 +478,22 @@ body:has(.status-pane.visible) .facet-bar::after {
 
 .date-nav-label:active {
   background: rgba(0, 0, 0, 0.10);
+}
+
+.date-nav-label[data-stats-warning="true"] {
+  padding-right: 18px;
+}
+
+.date-nav-label[data-stats-warning="true"]::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-warning, #f59e0b);
+  border: 2px solid var(--facet-bg-primary, #fff);
 }
 
 /* Keep date-nav stable during view transitions */
@@ -542,6 +562,26 @@ body:has(.status-pane.visible) .facet-bar::after {
   max-height: 280px;
   opacity: 1;
   pointer-events: auto;
+}
+
+.mp-error {
+  margin: 8px 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--color-warning, #f59e0b);
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.08);
+  color: #92400e;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.mp-error-title {
+  font-weight: 600;
+}
+
+.mp-error-detail {
+  margin-top: 2px;
+  color: #78350f;
 }
 
 .mp-weekdays {
@@ -2584,6 +2624,171 @@ body.has-date-nav .chat-app {
   cursor: not-allowed;
 }
 
+.surface-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 24px;
+  text-align: center;
+  color: #9ca3af;
+}
+
+.surface-state--loading {
+  color: #6b7280;
+}
+
+.surface-state-icon {
+  color: #d1d5db;
+  font-size: 48px;
+  line-height: 1;
+}
+
+.surface-state-icon svg {
+  width: 48px;
+  height: 48px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.surface-state-heading {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 500;
+  line-height: 1.3;
+  color: #4b5563;
+}
+
+.surface-state-desc {
+  margin: 0;
+  max-width: 36ch;
+  font-size: 14px;
+  line-height: 1.5;
+  color: #9ca3af;
+}
+
+.surface-state-text {
+  display: block;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.5;
+  color: #6b7280;
+}
+
+.surface-state-action {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.surface-state-action > button {
+  min-height: 40px;
+  padding: 0.6em 1.2em;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #fff;
+  color: #374151;
+  font: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+
+.surface-state-action > button:hover {
+  background: #f3f4f6;
+  border-color: #9ca3af;
+}
+
+.surface-state-action > button:active {
+  background: #e5e7eb;
+  border-color: #6b7280;
+  transform: scale(0.98);
+}
+
+.surface-state-action > button:focus-visible {
+  outline: 2px solid var(--facet-color, #b06a1a);
+  outline-offset: 2px;
+}
+
+.surface-state-action > a:not([class]) {
+  color: var(--facet-color, #2563eb);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.surface-state-action > a:not([class]):hover {
+  text-decoration: underline;
+}
+
+.surface-state-action > a:not([class]):focus-visible {
+  outline: 2px solid var(--facet-color, #b06a1a);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.surface-state--error .surface-state-icon {
+  color: #f59e0b;
+}
+
+.surface-state--error .surface-state-heading {
+  color: #92400e;
+}
+
+.surface-state-spinner {
+  width: 24px;
+  height: 24px;
+  border: 3px solid #e5e7eb;
+  border-top-color: var(--facet-color, #b06a1a);
+  border-radius: 50%;
+  animation: surface-state-spin 0.8s linear infinite;
+}
+
+@keyframes surface-state-spin {
+  to { transform: rotate(360deg); }
+}
+
+.surface-state-server-message {
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--text-muted, #6b7280);
+  font-family: monospace;
+  word-break: break-word;
+}
+
+.surface-state-refresh-error {
+  margin-top: 12px;
+  padding: 12px 16px;
+  border: 1px solid var(--color-warning, #f59e0b);
+  border-radius: 6px;
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.control-save-error {
+  display: inline-block;
+  margin-left: 8px;
+  color: var(--color-error, #dc2626);
+  font-size: 13px;
+}
+
+.menu-item-bg-failing::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-warning, #f59e0b);
+  border: 2px solid var(--facet-bg-primary, #fff);
+}
+
 @media (max-width: 768px) {
   .chat-app {
     padding: 0 12px 16px;
@@ -2598,6 +2803,12 @@ body.has-date-nav .chat-app {
 
   .chat-composer {
     flex-direction: column;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .surface-state-spinner {
+    animation: none;
   }
 }
 

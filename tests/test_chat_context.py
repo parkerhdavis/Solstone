@@ -9,9 +9,12 @@ from datetime import datetime
 from pathlib import Path
 
 from convey.chat_stream import append_chat_event
+from think.identity import ensure_identity_directory
 
 TEMPLATE_VAR_KEYS = {
     "digest_contents",
+    "identity_self",
+    "identity_agency",
     "active_talents",
     "trigger_context",
     "location",
@@ -211,7 +214,7 @@ def test_chat_context_routine_suggestion_only_counts_owner_messages(
     assert len(save_calls) == 1
 
 
-def test_chat_context_talent_finished_appends_final_user_message(monkeypatch, tmp_path):
+def test_chat_context_talent_finished_marks_report_back_only(monkeypatch, tmp_path):
     journal = tmp_path / "journal"
     monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(journal))
 
@@ -258,12 +261,120 @@ def test_chat_context_talent_finished_appends_final_user_message(monkeypatch, tm
         }
     )
 
-    _assert_template_vars_result(result)
+    template_vars = _assert_template_vars_result(result)
+    assert "Mode: report_back_only" in template_vars["trigger_context"]
+    assert (
+        "Instruction: Answer the owner directly; do not dispatch or redispatch "
+        "a talent for this trigger."
+    ) in template_vars["trigger_context"]
     assert result["messages"] == [
         {"role": "user", "content": "What happened?"},
         {"role": "assistant", "content": "Looking into it."},
-        {"role": "user", "content": "[talent exec finished: Found the latest notes.]"},
+        {
+            "role": "user",
+            "content": (
+                "[internal follow-up: talent exec finished. This is a "
+                "report-back turn, not a dispatch turn. Do not request "
+                "another talent for this task. Use the result below to "
+                "answer the owner's pending request with a short summary. "
+                "Result: Found the latest notes.]"
+            ),
+        },
     ]
+
+
+def test_chat_context_talent_errored_marks_report_back_only(monkeypatch, tmp_path):
+    journal = tmp_path / "journal"
+    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(journal))
+
+    append_chat_event(
+        "owner_message",
+        ts=_ts(10, 0),
+        text="What happened?",
+        app="home",
+        path="/app/home",
+        facet="work",
+    )
+    append_chat_event(
+        "sol_message",
+        ts=_ts(10, 1),
+        use_id="use-chat-3",
+        text="Looking into it.",
+        notes="Acknowledged request.",
+        requested_target=None,
+        requested_task=None,
+    )
+    append_chat_event(
+        "talent_errored",
+        ts=_ts(10, 2),
+        use_id="use-exec-3",
+        name="exec",
+        reason="The lookup failed.",
+    )
+
+    monkeypatch.setattr("think.routines.get_routine_state", lambda: [])
+    monkeypatch.setattr(
+        "think.routines.get_config",
+        lambda: {"_meta": {"suggestions_enabled": False, "suggestions": {}}},
+    )
+    monkeypatch.setattr("think.routines.save_config", lambda config: None)
+
+    result = _load_chat_context_module().pre_process(
+        {
+            "day": "20260420",
+            "trigger_kind": "talent_errored",
+            "trigger_payload": {
+                "name": "exec",
+                "reason": "The lookup failed.",
+            },
+        }
+    )
+
+    template_vars = _assert_template_vars_result(result)
+    assert "Mode: report_back_only" in template_vars["trigger_context"]
+    assert (
+        "Instruction: Answer the owner directly; do not dispatch or redispatch "
+        "a talent for this trigger."
+    ) in template_vars["trigger_context"]
+    assert result["messages"] == [
+        {"role": "user", "content": "What happened?"},
+        {"role": "assistant", "content": "Looking into it."},
+        {
+            "role": "user",
+            "content": (
+                "[internal follow-up: talent exec errored. This is a "
+                "report-back turn, not a dispatch turn. Do not request "
+                "another talent for this task. Briefly explain the failure "
+                "to the owner and ask for clarification only if needed. "
+                "Reason: The lookup failed.]"
+            ),
+        },
+    ]
+
+
+def test_chat_context_includes_identity_grounding(monkeypatch, tmp_path):
+    journal = tmp_path / "journal"
+    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(journal))
+    _write_journal_config(journal, {})
+    ensure_identity_directory()
+
+    digest_seed = (journal / "identity" / "digest.md").read_text(encoding="utf-8")
+    assert digest_seed == "not yet generated\n"
+
+    monkeypatch.setattr("think.routines.get_routine_state", lambda: [])
+    monkeypatch.setattr(
+        "think.routines.get_config",
+        lambda: {"_meta": {"suggestions_enabled": False, "suggestions": {}}},
+    )
+    monkeypatch.setattr("think.routines.save_config", lambda config: None)
+
+    result = _load_chat_context_module().pre_process({"day": "20260420"})
+
+    template_vars = _assert_template_vars_result(result)
+    assert template_vars["identity_self"]
+    assert template_vars["identity_agency"]
+    assert template_vars["identity_self"] != digest_seed.strip()
+    assert template_vars["identity_agency"] != digest_seed.strip()
 
 
 def test_chat_context_preserves_save_routines_config_side_effect(monkeypatch, tmp_path):
@@ -372,3 +483,13 @@ def test_chat_context_drops_legacy_memory_imports(monkeypatch):
     _load_chat_context_module()
 
     assert legacy_module not in sys.modules
+
+
+def test_chat_prompt_includes_meta_question_inline_rule():
+    prompt_path = Path(__file__).resolve().parents[1] / "talent" / "chat.md"
+    prompt_text = prompt_path.read_text(encoding="utf-8")
+
+    assert (
+        "Questions about your role, capabilities, limits, current context, naming, "
+        "or system status stay inline."
+    ) in prompt_text

@@ -1256,8 +1256,10 @@ tr:hover .entity-delete-btn {
 
 <div class="workspace-content">
   <div id="entities-loading" class="entities-loading">
-    <div class="spinner"></div>
-    <p>Loading entities...</p>
+    <div class="surface-state surface-state--loading" role="status" aria-busy="true">
+      <div class="surface-state-spinner spinner" aria-hidden="true"></div>
+      <span class="surface-state-text" data-role="loading-status">Loading entities...</span>
+    </div>
   </div>
 
   <!-- Journal-wide entities view (all-facet mode) -->
@@ -1482,6 +1484,8 @@ let journalEntitiesData = null;  // For all-facet mode
 let currentDetailEntity = null;
 const pendingEntities = new Map(); // use_id → { name, element }
 const pendingAgentCallbacks = new Map(); // use_id → callback function
+const ENTITIES_CORTEX_STALL_MS = 2 * 60 * 1000;
+let cortexSub = null;
 const _errorTimers = {};
 
 // Standard entity types - fetched from server
@@ -1699,7 +1703,7 @@ function showFacetDetailView(entityId) {
       console.error('Error loading entity:', error);
       document.getElementById('detail-name').textContent = 'Error';
       document.getElementById('detail-description-container').innerHTML =
-        `<div class="error-message">${window.AppServices._escapeHtml(error.message)}</div>`;
+        `<div class="error-message">${window.AppServices.escapeHtml(error.message)}</div>`;
     });
 }
 
@@ -1725,7 +1729,7 @@ function showJournalDetailView(entityId) {
       console.error('Error loading journal entity:', error);
       document.getElementById('journal-detail-name').textContent = 'Error';
       document.getElementById('journal-detail-facets').innerHTML =
-        `<div class="error-message">${window.AppServices._escapeHtml(error.message)}</div>`;
+        `<div class="error-message">${window.AppServices.escapeHtml(error.message)}</div>`;
     });
 }
 
@@ -2410,10 +2414,11 @@ function startDescriptionEdit(entity) {
   };
 
   generateBtn.onclick = () => {
+    hideInlineError('description-save-error');
     textarea.disabled = true;
     generateBtn.classList.add('generating');
 
-    fetch(`api/${encodeURIComponent(currentFacet)}/generate-description`, {
+    window.apiJson(`api/${encodeURIComponent(currentFacet)}/generate-description`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -2422,25 +2427,31 @@ function startDescriptionEdit(entity) {
         current_description: textarea.value
       })
     })
-    .then(response => response.json())
     .then(data => {
-      if (data.success && data.use_id) {
-        listenForAgentCompletion(data.use_id, (result) => {
-          if (result.success && result.response) {
-            saveDescription(entity, result.response);
-          } else {
-            textarea.disabled = false;
-            generateBtn.classList.remove('generating');
-          }
+      if (!data?.use_id) {
+        throw new window.ApiError({
+          cause: 'parse',
+          status: 200,
+          serverMessage: 'Malformed server response',
+          url: `api/${encodeURIComponent(currentFacet)}/generate-description`
         });
-      } else {
-        throw new Error(data.error || 'Failed to start generation');
       }
+
+      listenForAgentCompletion(data.use_id, (result) => {
+        if (result.success && result.response) {
+          saveDescription(entity, result.response);
+        } else {
+          textarea.disabled = false;
+          generateBtn.classList.remove('generating');
+          showInlineError('description-save-error', result.error || "Couldn't start description generation");
+        }
+      });
     })
-    .catch(error => {
-      console.error('Error generating description:', error);
+    .catch(err => {
       textarea.disabled = false;
       generateBtn.classList.remove('generating');
+      showInlineError('description-save-error', err?.serverMessage || "Couldn't start description generation");
+      window.logError(err, { context: 'entities: generateDescription kickoff failed' });
     });
   };
 }
@@ -2644,13 +2655,8 @@ function loadEntities() {
   }
 
   // Facet-specific mode
-  return fetch(`api/${encodeURIComponent(currentFacet)}`)
-    .then(response => response.json())
+  return window.apiJson(`api/${encodeURIComponent(currentFacet)}`)
     .then(data => {
-      if (data.error) {
-        throw new Error(data.error);
-      }
-
       entitiesData = {
         attached: data.attached || [],
         detected: data.detected || []
@@ -2668,21 +2674,19 @@ function loadEntities() {
       detectedPage = 1;
       renderEntities();
     })
-    .catch(error => {
-      console.error('Error loading entities:', error);
-      document.getElementById('entities-loading').innerHTML =
-        `<div class="error-message">${window.AppServices._escapeHtml(error.message || 'Network error')}</div>`;
+    .catch(err => {
+      window.logError(err, { context: 'entities: loadEntities failed' });
+      window.SurfaceState.replaceLoading('entities-loading', window.SurfaceState.errorCard({
+        heading: "Couldn't load entities",
+        desc: 'Reload to try again.',
+        serverMessage: err?.serverMessage
+      }));
     });
 }
 
 function loadJournalEntities() {
-  return fetch('api/journal')
-    .then(response => response.json())
+  return window.apiJson('api/journal')
     .then(data => {
-      if (data.error) {
-        throw new Error(data.error);
-      }
-
       journalEntitiesData = data.entities || [];
 
       document.getElementById('entities-loading').style.display = 'none';
@@ -2696,10 +2700,13 @@ function loadJournalEntities() {
 
       renderJournalEntities();
     })
-    .catch(error => {
-      console.error('Error loading journal entities:', error);
-      document.getElementById('entities-loading').innerHTML =
-        `<div class="error-message">${window.AppServices._escapeHtml(error.message || 'Network error')}</div>`;
+    .catch(err => {
+      window.logError(err, { context: 'entities: loadJournalEntities failed' });
+      window.SurfaceState.replaceLoading('entities-loading', window.SurfaceState.errorCard({
+        heading: "Couldn't load entities",
+        desc: 'Reload to try again.',
+        serverMessage: err?.serverMessage
+      }));
     });
 }
 
@@ -3253,6 +3260,7 @@ function submitEntityAssist() {
         pendingEntities.delete(tempId);
         pendingEntities.set(data.use_id, pending);
         pending.element.dataset.agentId = data.use_id;
+        cortexSub?.pending?.track(data.use_id);
       }
     } else {
       throw new Error(data.error || 'Failed to start assistant');
@@ -3271,7 +3279,13 @@ function setupCortexListener() {
     return;
   }
 
-  window.appEvents.listen('cortex', (msg) => {
+  cortexSub = window.appEvents.listen('cortex', {
+    schema: ['event', 'use_id'],
+    correlationKey: 'use_id',
+    timeout: ENTITIES_CORTEX_STALL_MS,
+    onDrop: (e) => window.logError(e, { context: 'entities: cortex listener drop' }),
+    onTimeout: (useId) => handleEntitiesTimeout(useId)
+  }, (msg) => {
     const agentId = msg.use_id;
     if (!agentId) return;
 
@@ -3310,6 +3324,19 @@ function listenForAgentCompletion(agentId, callback) {
     return;
   }
   pendingAgentCallbacks.set(agentId, callback);
+  cortexSub?.pending?.track(agentId);
+}
+
+function handleEntitiesTimeout(useId) {
+  if (pendingEntities.has(useId)) {
+    failPendingEntity(useId, 'Entity assist timed out — reload to retry');
+  }
+
+  if (pendingAgentCallbacks.has(useId)) {
+    const callback = pendingAgentCallbacks.get(useId);
+    pendingAgentCallbacks.delete(useId);
+    callback({ success: false, error: 'Generation timed out — reload to retry' });
+  }
 }
 
 function updatePendingEntity(agentId, entity) {
@@ -3400,8 +3427,7 @@ function failPendingEntity(agentId, error) {
 
 // Delete detected entity
 function previewEntityDelete(entityName) {
-  fetch(`api/${encodeURIComponent(currentFacet)}/detected/preview?name=${encodeURIComponent(entityName)}`)
-    .then(response => response.json())
+  window.apiJson(`api/${encodeURIComponent(currentFacet)}/detected/preview?name=${encodeURIComponent(entityName)}`)
     .then(data => {
       if (data.success && data.days) {
         hideInlineError('detected-action-error');
@@ -3423,27 +3449,14 @@ function previewEntityDelete(entityName) {
         modal.style.display = 'flex';
       }
     })
-    .catch(error => {
-      console.error('Error previewing delete:', error);
-      showInlineError('detected-action-error', "couldn't load delete preview");
+    .catch(err => {
+      showInlineError('detected-action-error', err?.serverMessage || "Couldn't load delete preview");
+      window.logError(err, { context: 'entities: previewEntityDelete failed' });
     });
 }
 
 function closeDeleteModal() {
   document.getElementById('deleteModal').style.display = 'none';
-}
-
-function deleteEntity(entityName, skipReload = false) {
-  return fetch(`api/${encodeURIComponent(currentFacet)}/detected`, {
-    method: 'DELETE',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: entityName })
-  })
-  .then(response => response.json())
-  .then(data => {
-    if (!data.success) throw new Error(data.error);
-    if (!skipReload) loadEntities();
-  });
 }
 
 function removeEntityFromUI(entityName) {
@@ -3453,15 +3466,28 @@ function removeEntityFromUI(entityName) {
   renderDetectedTable(document.getElementById('entity-search').value.trim());
 }
 
-function confirmEntityDelete() {
+async function confirmEntityDelete() {
   const entityName = document.getElementById('confirmDeleteBtn').dataset.entityName;
   if (!entityName) return;
 
-  closeDeleteModal();
-  removeEntityFromUI(entityName);
-  deleteEntity(entityName, true).catch(error => {
-    console.error('Error deleting:', error);
-    loadEntities();
-  });
+  const confirmBtn = document.getElementById('confirmDeleteBtn');
+  confirmBtn.disabled = true;
+
+  try {
+    await window.apiJson(`api/${encodeURIComponent(currentFacet)}/detected`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: entityName })
+    });
+    hideInlineError('detected-action-error');
+    closeDeleteModal();
+    removeEntityFromUI(entityName);
+  } catch (err) {
+    closeDeleteModal();
+    showInlineError('detected-action-error', err?.serverMessage || "Couldn't delete entity");
+    window.logError(err, { context: 'entities: confirmEntityDelete failed' });
+  } finally {
+    confirmBtn.disabled = false;
+  }
 }
 </script>

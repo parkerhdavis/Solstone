@@ -211,7 +211,7 @@
       "disabled": false,
       "group": "Think",
       "label": "Chat",
-      "tier": 3,
+      "tier": 2,
       "type": "generate"
     },
     "talent.system.coder": {
@@ -384,13 +384,6 @@
       "schedule": "segment",
       "tier": 2,
       "type": "generate"
-    },
-    "talent.system.test_missing_type_output_1568d299dc474aa9ba42401c7b1b75e2": {
-      "disabled": false,
-      "group": "Think",
-      "label": "test_missing_type_output_1568d299dc474aa9ba42401c7b1b75e2",
-      "tier": 2,
-      "type": null
     },
     "talent.system.work": {
       "disabled": false,

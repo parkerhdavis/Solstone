@@ -8,14 +8,165 @@ from __future__ import annotations
 import io
 import json
 
+import apps.observer.routes as routes_module
+from apps.observer.routes import (
+    ACTIVE_THRESHOLD_MS,
+    FUTURE_CLOCK_DRIFT_TOLERANCE_MS,
+    OBSERVER_STATE_LABELS,
+    STALE_THRESHOLD_MS,
+    _classify_observer_freshness,
+)
+from apps.observer.utils import save_observer
+
+
+def _api_list_payload(env):
+    resp = env.client.get("/app/observer/api/list")
+    assert resp.status_code == 200
+    return resp.get_json()
+
+
+def _api_list_observers(env):
+    return _api_list_payload(env)["observers"]
+
+
+def _save_test_observer(
+    key_prefix: str,
+    name: str,
+    *,
+    created_at: int,
+    last_seen: int | None,
+    revoked: bool = False,
+):
+    key = key_prefix + ("f" * 56)
+    assert save_observer(
+        {
+            "key": key,
+            "name": name,
+            "created_at": created_at,
+            "last_seen": last_seen,
+            "last_segment": None,
+            "enabled": True,
+            "revoked": revoked,
+            "revoked_at": created_at + 1 if revoked else None,
+            "stats": {
+                "segments_received": 0,
+                "bytes_received": 0,
+            },
+        }
+    )
+    return key
+
+
+def test_classifier_last_seen_none_returns_disconnected():
+    """Missing last_seen is classified as disconnected."""
+    assert _classify_observer_freshness(None, False, 1_000_000) == {
+        "state": "disconnected",
+        "group": "inactive",
+        "elapsed_ms": None,
+        "clock_skew": False,
+    }
+
+
+def test_classifier_future_within_tolerance_returns_connected_no_skew():
+    """Small future drift stays connected without clock skew."""
+    current_now = 1_000_000
+    assert 60_000 < FUTURE_CLOCK_DRIFT_TOLERANCE_MS
+
+    assert _classify_observer_freshness(current_now + 60_000, False, current_now) == {
+        "state": "connected",
+        "group": "active",
+        "elapsed_ms": 0,
+        "clock_skew": False,
+    }
+
+
+def test_classifier_future_beyond_tolerance_returns_disconnected_with_skew():
+    """Large future drift is disconnected and flagged for clock skew."""
+    current_now = 1_000_000
+    last_seen = current_now + (10 * 60_000)
+    assert (10 * 60_000) > FUTURE_CLOCK_DRIFT_TOLERANCE_MS
+
+    result = _classify_observer_freshness(last_seen, False, current_now)
+
+    assert result["state"] == "disconnected"
+    assert result["group"] == "inactive"
+    assert result["clock_skew"] is True
+    assert result["elapsed_ms"] == -600_000
+
+
+def test_classifier_just_under_active_returns_connected():
+    """Elapsed time just under the active threshold stays connected."""
+    current_now = 1_000_000
+
+    assert _classify_observer_freshness(
+        current_now - (ACTIVE_THRESHOLD_MS - 1),
+        False,
+        current_now,
+    ) == {
+        "state": "connected",
+        "group": "active",
+        "elapsed_ms": ACTIVE_THRESHOLD_MS - 1,
+        "clock_skew": False,
+    }
+
+
+def test_classifier_just_over_active_returns_stale():
+    """Elapsed time at the active threshold enters the stale bucket."""
+    current_now = 1_000_000
+
+    assert _classify_observer_freshness(
+        current_now - ACTIVE_THRESHOLD_MS,
+        False,
+        current_now,
+    ) == {
+        "state": "stale",
+        "group": "stale",
+        "elapsed_ms": ACTIVE_THRESHOLD_MS,
+        "clock_skew": False,
+    }
+
+
+def test_classifier_beyond_stale_returns_disconnected():
+    """Elapsed time at the stale threshold becomes disconnected."""
+    current_now = 1_000_000
+
+    assert _classify_observer_freshness(
+        current_now - STALE_THRESHOLD_MS,
+        False,
+        current_now,
+    ) == {
+        "state": "disconnected",
+        "group": "inactive",
+        "elapsed_ms": STALE_THRESHOLD_MS,
+        "clock_skew": False,
+    }
+
+
+def test_classifier_revoked_returns_revoked_regardless_of_last_seen():
+    """Revoked observers stay revoked for both missing and recent last_seen."""
+    current_now = 1_000_000
+    expected = {
+        "state": "revoked",
+        "group": "inactive",
+        "elapsed_ms": None,
+        "clock_skew": False,
+    }
+
+    assert _classify_observer_freshness(None, True, current_now) == expected
+    assert _classify_observer_freshness(current_now, True, current_now) == expected
+
 
 def test_api_list_empty(observer_env):
     """Test listing observers when none exist."""
     env = observer_env()
 
-    resp = env.client.get("/app/observer/api/list")
-    assert resp.status_code == 200
-    assert resp.get_json() == []
+    assert _api_list_payload(env) == {
+        "thresholds": {
+            "active_ms": 30000,
+            "stale_ms": 120000,
+        },
+        "observers": [],
+    }
 
 
 def test_api_create_observer(observer_env):
@@ -74,15 +225,20 @@ def test_api_list_shows_created_observer(observer_env):
     key_prefix = resp.get_json()["key_prefix"]
 
     # List should show it
-    resp = env.client.get("/app/observer/api/list")
-    assert resp.status_code == 200
-    observers = resp.get_json()
+    payload = _api_list_payload(env)
+    observers = payload["observers"]
 
     assert len(observers) == 1
+    assert payload["thresholds"] == {"active_ms": 30000, "stale_ms": 120000}
     assert observers[0]["key_prefix"] == key_prefix
     assert observers[0]["name"] == "my-observer"
     assert observers[0]["enabled"] is True
     assert observers[0]["stats"]["segments_received"] == 0
+    assert observers[0]["state"] == "disconnected"
+    assert observers[0]["group"] == "inactive"
+    assert observers[0]["label"] == OBSERVER_STATE_LABELS["disconnected"]
+    assert observers[0]["elapsed_ms"] is None
+    assert observers[0]["clock_skew"] is False
 
 
 def test_api_delete_observer(observer_env):
@@ -103,12 +259,175 @@ def test_api_delete_observer(observer_env):
     assert resp.get_json()["status"] == "ok"
 
     # List should still show it, but marked as revoked
-    resp = env.client.get("/app/observer/api/list")
-    observers = resp.get_json()
+    observers = _api_list_observers(env)
     assert len(observers) == 1
     assert observers[0]["key_prefix"] == key_prefix
     assert observers[0]["revoked"] is True
     assert observers[0]["revoked_at"] is not None
+    assert observers[0]["state"] == "revoked"
+    assert observers[0]["group"] == "inactive"
+    assert observers[0]["label"] == OBSERVER_STATE_LABELS["revoked"]
+    assert observers[0]["elapsed_ms"] is None
+    assert observers[0]["clock_skew"] is False
+
+
+def test_api_list_sorts_by_group_and_last_seen(observer_env, monkeypatch):
+    """api_list orders active, then stale, then inactive with freshest first."""
+    env = observer_env()
+    fixed_now = 2_000_000
+    monkeypatch.setattr(routes_module, "now_ms", lambda: fixed_now)
+
+    _save_test_observer(
+        "cccc0000",
+        "inactive-disconnected",
+        created_at=10,
+        last_seen=fixed_now - 600_000,
+    )
+    _save_test_observer(
+        "bbbb0000",
+        "stale-observer",
+        created_at=20,
+        last_seen=fixed_now - 60_000,
+    )
+    _save_test_observer(
+        "aaaa0000",
+        "active-observer",
+        created_at=30,
+        last_seen=fixed_now - 5_000,
+    )
+    _save_test_observer(
+        "dddd0000",
+        "inactive-never",
+        created_at=40,
+        last_seen=None,
+    )
+
+    observers = _api_list_observers(env)
+    assert [observer["name"] for observer in observers] == [
+        "active-observer",
+        "stale-observer",
+        "inactive-disconnected",
+        "inactive-never",
+    ]
+    assert [
+        (
+            observer["state"],
+            observer["group"],
+            observer["label"],
+            observer["elapsed_ms"],
+            observer["clock_skew"],
+        )
+        for observer in observers
+    ] == [
+        ("connected", "active", OBSERVER_STATE_LABELS["connected"], 5_000, False),
+        ("stale", "stale", OBSERVER_STATE_LABELS["stale"], 60_000, False),
+        (
+            "disconnected",
+            "inactive",
+            OBSERVER_STATE_LABELS["disconnected"],
+            600_000,
+            False,
+        ),
+        (
+            "disconnected",
+            "inactive",
+            OBSERVER_STATE_LABELS["disconnected"],
+            None,
+            False,
+        ),
+    ]
+
+
+def test_api_list_tie_breaks_by_key_prefix(observer_env, monkeypatch):
+    """Observers with the same last_seen sort by key_prefix ascending."""
+    env = observer_env()
+    fixed_now = 3_000_000
+    monkeypatch.setattr(routes_module, "now_ms", lambda: fixed_now)
+
+    _save_test_observer(
+        "bbbb0000",
+        "active-b",
+        created_at=10,
+        last_seen=fixed_now - 5_000,
+    )
+    _save_test_observer(
+        "aaaa0000",
+        "active-a",
+        created_at=20,
+        last_seen=fixed_now - 5_000,
+    )
+
+    observers = _api_list_observers(env)
+    assert [observer["key_prefix"] for observer in observers] == [
+        "aaaa0000",
+        "bbbb0000",
+    ]
+    assert all(observer["state"] == "connected" for observer in observers)
+    assert all(observer["group"] == "active" for observer in observers)
+    assert all(
+        observer["label"] == OBSERVER_STATE_LABELS["connected"]
+        for observer in observers
+    )
+
+
+def test_api_list_revoked_observer_buckets_inactive(observer_env, monkeypatch):
+    """Revoked observers sort in the inactive bucket regardless of last_seen."""
+    env = observer_env()
+    fixed_now = 4_000_000
+    monkeypatch.setattr(routes_module, "now_ms", lambda: fixed_now)
+
+    _save_test_observer(
+        "bbbb0000",
+        "revoked-observer",
+        created_at=10,
+        last_seen=fixed_now - 1_000,
+        revoked=True,
+    )
+    _save_test_observer(
+        "aaaa0000",
+        "stale-observer",
+        created_at=20,
+        last_seen=fixed_now - 60_000,
+    )
+
+    observers = _api_list_observers(env)
+    assert [observer["name"] for observer in observers] == [
+        "stale-observer",
+        "revoked-observer",
+    ]
+    assert observers[0]["state"] == "stale"
+    assert observers[0]["group"] == "stale"
+    assert observers[0]["label"] == OBSERVER_STATE_LABELS["stale"]
+    assert observers[0]["elapsed_ms"] == 60_000
+    assert observers[0]["clock_skew"] is False
+    assert observers[1]["state"] == "revoked"
+    assert observers[1]["group"] == "inactive"
+    assert observers[1]["label"] == OBSERVER_STATE_LABELS["revoked"]
+    assert observers[1]["elapsed_ms"] is None
+    assert observers[1]["clock_skew"] is False
+
+
+def test_api_list_includes_state_and_group_per_observer(observer_env, monkeypatch):
+    """api_list includes freshness state, grouping, label, and skew metadata."""
+    env = observer_env()
+    fixed_now = 5_000_000
+    monkeypatch.setattr(routes_module, "now_ms", lambda: fixed_now)
+
+    _save_test_observer(
+        "aaaa0000",
+        "active-observer",
+        created_at=10,
+        last_seen=fixed_now - 5_000,
+    )
+
+    observer = _api_list_observers(env)[0]
+
+    assert observer["state"] == "connected"
+    assert observer["group"] == "active"
+    assert observer["label"] == OBSERVER_STATE_LABELS["connected"]
+    assert isinstance(observer["elapsed_ms"], int)
+    assert observer["elapsed_ms"] == 5_000
+    assert observer["clock_skew"] is False
 
 
 def test_api_delete_nonexistent(observer_env):
@@ -305,8 +624,7 @@ def test_ingest_updates_stats(observer_env):
     assert resp.status_code == 200
 
     # Check stats updated
-    resp = env.client.get("/app/observer/api/list")
-    observers = resp.get_json()
+    observers = _api_list_observers(env)
     assert len(observers) == 1
     assert observers[0]["stats"]["segments_received"] == 1
     assert observers[0]["stats"]["bytes_received"] == len(test_data)
@@ -700,8 +1018,7 @@ def test_ingest_stats_use_adjusted_segment(observer_env):
     assert resp.status_code == 200
 
     # Check stats - last_segment should be the adjusted one
-    resp = env.client.get("/app/observer/api/list")
-    observers = resp.get_json()
+    observers = _api_list_observers(env)
     assert len(observers) == 1
     last_segment = observers[0]["last_segment"]
     assert last_segment is not None
@@ -1249,8 +1566,7 @@ def test_api_list_includes_segments_observed_stat(observer_env):
     key_prefix = data["key_prefix"]
 
     # Initially no segments_observed
-    resp = env.client.get("/app/observer/api/list")
-    data = resp.get_json()
+    data = _api_list_observers(env)
     assert len(data) == 1
     assert "segments_observed" not in data[0]["stats"]
 
@@ -1265,8 +1581,7 @@ def test_api_list_includes_segments_observed_stat(observer_env):
         json.dump(observer_data, f)
 
     # Should now show in list
-    resp = env.client.get("/app/observer/api/list")
-    data = resp.get_json()
+    data = _api_list_observers(env)
     assert data[0]["stats"]["segments_observed"] == 5
 
 
@@ -1395,8 +1710,7 @@ def test_ingest_duplicate_increments_duplicates_rejected_stat(observer_env):
     assert resp.status_code == 200
 
     # Check stats - no duplicates_rejected yet
-    resp = env.client.get("/app/observer/api/list")
-    stats = resp.get_json()[0]["stats"]
+    stats = _api_list_observers(env)[0]["stats"]
     assert stats.get("duplicates_rejected", 0) == 0
 
     # Submit duplicate
@@ -1413,8 +1727,7 @@ def test_ingest_duplicate_increments_duplicates_rejected_stat(observer_env):
     assert resp.get_json()["status"] == "duplicate"
 
     # Check stats - should have 1 duplicate rejected
-    resp = env.client.get("/app/observer/api/list")
-    stats = resp.get_json()[0]["stats"]
+    stats = _api_list_observers(env)[0]["stats"]
     assert stats["duplicates_rejected"] == 1
 
 

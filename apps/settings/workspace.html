@@ -200,6 +200,13 @@
   opacity: 0;
 }
 
+.settings-field small .control-save-error {
+  color: var(--color-warning, #f59e0b);
+  margin-left: 0;
+  font-size: inherit;
+  display: inline;
+}
+
 /* API key status indicators */
 .key-status {
   font-weight: normal;
@@ -784,6 +791,12 @@ input:checked + .slider:before {
   border: none;
   padding: 0;
   margin: 0.5em 0 0 0;
+}
+
+.form-help {
+  margin-top: 0.5em;
+  font-size: 0.85em;
+  color: var(--surface-muted, #666);
 }
 
 /* Context overrides collapsible section */
@@ -2376,9 +2389,9 @@ button:focus:not(:focus-visible) {
       <div id="googleApiKeyField" class="settings-field">
         <label for="field-env-google">Google AI (Gemini)</label>
         <div class="password-wrap">
-          <input type="password" id="field-env-google" data-section="env" data-key="GOOGLE_API_KEY" placeholder="Enter API key">
-          <button type="button" class="password-toggle" data-toggle="field-env-google" title="Show key">
-            <span>&#128065;</span>
+          <input type="text" id="field-env-google" data-section="env" data-key="GOOGLE_API_KEY" placeholder="Enter API key" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true">
+          <button type="button" class="password-toggle" data-toggle="field-env-google" title="Hide key">
+            <span>&#128064;</span>
           </button>
         </div>
         <small>Primary provider for transcription and insights. <a href="https://aistudio.google.com/apikey" target="_blank">Get key</a></small>
@@ -2387,9 +2400,9 @@ button:focus:not(:focus-visible) {
       <div class="settings-field">
         <label for="field-env-openai">OpenAI</label>
         <div class="password-wrap">
-          <input type="password" id="field-env-openai" data-section="env" data-key="OPENAI_API_KEY" placeholder="Enter API key">
-          <button type="button" class="password-toggle" data-toggle="field-env-openai" title="Show key">
-            <span>&#128065;</span>
+          <input type="text" id="field-env-openai" data-section="env" data-key="OPENAI_API_KEY" placeholder="Enter API key" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true">
+          <button type="button" class="password-toggle" data-toggle="field-env-openai" title="Hide key">
+            <span>&#128064;</span>
           </button>
         </div>
         <small>Alternative provider for chat and agents. <a href="https://platform.openai.com/api-keys" target="_blank">Get key</a></small>
@@ -2398,9 +2411,9 @@ button:focus:not(:focus-visible) {
       <div class="settings-field">
         <label for="field-env-anthropic">Anthropic</label>
         <div class="password-wrap">
-          <input type="password" id="field-env-anthropic" data-section="env" data-key="ANTHROPIC_API_KEY" placeholder="Enter API key">
-          <button type="button" class="password-toggle" data-toggle="field-env-anthropic" title="Show key">
-            <span>&#128065;</span>
+          <input type="text" id="field-env-anthropic" data-section="env" data-key="ANTHROPIC_API_KEY" placeholder="Enter API key" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true">
+          <button type="button" class="password-toggle" data-toggle="field-env-anthropic" title="Hide key">
+            <span>&#128064;</span>
           </button>
         </div>
         <small>Alternative provider for chat and agents. <a href="https://console.anthropic.com/settings/keys" target="_blank">Get key</a></small>
@@ -2409,9 +2422,9 @@ button:focus:not(:focus-visible) {
       <div class="settings-field">
         <label for="field-env-revai">Rev.ai</label>
         <div class="password-wrap">
-          <input type="password" id="field-env-revai" data-section="env" data-key="REVAI_ACCESS_TOKEN" placeholder="Enter access token">
-          <button type="button" class="password-toggle" data-toggle="field-env-revai" title="Show token">
-            <span>&#128065;</span>
+          <input type="text" id="field-env-revai" data-section="env" data-key="REVAI_ACCESS_TOKEN" placeholder="Enter access token" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true">
+          <button type="button" class="password-toggle" data-toggle="field-env-revai" title="Hide token">
+            <span>&#128064;</span>
           </button>
         </div>
         <small>Audio transcription for imported files. <a href="https://www.rev.ai/access_token" target="_blank">Get token</a></small>
@@ -2419,9 +2432,9 @@ button:focus:not(:focus-visible) {
       <div class="settings-field">
         <label for="field-env-plaud">Plaud</label>
         <div class="password-wrap">
-          <input type="password" id="field-env-plaud" data-section="env" data-key="PLAUD_ACCESS_TOKEN" placeholder="Enter access token">
-          <button type="button" class="password-toggle" data-toggle="field-env-plaud" title="Show token">
-            <span>&#128065;</span>
+          <input type="text" id="field-env-plaud" data-section="env" data-key="PLAUD_ACCESS_TOKEN" placeholder="Enter access token" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true">
+          <button type="button" class="password-toggle" data-toggle="field-env-plaud" title="Hide token">
+            <span>&#128064;</span>
           </button>
         </div>
         <small>Import audio from Plaud recorder. Log into the web portal and extract token from browser console.</small>
@@ -2433,6 +2446,7 @@ button:focus:not(:focus-visible) {
     <section class="settings-section" id="section-transcription" role="tabpanel" aria-labelledby="tab-transcription">
       <h2>transcription</h2>
       <p class="settings-section-desc">Speech-to-text backend and processing settings.</p>
+      <div id="transcriptionLoadState" class="settings-load-state" aria-live="polite"></div>
 
       <form class="settings-form" onsubmit="return false;">
 
@@ -2510,6 +2524,34 @@ button:focus:not(:focus-visible) {
         </p>
       </fieldset>
 
+      <fieldset id="parakeet-settings" class="backend-settings" style="display:none">
+        <div class="settings-field">
+          <label for="field-parakeet-model-version">model version</label>
+          <select id="field-parakeet-model-version">
+            <option value="v3" selected>v3 - Parakeet TDT 0.6B</option>
+          </select>
+          <small>Installed Parakeet model version for local transcription</small>
+        </div>
+
+        <div class="settings-field">
+          <label for="field-parakeet-device">device</label>
+          <select id="field-parakeet-device">
+            <option value="auto" selected>Auto - Detect best available runtime</option>
+            <option value="cpu">CPU - Force processor runtime</option>
+            <option value="cuda">CUDA - Force NVIDIA runtime</option>
+          </select>
+          <small>Runtime preference for Parakeet on this host</small>
+        </div>
+
+        <div class="settings-field">
+          <label for="field-parakeet-timeout">timeout (seconds)</label>
+          <input id="field-parakeet-timeout" type="number" min="1" step="1" value="120">
+          <small>Abort Parakeet model work if it exceeds this timeout</small>
+        </div>
+
+        <div class="form-help">Platform runtime: <span id="parakeet-runtime-label">unsupported</span></div>
+      </fieldset>
+
       <!-- Shared settings -->
       <div class="settings-field" style="margin-top: 1.5em;">
         <div class="toggle-container" style="justify-content: flex-start; gap: 1em;">
@@ -2550,6 +2592,7 @@ button:focus:not(:focus-visible) {
     <section class="settings-section" id="section-observer" role="tabpanel" aria-labelledby="tab-observer">
       <h2>observer</h2>
       <p class="settings-section-desc">Configure capture behavior for the observer service.</p>
+      <div id="observerLoadState" class="settings-load-state" aria-live="polite"></div>
 
       <form class="settings-form" onsubmit="return false;">
 
@@ -2682,6 +2725,7 @@ button:focus:not(:focus-visible) {
     <section class="settings-section" id="section-sync" role="tabpanel" aria-labelledby="tab-sync">
       <h2>sync</h2>
       <p class="settings-section-desc">Configure automatic syncing of recordings from external devices.</p>
+      <div id="syncLoadState" class="settings-load-state" aria-live="polite"></div>
 
       <form class="settings-form" onsubmit="return false;">
 
@@ -2749,6 +2793,7 @@ button:focus:not(:focus-visible) {
     <section class="settings-section" id="section-storage" role="tabpanel" aria-labelledby="tab-storage">
       <h2>storage</h2>
       <p class="settings-section-desc">Manage raw media retention and view storage usage.</p>
+      <div id="storageLoadState" class="settings-load-state" aria-live="polite"></div>
       <div id="storageWarnings"></div>
 
       <form class="settings-form" onsubmit="return false;">
@@ -3092,6 +3137,7 @@ const saveTimeouts = new Map();
 let logNextCursor = null;
 let insightsData = null;
 let keyValidationData = {};
+const escapeHtml = window.AppServices.escapeHtml;
 
 // ========== MODAL ACCESSIBILITY ==========
 function setupModalAccessibility(modalId) {
@@ -3415,9 +3461,20 @@ function populateFields(config) {
 
   // Transcribe - now with nested backend configs
   const transcribe = config.transcribe || {};
-  const backend = transcribe.backend || 'whisper';
+  const backend = transcribe.backend || 'parakeet';
   setValue('field-transcribe-backend', backend);
   switchTranscribeBackend(backend, config);
+
+  const runtimeLabel = document.getElementById('parakeet-runtime-label');
+  if (runtimeLabel) {
+    runtimeLabel.textContent = transcribeRuntimeLabel;
+  }
+
+  // Parakeet settings (nested)
+  const parakeet = transcribe.parakeet || {};
+  setValue('field-parakeet-model-version', parakeet.model_version || 'v3');
+  setValue('field-parakeet-device', parakeet.device || 'auto');
+  setValue('field-parakeet-timeout', parakeet.timeout_sec ?? 120);
 
   // Whisper settings (nested)
   const whisper = transcribe.whisper || {};
@@ -3467,6 +3524,10 @@ function populateFields(config) {
   updateEnvStatus('field-env-anthropic', env.ANTHROPIC_API_KEY, sysEnv.ANTHROPIC_API_KEY);
   updateEnvStatus('field-env-revai', env.REVAI_ACCESS_TOKEN, sysEnv.REVAI_ACCESS_TOKEN);
   updateEnvStatus('field-env-plaud', env.PLAUD_ACCESS_TOKEN, sysEnv.PLAUD_ACCESS_TOKEN);
+
+  document.querySelectorAll('[data-section][data-key]').forEach((el) => {
+    el.__lastKnownValue = readAutoSaveControlValue(el);
+  });
 }
 
 function updateEnvStatus(fieldId, isJournalConfigured, isSystemConfigured) {
@@ -3536,6 +3597,55 @@ function setValue(id, value) {
   if (el) el.value = value;
 }
 
+function readAutoSaveControlValue(el) {
+  return el.type === 'checkbox' ? el.checked : el.value;
+}
+
+function applySavedConfigResult(result, runtimeEnv) {
+  configData = result.config;
+  configData.runtime_env = runtimeEnv;
+}
+
+async function saveConfigValue(section, key, value) {
+  const result = await window.apiJson('api/config', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ section, data: { [key]: value } })
+  });
+  if (result.success) {
+    return result;
+  }
+  throw new Error(result.error || 'Save failed');
+}
+
+function applyEnvSaveEffects(el, key, result) {
+  el.value = '';
+  if (result.key_validation) {
+    keyValidationData = result.key_validation;
+    configData.providers = configData.providers || {};
+    configData.providers.key_validation = keyValidationData;
+  }
+  updateEnvStatus(
+    el.id,
+    configData?.env?.[key],
+    configData?.runtime_env?.[key]
+  );
+  if (providersData) {
+    providersData.key_validation = keyValidationData;
+    for (const type of ['generate', 'cogitate']) {
+      const providerSelect = document.getElementById(`field-${type}-provider`);
+      if (providerSelect) {
+        updateTypeProviderKeyWarning(
+          type,
+          providerSelect.value,
+          providersData.api_keys || {},
+          providersData.auth || {}
+        );
+      }
+    }
+  }
+}
+
 // ========== GENERIC FIELD SAVING ==========
 function setupAutoSave() {
   document.querySelectorAll('[data-section][data-key]').forEach(el => {
@@ -3580,53 +3690,58 @@ function saveField(el, section, key, value) {
   clearTimeout(saveTimeouts.get(timeoutKey));
   saveTimeouts.set(timeoutKey, setTimeout(async () => {
     saveTimeouts.delete(timeoutKey);
-    try {
-      const runtimeEnv = configData?.runtime_env || {};
-      const response = await fetch('api/config', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ section, data: { [key]: value } })
-      });
-      const result = await response.json();
-      if (result.success) {
-        configData = result.config;
-        configData.runtime_env = runtimeEnv;
-        if (el) showFieldStatus(el, 'saved');
+    const runtimeEnv = configData?.runtime_env || {};
 
-        // For env fields, clear the input and update status indicator
-        if (el && section === 'env') {
-          el.value = '';
-          if (result.key_validation) {
-            keyValidationData = result.key_validation;
-            configData.providers = configData.providers || {};
-            configData.providers.key_validation = keyValidationData;
-          }
-          updateEnvStatus(
-            el.id,
-            configData?.env?.[key],
-            configData?.runtime_env?.[key]
-          );
-          if (providersData) {
-            providersData.key_validation = keyValidationData;
-            for (const type of ['generate', 'cogitate']) {
-              const providerSelect = document.getElementById(`field-${type}-provider`);
-              if (providerSelect) {
-                updateTypeProviderKeyWarning(
-                  type,
-                  providerSelect.value,
-                  providersData.api_keys || {},
-                  providersData.auth || {}
-                );
-              }
-            }
-          }
-        }
-      } else {
-        throw new Error(result.error);
+    if (!el) {
+      try {
+        const result = await saveConfigValue(section, key, value);
+        applySavedConfigResult(result, runtimeEnv);
+      } catch (err) {
+        window.logError(err, { context: `settings: saveField(${section}.${key}) failed` });
       }
-    } catch (err) {
-      console.error('Save error:', err);
-      if (el) showFieldStatus(el, 'error', err.message);
+      return;
+    }
+
+    if (section === 'env') {
+      const errorHost = prepareFieldErrorHost(el);
+      try {
+        const result = await saveConfigValue(section, key, value);
+        applySavedConfigResult(result, runtimeEnv);
+        applyEnvSaveEffects(el, key, result);
+        showFieldStatus(el, 'saved');
+      } catch (err) {
+        const message = err?.serverMessage || err?.message || 'Save failed';
+        if (errorHost) {
+          errorHost.innerHTML = `<span data-control-save-error class="control-save-error">${escapeHtml(message)}</span>`;
+        }
+        window.logError(err, { context: `settings: saveField(env.${key}) failed` });
+      }
+      return;
+    }
+
+    const errorHost = prepareFieldErrorHost(el);
+    try {
+      await window.saveControl({
+        el,
+        errorHost,
+        revertOnError: true,
+        readValue: () => el.__lastKnownValue,
+        fetchArgs: () => saveConfigValue(section, key, value),
+        onSuccess: (result) => {
+          applySavedConfigResult(result, runtimeEnv);
+          el.__lastKnownValue = readAutoSaveControlValue(el);
+          showFieldStatus(el, 'saved');
+        },
+        onError: (err) => {
+          window.logError(err, { context: `settings: saveField(${section}.${key}) failed` });
+        }
+      });
+      // Debounced autosave: saveControl's onError already routes the failure
+      // through window.logError; this outer catch just swallows the awaited
+      // rejection so it doesn't escape as an unhandledrejection. The next
+      // input event re-fires saveField and retries the save.
+    } catch (_) {
+      // intentionally empty — see comment above
     }
   }, 500));
 }
@@ -3634,6 +3749,28 @@ function saveField(el, section, key, value) {
 // Store original helper text and timeout per field
 const fieldHelperText = new Map();
 const fieldStatusTimeouts = new Map();
+
+function prepareFieldErrorHost(el) {
+  const field = el?.closest('.settings-field');
+  if (!field) return null;
+
+  const small = field.querySelector('small');
+  if (!small) return null;
+
+  if (!fieldHelperText.has(small)) {
+    fieldHelperText.set(small, small.textContent);
+  }
+
+  const existingTimeout = fieldStatusTimeouts.get(small);
+  if (existingTimeout) {
+    clearTimeout(existingTimeout);
+    fieldStatusTimeouts.delete(small);
+  }
+
+  small.textContent = '';
+  small.classList.remove('status-saved', 'status-error', 'status-fade');
+  return small;
+}
 
 function showFieldStatus(el, type, message) {
   // Find the <small> helper text element in the same .settings-field
@@ -4446,30 +4583,31 @@ for (const type of ['generate', 'cogitate']) {
     if (!el) continue;
     el.addEventListener('change', async () => {
       const value = field === 'tier' ? parseInt(el.value) : el.value;
+      const errorHost = prepareFieldErrorHost(el);
       try {
-        const response = await fetch('api/providers', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ [type]: { [field]: value } })
-        });
-        const result = await response.json();
-        if (result.error) throw new Error(result.error);
-
-        providersData = result;
-        if (field === 'provider') {
-          updateTypeProviderKeyWarning(type, value, result.api_keys, result.auth);
-          // Update cogitate auth select when provider changes
-          if (type === 'cogitate') {
-            const authSelect = document.getElementById('field-cogitate-auth');
-            if (authSelect && result.auth) {
-              authSelect.value = result.auth[value] || 'platform';
+        await window.saveControl({
+          el,
+          errorHost,
+          fetchArgs: ['api/providers', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ [type]: { [field]: value } }),
+          }],
+          onSuccess: (result) => {
+            providersData = result;
+            if (field === 'provider') {
+              updateTypeProviderKeyWarning(type, value, result.api_keys, result.auth);
+              if (type === 'cogitate') {
+                const authSelect = document.getElementById('field-cogitate-auth');
+                if (authSelect && result.auth) {
+                  authSelect.value = result.auth[value] || 'platform';
+                }
+              }
             }
-          }
-        }
-        showFieldStatus(el, 'saved');
-      } catch (err) {
-        console.error(`Error saving ${type} ${field}:`, err);
-        showFieldStatus(el, 'error', err.message);
+            showFieldStatus(el, 'saved');
+          },
+        });
+      } catch (_) {
       }
     });
   }
@@ -4480,45 +4618,51 @@ document.getElementById('field-cogitate-auth')?.addEventListener('change', async
   const authSelect = this;
   const provider = document.getElementById('field-cogitate-provider')?.value;
   if (!provider) return;
+  const errorHost = prepareFieldErrorHost(authSelect);
   try {
-    const response = await fetch('api/providers', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ auth: { [provider]: authSelect.value } })
+    await window.saveControl({
+      el: authSelect,
+      errorHost,
+      fetchArgs: ['api/providers', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ auth: { [provider]: authSelect.value } }),
+      }],
+      onSuccess: (result) => {
+        providersData = result;
+        updateTypeProviderKeyWarning('cogitate', provider, result.api_keys, result.auth);
+        showFieldStatus(authSelect, 'saved');
+      },
     });
-    const result = await response.json();
-    if (result.error) throw new Error(result.error);
-    providersData = result;
-    updateTypeProviderKeyWarning('cogitate', provider, result.api_keys, result.auth);
-    showFieldStatus(authSelect, 'saved');
-  } catch (err) {
-    console.error('Error saving cogitate auth:', err);
-    showFieldStatus(authSelect, 'error', err.message);
+  } catch (_) {
   }
 });
 
 // Google backend change handler
 document.getElementById('field-google-backend')?.addEventListener('change', async function() {
   const value = this.value;
+  const errorHost = prepareFieldErrorHost(this);
   try {
-    const response = await fetch('api/providers', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ google_backend: value })
+    await window.saveControl({
+      el: this,
+      errorHost,
+      fetchArgs: ['api/providers', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ google_backend: value }),
+      }],
+      onSuccess: (result) => {
+        providersData = result;
+        showFieldStatus(this, 'saved');
+        const vf = document.getElementById('vertexFields');
+        if (vf) vf.style.display = value === 'vertex' ? '' : 'none';
+        const vc = document.getElementById('vertexCredentials');
+        if (vc) vc.style.display = value === 'vertex' ? '' : 'none';
+        const gk = document.getElementById('googleApiKeyField');
+        if (gk) gk.style.display = value === 'vertex' ? 'none' : '';
+      },
     });
-    const result = await response.json();
-    if (result.error) throw new Error(result.error);
-    providersData = result;
-    showFieldStatus(this, 'saved');
-    const vf = document.getElementById('vertexFields');
-    if (vf) vf.style.display = value === 'vertex' ? '' : 'none';
-    const vc = document.getElementById('vertexCredentials');
-    if (vc) vc.style.display = value === 'vertex' ? '' : 'none';
-    const gk = document.getElementById('googleApiKeyField');
-    if (gk) gk.style.display = value === 'vertex' ? 'none' : '';
-  } catch (err) {
-    console.error('Error saving google backend:', err);
-    showFieldStatus(this, 'error', err.message);
+  } catch (_) {
   }
 });
 
@@ -4628,16 +4772,61 @@ async function removeVertexCreds() {
 // Backend metadata loaded from API
 let transcribeBackends = [];
 let transcribeApiKeys = {};
+let transcribeRuntimeLabel = 'unsupported';
+let storageLoadedOnce = false;
+
+function setLoadState(slotId, html = '') {
+  const slot = document.getElementById(slotId);
+  if (slot) {
+    slot.innerHTML = html;
+  }
+}
+
+function renderRefreshLoadState(message, serverMessage) {
+  return `<div class="surface-state-refresh-error"><strong>${escapeHtml(message)}</strong>${serverMessage ? `<p>${escapeHtml(serverMessage)}</p>` : ''}</div>`;
+}
+
+function setObserveControlsDisabled(disabled) {
+  ['field-tmux-enabled', 'field-tmux-capture-interval'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = disabled;
+  });
+}
+
+function setSyncControlsDisabled(disabled) {
+  ['field-plaud-sync-enabled', 'field-granola-sync-enabled', 'field-obsidian-sync-enabled'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = disabled;
+  });
+}
+
+function setStorageControlsDisabled(disabled) {
+  document.querySelectorAll('#retentionModeSelector .settings-mode-btn, #retentionDaysField .settings-preset-btn').forEach((el) => {
+    el.disabled = disabled;
+  });
+  const daysInput = document.getElementById('retentionDaysInput');
+  if (daysInput) {
+    daysInput.disabled = disabled;
+  }
+}
 
 async function loadTranscribeBackends() {
   try {
-    const response = await fetch('api/transcribe');
-    const data = await response.json();
+    const data = await window.apiJson('api/transcribe');
     transcribeBackends = data.backends || [];
     transcribeApiKeys = data.api_keys || {};
+    transcribeRuntimeLabel = data.runtime_label || 'unsupported';
+    setLoadState('transcriptionLoadState');
+    const select = document.getElementById('field-transcribe-backend');
+    const runtimeLabel = document.getElementById('parakeet-runtime-label');
+    if (select) {
+      select.disabled = false;
+    }
+    if (runtimeLabel) {
+      runtimeLabel.textContent = transcribeRuntimeLabel;
+    }
 
     // Populate the backend select
-    const select = document.getElementById('field-transcribe-backend');
     if (select) {
       select.innerHTML = '';
       for (const backend of transcribeBackends) {
@@ -4650,13 +4839,23 @@ async function loadTranscribeBackends() {
 
     return data;
   } catch (err) {
-    console.error('Error loading transcribe backends:', err);
+    const select = document.getElementById('field-transcribe-backend');
+    if (select) {
+      select.disabled = true;
+    }
+    setLoadState('transcriptionLoadState', window.SurfaceState.errorCard({
+      heading: "Couldn't load transcription settings",
+      desc: 'Reload to try again.',
+      serverMessage: err?.serverMessage
+    }));
+    window.logError(err, { context: 'settings: loadTranscribeBackends failed' });
     return null;
   }
 }
 
 function switchTranscribeBackend(backend, config) {
   // Show/hide backend-specific fieldsets
+  document.getElementById('parakeet-settings').style.display = backend === 'parakeet' ? 'block' : 'none';
   document.getElementById('whisper-settings').style.display = backend === 'whisper' ? 'block' : 'none';
   document.getElementById('revai-settings').style.display = backend === 'revai' ? 'block' : 'none';
   document.getElementById('gemini-settings').style.display = backend === 'gemini' ? 'block' : 'none';
@@ -4770,17 +4969,49 @@ document.getElementById('field-revai-model')?.addEventListener('change', async (
   }
 });
 
+['field-parakeet-model-version', 'field-parakeet-device', 'field-parakeet-timeout'].forEach(id => {
+  document.getElementById(id)?.addEventListener('change', async (e) => {
+    const key = id === 'field-parakeet-model-version' ? 'model_version' :
+                id === 'field-parakeet-device' ? 'device' : 'timeout_sec';
+    const value = key === 'timeout_sec' ? Number(e.target.value) : e.target.value;
+
+    try {
+      const response = await fetch('api/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ section: 'transcribe', data: { parakeet: { [key]: value } } })
+      });
+      const result = await response.json();
+      if (result.success) {
+        configData = result.config;
+        showFieldStatus(e.target, 'saved');
+      } else {
+        throw new Error(result.error);
+      }
+    } catch (err) {
+      console.error('Error saving parakeet setting:', err);
+      showFieldStatus(e.target, 'error', err.message);
+    }
+  });
+});
+
 // ========== OBSERVER ==========
 let observeData = null;
 
 async function loadObserve() {
   try {
-    const response = await fetch('api/observe');
-    observeData = await response.json();
-    if (observeData.error) throw new Error(observeData.error);
+    observeData = await window.apiJson('api/observe');
+    setLoadState('observerLoadState');
+    setObserveControlsDisabled(false);
     populateObserve(observeData);
   } catch (err) {
-    console.error('Error loading observe config:', err);
+    setObserveControlsDisabled(true);
+    setLoadState('observerLoadState', window.SurfaceState.errorCard({
+      heading: "Couldn't load observer settings",
+      desc: 'Reload to try again.',
+      serverMessage: err?.serverMessage
+    }));
+    window.logError(err, { context: 'settings: loadObserve failed' });
   }
 }
 
@@ -4860,12 +5091,18 @@ document.getElementById('field-tmux-capture-interval').addEventListener('change'
 // ========== SYNC ==========
 async function loadSync() {
   try {
-    const response = await fetch('api/sync');
-    const data = await response.json();
-    if (data.error) throw new Error(data.error);
+    const data = await window.apiJson('api/sync');
+    setLoadState('syncLoadState');
+    setSyncControlsDisabled(false);
     populateSync(data);
   } catch (err) {
-    console.error('Error loading sync config:', err);
+    setSyncControlsDisabled(true);
+    setLoadState('syncLoadState', window.SurfaceState.errorCard({
+      heading: "Couldn't load sync settings",
+      desc: 'Reload to try again.',
+      serverMessage: err?.serverMessage
+    }));
+    window.logError(err, { context: 'settings: loadSync failed' });
   }
 }
 
@@ -4905,52 +5142,55 @@ function populateSync(data) {
 
 document.getElementById('field-plaud-sync-enabled').addEventListener('change', async function() {
   const enabled = this.checked;
+  const errorHost = prepareFieldErrorHost(this);
   try {
-    const response = await fetch('api/sync', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ plaud: { enabled } })
+    await window.saveControl({
+      el: this,
+      errorHost,
+      fetchArgs: ['api/sync', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plaud: { enabled } }),
+      }],
+      onSuccess: () => showFieldStatus(this, 'saved'),
     });
-    const result = await response.json();
-    if (result.error) throw new Error(result.error);
-    showFieldStatus(this, 'saved');
-  } catch (err) {
-    console.error('Error saving sync setting:', err);
-    showFieldStatus(this, 'error', err.message);
+  } catch (_) {
   }
 });
 
 document.getElementById('field-granola-sync-enabled').addEventListener('change', async function() {
   const enabled = this.checked;
+  const errorHost = prepareFieldErrorHost(this);
   try {
-    const response = await fetch('api/sync', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ granola: { enabled } })
+    await window.saveControl({
+      el: this,
+      errorHost,
+      fetchArgs: ['api/sync', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ granola: { enabled } }),
+      }],
+      onSuccess: () => showFieldStatus(this, 'saved'),
     });
-    const result = await response.json();
-    if (result.error) throw new Error(result.error);
-    showFieldStatus(this, 'saved');
-  } catch (err) {
-    console.error('Error saving sync setting:', err);
-    showFieldStatus(this, 'error', err.message);
+  } catch (_) {
   }
 });
 
 document.getElementById('field-obsidian-sync-enabled').addEventListener('change', async function() {
   const enabled = this.checked;
+  const errorHost = prepareFieldErrorHost(this);
   try {
-    const response = await fetch('api/sync', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ obsidian: { enabled } })
+    await window.saveControl({
+      el: this,
+      errorHost,
+      fetchArgs: ['api/sync', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ obsidian: { enabled } }),
+      }],
+      onSuccess: () => showFieldStatus(this, 'saved'),
     });
-    const result = await response.json();
-    if (result.error) throw new Error(result.error);
-    showFieldStatus(this, 'saved');
-  } catch (err) {
-    console.error('Error saving sync setting:', err);
-    showFieldStatus(this, 'error', err.message);
+  } catch (_) {
   }
 });
 
@@ -5892,22 +6132,26 @@ if (resetAgentBtn) {
   });
 }
 
-function escapeHtml(str) {
-  if (!str) return '';
-  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-
 // ========== STORAGE ==========
 let storageData = null;
 
 async function loadStorage() {
   try {
-    const response = await fetch('api/storage');
-    storageData = await response.json();
-    if (storageData.error) throw new Error(storageData.error);
+    storageData = await window.apiJson('api/storage');
+    setLoadState('storageLoadState');
+    setStorageControlsDisabled(false);
+    storageLoadedOnce = true;
     populateStorage(storageData);
   } catch (err) {
-    console.error('Error loading storage:', err);
+    setStorageControlsDisabled(true);
+    setLoadState('storageLoadState', storageLoadedOnce
+      ? renderRefreshLoadState("Couldn't refresh storage settings — showing last known state.", err?.serverMessage)
+      : window.SurfaceState.errorCard({
+        heading: "Couldn't load storage settings",
+        desc: 'Reload to try again.',
+        serverMessage: err?.serverMessage
+      }));
+    window.logError(err, { context: 'settings: loadStorage failed' });
   }
 }
 
@@ -6037,20 +6281,24 @@ function saveStreamOverrides() {
 }
 
 async function saveRetentionConfig(data) {
+  const el = document.getElementById('retentionModeField');
+  const errorHost = prepareFieldErrorHost(el);
   try {
-    const response = await fetch('api/storage', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
+    await window.saveControl({
+      el,
+      errorHost,
+      readValue: () => null,
+      writeValue: () => {},
+      fetchArgs: ['api/storage', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      }],
+      onSuccess: () => {
+        if (el) showFieldStatus(el, 'saved');
+      },
     });
-    const result = await response.json();
-    if (result.error) throw new Error(result.error);
-    const el = document.getElementById('retentionModeField');
-    if (el) showFieldStatus(el, 'saved');
-  } catch (err) {
-    console.error('Save retention error:', err);
-    const el = document.getElementById('retentionModeField');
-    if (el) showFieldStatus(el, 'error', err.message);
+  } catch (_) {
   }
 }
 

@@ -27,7 +27,6 @@ def _reset_chat_state(chat_module) -> None:
         chat_module._current_chat_state = None
         chat_module._queued_trigger = None
         chat_module._active_talents.clear()
-        chat_module._recovery_day = None
         chat_module._last_use_id = 0
 
 
@@ -89,6 +88,8 @@ def test_post_chat_appends_owner_message_and_returns_reserved_use_id(
 def test_session_endpoint_reduces_from_chat_stream(chat_client, monkeypatch):
     day = "20260420"
     monkeypatch.setattr("convey.chat._today_day", lambda: day)
+    started_at = _ms(2026, 4, 20, 12, 1, 0)
+    finished_at = _ms(2026, 4, 20, 12, 2, 0)
     append_chat_event(
         "sol_message",
         ts=_ms(2026, 4, 20, 12, 0, 0),
@@ -100,19 +101,92 @@ def test_session_endpoint_reduces_from_chat_stream(chat_client, monkeypatch):
     )
     append_chat_event(
         "talent_spawned",
-        ts=_ms(2026, 4, 20, 12, 1, 0),
+        ts=started_at,
         use_id="1713626000001",
         name="exec",
         task="research",
-        started_at=1713626000001,
+        started_at=started_at,
+    )
+    append_chat_event(
+        "talent_finished",
+        ts=finished_at,
+        use_id="1713626000001",
+        name="exec",
+        summary="done",
     )
 
     response = chat_client.get("/api/chat/session")
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["latest_sol_message"]["text"] == "hello"
-    assert payload["active_talents"][0]["task"] == "research"
+    assert payload["active_talents"] == []
+    assert payload["completed_talents"] == [
+        {
+            "finished_at": finished_at,
+            "name": "exec",
+            "summary": "done",
+            "task": "research",
+            "use_id": "1713626000001",
+        }
+    ]
     assert chat_client.get(f"/api/chat/stream/{day}").status_code == 200
+
+
+def test_chat_session_retries_unresolved_trigger_when_idle(chat_client, monkeypatch):
+    day = "20260420"
+    monkeypatch.setattr("convey.chat._today_day", lambda: day)
+    append_chat_event(
+        "owner_message",
+        ts=_ms(2026, 4, 20, 12, 0, 0),
+        text="retry me",
+        app="sol",
+        path="/app/sol",
+        facet="work",
+    )
+
+    starts: list[dict] = []
+    monkeypatch.setattr(
+        "convey.chat._spawn_chat_generate", lambda action: starts.append(action) or True
+    )
+
+    response = chat_client.get("/api/chat/session")
+
+    assert response.status_code == 200
+    assert len(starts) == 1
+    assert starts[0]["trigger"]["type"] == "owner_message"
+
+
+def test_chat_session_retries_again_when_spawn_fails_and_trigger_remains_unresolved(
+    chat_client, monkeypatch
+):
+    day = "20260420"
+    monkeypatch.setattr("convey.chat._today_day", lambda: day)
+    append_chat_event(
+        "owner_message",
+        ts=_ms(2026, 4, 20, 12, 0, 0),
+        text="retry me again",
+        app="sol",
+        path="/app/sol",
+        facet="work",
+    )
+
+    starts: list[dict] = []
+
+    def fake_spawn(action):
+        starts.append(action)
+        return len(starts) > 1
+
+    monkeypatch.setattr("convey.chat._spawn_chat_generate", fake_spawn)
+    monkeypatch.setattr("convey.chat._emit_error", lambda *_args, **_kwargs: None)
+
+    first = chat_client.get("/api/chat/session")
+    second = chat_client.get("/api/chat/session")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert len(starts) == 2
+    assert starts[0]["trigger"]["type"] == "owner_message"
+    assert starts[1]["trigger"]["type"] == "owner_message"
 
 
 def test_stream_endpoint_ordered_with_limit(chat_client):

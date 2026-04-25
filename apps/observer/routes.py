@@ -58,6 +58,16 @@ observer_bp = Blueprint(
 
 # Key length in bytes (256 bits = 32 bytes)
 KEY_BYTES = 32
+ACTIVE_THRESHOLD_MS = 30_000
+STALE_THRESHOLD_MS = 120_000
+FUTURE_CLOCK_DRIFT_TOLERANCE_MS = 5 * 60 * 1000
+
+OBSERVER_STATE_LABELS = {
+    "connected": "Connected",
+    "stale": "Stale",
+    "disconnected": "Disconnected",
+    "revoked": "Revoked",
+}
 
 
 def _get_key(url_key: str | None = None) -> str | None:
@@ -73,6 +83,88 @@ def _get_key(url_key: str | None = None) -> str | None:
 def _generate_key() -> str:
     """Generate a URL-safe key for observer authentication."""
     return base64.urlsafe_b64encode(secrets.token_bytes(KEY_BYTES)).decode().rstrip("=")
+
+
+def _classify_observer_freshness(
+    last_seen_ms: int | None,
+    revoked: bool,
+    now_ms: int,
+) -> dict[str, object]:
+    """Classify a registered observer's freshness.
+
+    Returns keys: state, group, elapsed_ms, clock_skew.
+    """
+    if revoked:
+        return {
+            "state": "revoked",
+            "group": "inactive",
+            "elapsed_ms": None,
+            "clock_skew": False,
+        }
+    if last_seen_ms is None:
+        return {
+            "state": "disconnected",
+            "group": "inactive",
+            "elapsed_ms": None,
+            "clock_skew": False,
+        }
+    elapsed = now_ms - last_seen_ms
+    if elapsed < -FUTURE_CLOCK_DRIFT_TOLERANCE_MS:
+        return {
+            "state": "disconnected",
+            "group": "inactive",
+            "elapsed_ms": elapsed,
+            "clock_skew": True,
+        }
+    if elapsed < 0:
+        return {
+            "state": "connected",
+            "group": "active",
+            "elapsed_ms": 0,
+            "clock_skew": False,
+        }
+    if elapsed < ACTIVE_THRESHOLD_MS:
+        return {
+            "state": "connected",
+            "group": "active",
+            "elapsed_ms": elapsed,
+            "clock_skew": False,
+        }
+    if elapsed < STALE_THRESHOLD_MS:
+        return {
+            "state": "stale",
+            "group": "stale",
+            "elapsed_ms": elapsed,
+            "clock_skew": False,
+        }
+    return {
+        "state": "disconnected",
+        "group": "inactive",
+        "elapsed_ms": elapsed,
+        "clock_skew": False,
+    }
+
+
+def _serialize_observer(observer: dict[str, Any], current_now: int) -> dict[str, Any]:
+    """Serialize a registered observer for management API consumers."""
+    freshness = _classify_observer_freshness(
+        observer.get("last_seen"),
+        observer.get("revoked", False),
+        current_now,
+    )
+    return {
+        "key_prefix": observer.get("key", "")[:8],
+        "name": observer.get("name", ""),
+        "created_at": observer.get("created_at", 0),
+        "last_seen": observer.get("last_seen"),
+        "last_segment": observer.get("last_segment"),
+        "enabled": observer.get("enabled", True),
+        "revoked": observer.get("revoked", False),
+        "revoked_at": observer.get("revoked_at"),
+        "stats": observer.get("stats", {}),
+        **freshness,
+        "label": OBSERVER_STATE_LABELS[str(freshness["state"])],
+    }
 
 
 def _revoke_observer(key: str) -> bool:
@@ -91,24 +183,30 @@ def _revoke_observer(key: str) -> bool:
 @observer_bp.route("/api/list")
 def api_list() -> Any:
     """List all registered observers."""
+    current_now = now_ms()
     observers = list_observers()
     # Sanitize output - don't expose full keys
-    result = []
-    for r in observers:
-        result.append(
-            {
-                "key_prefix": r.get("key", "")[:8],
-                "name": r.get("name", ""),
-                "created_at": r.get("created_at", 0),
-                "last_seen": r.get("last_seen"),
-                "last_segment": r.get("last_segment"),
-                "enabled": r.get("enabled", True),
-                "revoked": r.get("revoked", False),
-                "revoked_at": r.get("revoked_at"),
-                "stats": r.get("stats", {}),
-            }
+    result = [_serialize_observer(observer, current_now) for observer in observers]
+
+    group_order = {"active": 0, "stale": 1, "inactive": 2}
+    result.sort(
+        key=lambda observer: (
+            group_order[observer.get("group", "inactive")],
+            1 if observer.get("last_seen") is None else 0,
+            -(observer.get("last_seen") or 0),
+            observer.get("key_prefix", ""),
         )
-    return jsonify(result)
+    )
+
+    return jsonify(
+        {
+            "thresholds": {
+                "active_ms": ACTIVE_THRESHOLD_MS,
+                "stale_ms": STALE_THRESHOLD_MS,
+            },
+            "observers": result,
+        }
+    )
 
 
 @observer_bp.route("/api/create", methods=["POST"])

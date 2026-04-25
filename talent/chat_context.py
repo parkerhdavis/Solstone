@@ -84,6 +84,8 @@ def pre_process(context: dict) -> dict:
     day = _resolve_day(context, trigger_payload)
     template_vars = {
         "digest_contents": "",
+        "identity_self": "",
+        "identity_agency": "",
         "active_talents": "",
         "trigger_context": "",
         "location": "",
@@ -96,6 +98,12 @@ def pre_process(context: dict) -> dict:
         template_vars["digest_contents"] = _load_digest_contents()
     except Exception:
         logger.debug("Digest enrichment failed", exc_info=True)
+
+    try:
+        template_vars["identity_self"] = _load_identity_contents("self.md")
+        template_vars["identity_agency"] = _load_identity_contents("agency.md")
+    except Exception:
+        logger.debug("Identity enrichment failed", exc_info=True)
 
     try:
         tail = read_chat_tail(day, limit=20)
@@ -111,8 +119,12 @@ def pre_process(context: dict) -> dict:
                 {
                     "role": "user",
                     "content": (
-                        f"[talent {trigger_payload['name']} finished: "
-                        f"{trigger_payload['summary']}]"
+                        "[internal follow-up: talent "
+                        f"{trigger_payload['name']} finished. This is a "
+                        "report-back turn, not a dispatch turn. Do not "
+                        "request another talent for this task. Use the "
+                        "result below to answer the owner's pending request "
+                        f"with a short summary. Result: {trigger_payload['summary']}]"
                     ),
                 }
             )
@@ -121,7 +133,12 @@ def pre_process(context: dict) -> dict:
                 {
                     "role": "user",
                     "content": (
-                        f"[talent {trigger_payload['name']} errored: "
+                        "[internal follow-up: talent "
+                        f"{trigger_payload['name']} errored. This is a "
+                        "report-back turn, not a dispatch turn. Do not "
+                        "request another talent for this task. Briefly "
+                        "explain the failure to the owner and ask for "
+                        "clarification only if needed. Reason: "
                         f"{trigger_payload['reason']}]"
                     ),
                 }
@@ -172,6 +189,13 @@ def _load_digest_contents() -> str:
     if not digest_path.exists():
         return ""
     return digest_path.read_text(encoding="utf-8").strip()
+
+
+def _load_identity_contents(file_name: str) -> str:
+    identity_path = Path(get_journal()) / "identity" / file_name
+    if not identity_path.exists():
+        return ""
+    return identity_path.read_text(encoding="utf-8").strip()
 
 
 def _normalize_trigger(context: dict) -> tuple[str | None, dict[str, Any]]:
@@ -266,11 +290,21 @@ def _render_trigger_context(
     elif trigger_kind == "talent_finished":
         if payload.get("name"):
             lines.append(f"- Talent: {payload['name']}")
+        lines.append("- Mode: report_back_only")
+        lines.append(
+            "- Instruction: Answer the owner directly; do not dispatch or "
+            "redispatch a talent for this trigger."
+        )
         if payload.get("summary"):
             lines.append(f"- Summary: {payload['summary']}")
     elif trigger_kind == "talent_errored":
         if payload.get("name"):
             lines.append(f"- Talent: {payload['name']}")
+        lines.append("- Mode: report_back_only")
+        lines.append(
+            "- Instruction: Answer the owner directly; do not dispatch or "
+            "redispatch a talent for this trigger."
+        )
         if payload.get("reason"):
             lines.append(f"- Reason: {payload['reason']}")
     elif trigger_kind == "synthetic-max-active":

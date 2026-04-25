@@ -37,6 +37,16 @@
     .status-saved { color: #22c55e; }
     .status-error { color: #ef4444; }
     .status-fade { opacity: 0; transition: opacity 0.3s; }
+    .error-message {
+      margin-top: 0.75rem;
+      padding: 0.75rem 0.9rem;
+      border: 1px solid #fecaca;
+      border-radius: 8px;
+      background: #fef2f2;
+      color: #991b1b;
+      font-size: 0.85rem;
+      line-height: 1.4;
+    }
     .cta-button {
       display: inline-block; margin-top: 1rem; padding: 12px 24px; background: #E8923A;
       color: #fff; border: none; border-radius: 8px; font-size: 1rem; cursor: pointer;
@@ -46,6 +56,7 @@
     .observer-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0; }
     .observer-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
     .observer-dot.connected { background: #22c55e; }
+    .observer-dot.stale { background: #f59e0b; }
     .observer-dot.disconnected { background: #d1d5db; }
     .observer-state { font-size: 0.8rem; color: #999; margin-left: auto; }
     .input-wrap { position: relative; }
@@ -79,6 +90,8 @@
     }
     .retention-days-row input[type="number"]:focus { outline: none; border-color: #E8923A; }
   </style>
+  <script src="{{ url_for('root.static', filename='error-handler.js') }}"></script>
+  <script src="{{ url_for('root.static', filename='api.js') }}"></script>
 </head>
 <body>
   <main>
@@ -131,10 +144,8 @@
       <p class="trust-note">your key is stored locally in your journal config</p>
       <div class="field-group">
         <label for="gemini-key">Gemini API key</label>
-        <div class="input-wrap">
-          <input type="password" id="gemini-key" disabled>
-          <button type="button" class="toggle-btn" id="toggle-gemini" onclick="toggleGeminiKey()">show</button>
-        </div>
+        <input type="text" id="gemini-key" autocomplete="off"
+               data-1p-ignore data-lpignore="true" data-bwignore="true" disabled>
         <small class="field-status" aria-live="polite">&nbsp;</small>
       </div>
       <p class="section-hint" style="margin-top: 1rem;">get a private key from sol pbc by <a href="https://scouts.solstone.app" target="_blank" rel="noopener noreferrer">becoming a scout</a> and providing feedback on your experience</p>
@@ -147,6 +158,7 @@
         <p class="section-hint" id="observer-label" style="display: none;">connected observers</p>
         <div id="observer-list"></div>
         <p class="observer-empty" id="observer-empty">no observer connected yet — <a href="https://solstone.app/observers" tabindex="-1">set up an observer</a> to start capturing</p>
+        <div id="observer-error" class="error-message" hidden></div>
       </div>
     </section>
 
@@ -175,6 +187,7 @@
       <p class="section-hint"><code>cd {{ repo_path }} &amp;&amp; claude "help me set up solstone"</code></p>
       <p class="section-hint"><code>cd {{ repo_path }} &amp;&amp; codex "help me set up solstone"</code></p>
       <button type="button" class="cta-button" onclick="finalize()">i understand, let's do this!</button>
+      <div id="finalize-error" class="error-message" hidden></div>
     </section>
 
     <p class="footer-note">your data stays on your machine</p>
@@ -185,13 +198,6 @@
     function togglePassword() {
       const input = document.getElementById('password');
       const btn = document.getElementById('toggle-password');
-      if (input.type === 'password') { input.type = 'text'; btn.textContent = 'hide'; }
-      else { input.type = 'password'; btn.textContent = 'show'; }
-    }
-
-    function toggleGeminiKey() {
-      const input = document.getElementById('gemini-key');
-      const btn = document.getElementById('toggle-gemini');
       if (input.type === 'password') { input.type = 'text'; btn.textContent = 'hide'; }
       else { input.type = 'password'; btn.textContent = 'show'; }
     }
@@ -265,27 +271,52 @@
     }
 
     async function loadObservers() {
+      const emptyEl = document.getElementById('observer-empty');
+      const errorEl = document.getElementById('observer-error');
+      const labelEl = document.getElementById('observer-label');
+      const listEl = document.getElementById('observer-list');
       try {
-        const resp = await fetch('/init/observers');
-        const data = await resp.json();
-        const emptyEl = document.getElementById('observer-empty');
-        if (data.length > 0) {
+        const payload = await window.apiJson('/init/observers');
+        if (errorEl) {
+          errorEl.hidden = true;
+          errorEl.textContent = '';
+        }
+        const observers = payload?.observers || [];
+        if (observers.length > 0) {
           if (emptyEl) emptyEl.style.display = 'none';
-          const labelEl = document.getElementById('observer-label');
-          if (labelEl) labelEl.style.display = 'block';
-          const now = Date.now();
-          document.getElementById('observer-list').innerHTML = data.map(r => {
-            const connected = r.last_seen && (now - r.last_seen) < 120000;
-            const label = esc(r.name || r.key_prefix);
+          if (labelEl) {
+            const states = new Set(observers.map(r => r.state));
+            const headingByState = {
+              connected: 'all observers connected',
+              stale: 'all observers stale',
+              disconnected: 'all observers disconnected'
+            };
+            const [state] = states;
+            labelEl.textContent = states.size === 1 ? headingByState[state] || 'observers' : 'observers';
+            labelEl.style.display = 'block';
+          }
+          listEl.innerHTML = observers.map(r => {
+            const dotState = r.state === 'connected' || r.state === 'stale' ? r.state : 'disconnected';
+            const name = esc(r.name || r.key_prefix);
+            const status = esc(r.label || r.state || 'disconnected');
             return '<div class="observer-item"><span class="observer-dot ' +
-              (connected ? 'connected' : 'disconnected') + '"></span><span>' +
-              label + '</span><span class="observer-state">' +
-              (connected ? 'connected' : 'disconnected') + '</span></div>';
+              dotState + '"></span><span>' +
+              name + '</span><span class="observer-state">' +
+              status + '</span></div>';
           }).join('');
         } else {
           if (emptyEl) emptyEl.style.display = 'block';
+          if (labelEl) labelEl.style.display = 'none';
+          listEl.innerHTML = '';
         }
-      } catch (err) {}
+      } catch (err) {
+        if (emptyEl) emptyEl.style.display = 'none';
+        if (errorEl) {
+          errorEl.textContent = err?.serverMessage || "Couldn't check for observers - reload to try again.";
+          errorEl.hidden = false;
+        }
+        window.logError(err, { context: 'init-observers' });
+      }
     }
 
     function setRetentionMode(mode) {
@@ -310,9 +341,12 @@
     }
 
     async function finalize() {
+      const passwordEl = document.getElementById('password');
+      const errorEl = document.getElementById('finalize-error');
       try {
-        const resp = await fetch('/init/finalize', {
-          method: 'POST', headers: {'Content-Type': 'application/json'},
+        const data = await window.apiJson('/init/finalize', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({
             password: document.getElementById('password').value,
             name: document.getElementById('name').value.trim(),
@@ -323,12 +357,29 @@
             retention_days: parseInt(document.getElementById('retention-days-input').value) || 7
           })
         });
-        const data = await resp.json();
+        if (errorEl) {
+          errorEl.hidden = true;
+          errorEl.textContent = '';
+        }
         if (data.success && data.redirect) window.location.href = data.redirect;
         else if (data.error) {
-          showFieldStatus(document.getElementById('password'), 'error', data.error);
+          showFieldStatus(passwordEl, 'error', data.error);
         }
-      } catch (err) {}
+      } catch (err) {
+        if (err instanceof window.ApiError && err.status === 400 && err.serverMessage) {
+          if (errorEl) {
+            errorEl.hidden = true;
+            errorEl.textContent = '';
+          }
+          showFieldStatus(passwordEl, 'error', err.serverMessage);
+          return;
+        }
+        if (errorEl) {
+          errorEl.textContent = err?.serverMessage || "Couldn't finalize setup. Check your connection and try again.";
+          errorEl.hidden = false;
+        }
+        window.logError(err, { context: 'init-finalize' });
+      }
     }
   </script>
 </body>

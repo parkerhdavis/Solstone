@@ -13,7 +13,8 @@ Terminology:
 - "segment" = journal directory (HHMMSS_LEN/ time window) - NOT used here
 
 Available backends:
-- whisper: Local faster-whisper (default, GPU/CPU)
+- parakeet: Default local backend via Apple Silicon helper or Linux ONNX
+- whisper: Local faster-whisper (rollback/local alternative, GPU/CPU)
 - revai: Rev.ai cloud API (speaker diarization)
 - gemini: Google Gemini API (speaker diarization)
 
@@ -63,6 +64,7 @@ BACKEND_REGISTRY: dict[str, str] = {
     "whisper": "observe.transcribe.whisper",
     "revai": "observe.transcribe.revai",
     "gemini": "observe.transcribe.gemini",
+    "parakeet": "observe.transcribe.parakeet",
 }
 
 # ---------------------------------------------------------------------------
@@ -90,6 +92,12 @@ BACKEND_METADATA: dict[str, dict] = {
         "description": "Cloud-based transcription with speaker identification",
         "env_key": "GOOGLE_API_KEY",
         "settings": [],
+    },
+    "parakeet": {
+        "label": "Parakeet - Local processing (Apple Silicon CoreML or Linux ONNX)",
+        "description": "On-device speech recognition via Parakeet TDT; macOS uses a FluidAudio/CoreML helper, Linux uses onnx-asr + onnxruntime. Requires `make install`.",
+        "env_key": None,
+        "settings": ["model_version", "device", "timeout_sec"],
     },
 }
 

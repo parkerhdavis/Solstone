@@ -647,9 +647,8 @@ def validate_config(config: dict) -> str | None:
     has_user_instruction = bool(config.get("user_instruction"))
     has_day = bool(config.get("day"))
 
-    # Cogitate talents need a prompt (user's question)
-    if is_cogitate and not has_prompt:
-        return "Missing 'prompt' field for cogitate talent"
+    if is_cogitate and not (has_prompt or has_user_instruction):
+        return "Cogitate talent requires non-empty 'prompt' or 'user_instruction'"
 
     # Generate prompts need either day (transcript) or user_instruction
     if not is_cogitate and not has_day and not has_user_instruction and not has_prompt:
@@ -938,7 +937,7 @@ async def _execute_generate(
     output_format = config.get("output")
 
     # Get generation parameters from config (set in frontmatter)
-    thinking_budget = config.get("thinking_budget") or 8192 * 3
+    thinking_budget = config.get("thinking_budget") or 8192 * 2
     max_output_tokens = config.get("max_output_tokens") or 8192 * 6
     is_json_output = output_format == "json"
 

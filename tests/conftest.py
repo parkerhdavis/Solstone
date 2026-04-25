@@ -14,6 +14,110 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+
+def _install_heavy_module_stubs():
+    if "usearch.index" not in sys.modules:
+        usearch = types.ModuleType("usearch")
+        index_mod = types.ModuleType("usearch.index")
+
+        class DummyIndex:
+            def __init__(self, *a, **k):
+                pass
+
+            def save(self, *a, **k):
+                pass
+
+            @classmethod
+            def restore(cls, *a, **k):
+                return cls()
+
+            def remove(self, *a, **k):
+                pass
+
+            def add(self, *a, **k):
+                pass
+
+            def search(self, *a, **k):
+                class Res:
+                    keys = [1]
+                    distances = [0.0]
+
+                return Res()
+
+        index_mod.Index = DummyIndex
+        usearch.index = index_mod
+        sys.modules["usearch"] = usearch
+        sys.modules["usearch.index"] = index_mod
+    if "sentence_transformers" not in sys.modules:
+        st_mod = types.ModuleType("sentence_transformers")
+
+        class DummyST:
+            def __init__(self, *a, **k):
+                pass
+
+            def get_sentence_embedding_dimension(self):
+                return 384
+
+            def encode(self, texts):
+                if isinstance(texts, str):
+                    texts = [texts]
+                return [([0.0] * 384) for _ in texts]
+
+        st_mod.SentenceTransformer = DummyST
+        sys.modules["sentence_transformers"] = st_mod
+    if "sklearn.metrics.pairwise" not in sys.modules:
+        pairwise = types.ModuleType("pairwise")
+
+        def cosine_similarity(a, b):
+            return [[1.0]]
+
+        pairwise.cosine_similarity = cosine_similarity
+        metrics = types.ModuleType("metrics")
+        metrics.pairwise = pairwise
+
+        cluster = types.ModuleType("sklearn.cluster")
+
+        class DummyHDBSCAN:
+            def __init__(self, **k):
+                pass
+
+            def fit(self, X):
+                self.labels_ = np.full(len(X), -1, dtype=int)
+                return self
+
+        cluster.HDBSCAN = DummyHDBSCAN
+
+        sklearn = types.ModuleType("sklearn")
+        sklearn.metrics = metrics
+        sklearn.cluster = cluster
+        sklearn.__spec__ = importlib.machinery.ModuleSpec("sklearn", loader=None)
+        metrics.__spec__ = importlib.machinery.ModuleSpec(
+            "sklearn.metrics", loader=None
+        )
+        pairwise.__spec__ = importlib.machinery.ModuleSpec(
+            "sklearn.metrics.pairwise", loader=None
+        )
+        cluster.__spec__ = importlib.machinery.ModuleSpec(
+            "sklearn.cluster", loader=None
+        )
+        sys.modules["sklearn"] = sklearn
+        sys.modules["sklearn.metrics"] = metrics
+        sys.modules["sklearn.metrics.pairwise"] = pairwise
+        sys.modules["sklearn.cluster"] = cluster
+    if "dotenv" not in sys.modules:
+        dotenv_mod = types.ModuleType("dotenv")
+
+        def load_dotenv(*a, **k):
+            return True
+
+        def dotenv_values(*a, **k):
+            return {}
+
+        dotenv_mod.load_dotenv = load_dotenv
+        dotenv_mod.dotenv_values = dotenv_values
+        sys.modules["dotenv"] = dotenv_mod
+
+
 from convey.chat import stop_all_chat_runtime
 from tests._baseline_harness import copytree_tracked
 from think.entities.journal import clear_journal_entity_cache
@@ -97,97 +201,7 @@ def add_module_stubs(request, monkeypatch):
     if "integration" in request.node.keywords:
         return
 
-    # stub heavy modules used by think.indexer
-    if "usearch.index" not in sys.modules:
-        usearch = types.ModuleType("usearch")
-        index_mod = types.ModuleType("usearch.index")
-
-        class DummyIndex:
-            def __init__(self, *a, **k):
-                pass
-
-            def save(self, *a, **k):
-                pass
-
-            @classmethod
-            def restore(cls, *a, **k):
-                return cls()
-
-            def remove(self, *a, **k):
-                pass
-
-            def add(self, *a, **k):
-                pass
-
-            def search(self, *a, **k):
-                class Res:
-                    keys = [1]
-                    distances = [0.0]
-
-                return Res()
-
-        index_mod.Index = DummyIndex
-        usearch.index = index_mod
-        sys.modules["usearch"] = usearch
-        sys.modules["usearch.index"] = index_mod
-    if "sentence_transformers" not in sys.modules:
-        st_mod = types.ModuleType("sentence_transformers")
-
-        class DummyST:
-            def __init__(self, *a, **k):
-                pass
-
-            def get_sentence_embedding_dimension(self):
-                return 384
-
-            def encode(self, texts):
-                if isinstance(texts, str):
-                    texts = [texts]
-                return [([0.0] * 384) for _ in texts]
-
-        st_mod.SentenceTransformer = DummyST
-        sys.modules["sentence_transformers"] = st_mod
-    if "sklearn.metrics.pairwise" not in sys.modules:
-        pairwise = types.ModuleType("pairwise")
-
-        def cosine_similarity(a, b):
-            return [[1.0]]
-
-        pairwise.cosine_similarity = cosine_similarity
-        metrics = types.ModuleType("metrics")
-        metrics.pairwise = pairwise
-
-        cluster = types.ModuleType("sklearn.cluster")
-
-        class DummyHDBSCAN:
-            def __init__(self, **k):
-                pass
-
-            def fit(self, X):
-                self.labels_ = np.full(len(X), -1, dtype=int)
-                return self
-
-        cluster.HDBSCAN = DummyHDBSCAN
-
-        sklearn = types.ModuleType("sklearn")
-        sklearn.metrics = metrics
-        sklearn.cluster = cluster
-        sys.modules["sklearn"] = sklearn
-        sys.modules["sklearn.metrics"] = metrics
-        sys.modules["sklearn.metrics.pairwise"] = pairwise
-        sys.modules["sklearn.cluster"] = cluster
-    if "dotenv" not in sys.modules:
-        dotenv_mod = types.ModuleType("dotenv")
-
-        def load_dotenv(*a, **k):
-            return True
-
-        def dotenv_values(*a, **k):
-            return {}
-
-        dotenv_mod.load_dotenv = load_dotenv
-        dotenv_mod.dotenv_values = dotenv_values
-        sys.modules["dotenv"] = dotenv_mod
+    _install_heavy_module_stubs()
     # Import real observe package first to avoid shadowing with stubs
     if "observe" not in sys.modules:
         importlib.import_module("observe")
@@ -287,6 +301,7 @@ def add_module_stubs(request, monkeypatch):
     sys.modules["google.genai"] = genai_mod
     if "cv2" not in sys.modules:
         cv2_mod = types.ModuleType("cv2")
+        cv2_mod.__spec__ = importlib.machinery.ModuleSpec("cv2", loader=None)
         cv2_mod.COLOR_RGB2LAB = 0
 
         def cvtColor(arr, code):

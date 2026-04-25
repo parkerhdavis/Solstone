@@ -7,7 +7,7 @@
 # all runs to one path and pytest wipes it on startup, destroying concurrent state.
 export TMPDIR := /var/tmp
 
-.PHONY: install uninstall test test-apps test-app test-only test-integration test-integration-only test-all format format-check install-checks ci clean clean-install coverage watch versions update update-prices pre-commit skills dev all sail sandbox sandbox-stop install-pinchtab verify-browser update-browser-baselines review verify verify-api update-api-baselines install-service uninstall-service service-logs gate-agents-rename check-layer-hygiene
+.PHONY: install uninstall test test-apps test-app test-only test-integration test-integration-only test-all format format-check install-checks ci clean clean-install coverage watch versions update update-prices pre-commit skills dev all sandbox sandbox-stop install-pinchtab install-models parakeet-helper parakeet-helper-clean verify-browser update-browser-baselines review verify verify-api update-api-baselines install-service uninstall-service service-logs gate-agents-rename check-layer-hygiene doctor FORCE
 
 # Default target - install package in editable mode
 all: install
@@ -15,12 +15,18 @@ all: install
 # Virtual environment directory
 VENV := .venv
 VENV_BIN := $(VENV)/bin
-PYTHON := $(VENV_BIN)/python
+VENV_PY := $(VENV_BIN)/python
+PYTHON := $(VENV_PY)
+PARAKEET_ONNX_VARIANT ?= $(shell if nvidia-smi -L >/dev/null 2>&1; then echo cuda; else echo cpu; fi)
 
 # Require uv
 UV := $(shell command -v uv 2>/dev/null)
+ifeq (,$(filter-out doctor,$(or $(MAKECMDGOALS),all)))
+# doctor-only invocation — skip uv requirement so a uv-less machine can run diagnostics
+else
 ifndef UV
 $(error uv is not installed. Install it: curl -LsSf https://astral.sh/uv/install.sh | sh)
+endif
 endif
 
 # Node — add nvm bin dir to PATH if npx isn't already available
@@ -32,16 +38,23 @@ endif
 # User bin directory for symlink (standard location, usually already in PATH)
 USER_BIN := $(HOME)/.local/bin
 
+.python-version-hash: FORCE
+	@tmp_file=$$(mktemp); \
+	python3 -c "import sys; print(sys.version_info[:2])" > "$$tmp_file"; \
+	if [ ! -f $@ ] || ! cmp -s "$$tmp_file" $@; then mv "$$tmp_file" $@; else rm -f "$$tmp_file"; fi
+
 # Marker file to track installation
-.installed: pyproject.toml uv.lock
+.installed: pyproject.toml uv.lock .python-version-hash
 	@echo "Installing package with uv..."
 	$(UV) sync
 	@# Python 3.14+ needs onnxruntime from nightly (not yet on PyPI)
-	@PY_MINOR=$$($(PYTHON) -c "import sys; print(sys.version_info.minor)"); \
-	if [ "$$PY_MINOR" -ge 14 ]; then \
+	@OS_NAME=$$(uname -s); \
+	PY_MINOR=$$($(PYTHON) -c "import sys; print(sys.version_info.minor)"); \
+	if [ "$$OS_NAME" = "Darwin" ] && [ "$$PY_MINOR" -ge 14 ]; then \
 		echo "Python 3.14+ detected - installing onnxruntime from nightly feed..."; \
 		$(UV) pip install --pre --no-deps --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ onnxruntime; \
 	fi
+	@$(VENV_BIN)/python -c "from observe.transcribe.main import PYANNOTE_OVERLAP_MODEL_PATH, PYANNOTE_OVERLAP_MODEL_SHA256, WESPEAKER_MODEL_PATH, WESPEAKER_MODEL_SHA256; from observe.utils import compute_file_sha256; actual = compute_file_sha256(WESPEAKER_MODEL_PATH); assert actual == WESPEAKER_MODEL_SHA256, f'WeSpeaker asset hash mismatch: got {actual}, expected {WESPEAKER_MODEL_SHA256}'; print(f'wespeaker asset ok ({actual[:12]}...)'); actual = compute_file_sha256(PYANNOTE_OVERLAP_MODEL_PATH); assert actual == PYANNOTE_OVERLAP_MODEL_SHA256, f'pyannote asset hash mismatch: got {actual}, expected {PYANNOTE_OVERLAP_MODEL_SHA256}'; print(f'pyannote asset ok ({actual[:12]}...)')"
 	@echo "Installing Playwright browser for sol screenshot..."
 	$(VENV_BIN)/playwright install chromium
 	@$(MAKE) --no-print-directory skills
@@ -52,7 +65,42 @@ uv.lock: pyproject.toml
 	$(UV) lock
 
 # Install package in editable mode with isolated venv
-install: skills .installed
+install: doctor skills .installed
+	@(cd /tmp && $(CURDIR)/$(VENV_BIN)/python -c "from think.sol_cli import main") 2>/dev/null || { \
+		echo ">>> re-registering editable install"; \
+		$(UV) pip install -e . --no-deps; \
+		if (cd /tmp && $(CURDIR)/$(VENV_BIN)/python -c "from think.sol_cli import main"); then \
+			echo ">>> re-registered successfully"; \
+		else \
+			echo ">>> editable install still broken; run make clean-install"; \
+			exit 1; \
+		fi; \
+	}
+	@OS_NAME=$$(uname -s); \
+	ARCH=$$(uname -m); \
+	if [ "$$OS_NAME" = "Darwin" ] && [ "$$ARCH" = "arm64" ]; then \
+		$(MAKE) parakeet-helper || { echo 'parakeet install: helper build failed' >&2; exit 1; }; \
+	elif [ "$$OS_NAME" = "Linux" ]; then \
+		if [ "$$ARCH" = "x86_64" ]; then \
+			echo "parakeet install: PARAKEET_ONNX_VARIANT=$(PARAKEET_ONNX_VARIANT)"; \
+			$(UV) sync --extra parakeet-onnx-$(PARAKEET_ONNX_VARIANT) || { echo "parakeet install: uv sync --extra parakeet-onnx-$(PARAKEET_ONNX_VARIANT) failed" >&2; exit 1; }; \
+			if [ "$(PARAKEET_ONNX_VARIANT)" = "cuda" ]; then \
+				$(UV) pip install --reinstall onnxruntime-gpu || { echo "parakeet install: failed to force-reinstall onnxruntime-gpu" >&2; exit 1; }; \
+				$(VENV_PY) -c "import onnxruntime as ort; ort.preload_dlls(cuda=True, cudnn=True); assert 'CUDAExecutionProvider' in ort.get_available_providers(), 'CUDAExecutionProvider missing after install'; print('parakeet install: CUDA runtime ready')" || { echo "parakeet install: CUDA runtime validation failed" >&2; exit 1; }; \
+			fi; \
+		else \
+			echo "parakeet install: skipping unsupported Linux arch $$ARCH"; \
+		fi; \
+	else \
+		echo "parakeet install: unsupported host '$$OS_NAME/$$ARCH'; supported: darwin/arm64, linux/x86_64" >&2; \
+		exit 1; \
+	fi
+	@touch .installed
+	@OS_NAME=$$(uname -s); \
+	ARCH=$$(uname -m); \
+	if [ "$$OS_NAME" = "Darwin" ] && [ "$$ARCH" = "arm64" ] || [ "$$OS_NAME" = "Linux" ] && [ "$$ARCH" = "x86_64" ]; then \
+		PARAKEET_ONNX_VARIANT=$(PARAKEET_ONNX_VARIANT) $(VENV_PY) scripts/install_parakeet_model.py || { echo "parakeet install: install_parakeet_model.py failed" >&2; exit 1; }; \
+	fi
 
 # Directories where AI coding agents look for skills
 SKILL_DIRS := journal/.agents/skills journal/.claude/skills
@@ -107,10 +155,6 @@ skills:
 # Start local dev stack against fixture journal (no observers, no daily processing)
 dev: .installed
 	$(TEST_ENV) PATH=$(CURDIR)/$(VENV_BIN):$$PATH $(VENV_BIN)/sol supervisor 0 --no-daily
-
-# Restart solstone service (noop in dev mode)
-sail: .installed
-	$(VENV_BIN)/sol service restart --if-installed
 
 # Start sandbox stack: fixture copy + background supervisor + readiness wait
 sandbox: .installed
@@ -179,8 +223,13 @@ sandbox-stop:
 		rm -rf "$$SANDBOX_JOURNAL"; \
 		echo "Removed $$SANDBOX_JOURNAL"; \
 	fi; \
-	rm -f .sandbox.pid .sandbox.journal; \
-	echo "Sandbox stopped."
+		rm -f .sandbox.pid .sandbox.journal; \
+		echo "Sandbox stopped."
+
+.PHONY: sandbox-seed-observers
+sandbox-seed-observers: ## Seed 4 sample observers into the running sandbox journal
+	@test -s .sandbox.journal || (echo "No sandbox running. Run 'make sandbox' first." && exit 1)
+	@_SOLSTONE_JOURNAL_OVERRIDE=$$(cat .sandbox.journal) $(VENV_BIN)/python tests/fixtures/seed_observers.py
 
 # Verify API baselines against running sandbox
 verify-api: .installed
@@ -223,6 +272,19 @@ install-pinchtab:
 		echo "Installing pinchtab..."; \
 		curl -fsSL https://pinchtab.com/install.sh | bash; \
 	fi
+
+# Build the parakeet helper binary (macOS/arm64 only, requires Xcode CLT)
+install-models:
+	@test -x "$(VENV_PY)" || { echo "parakeet install: missing $(VENV_PY); run make install first" >&2; exit 1; }
+	PARAKEET_ONNX_VARIANT=$(PARAKEET_ONNX_VARIANT) $(VENV_PY) scripts/install_parakeet_model.py
+
+parakeet-helper:
+	cd observe/transcribe/parakeet_helper && swift build -c release
+	@echo "built: $$(pwd)/observe/transcribe/parakeet_helper/.build/release/parakeet-helper"
+
+# Remove parakeet helper build artifacts
+parakeet-helper-clean:
+	rm -rf observe/transcribe/parakeet_helper/.build observe/transcribe/parakeet_helper/.swiftpm observe/transcribe/parakeet_helper/Package.resolved
 
 # Run browser scenarios against sandbox
 verify-browser: .installed
@@ -390,8 +452,12 @@ clean:
 	find . -type f -name ".DS_Store" -delete
 	rm -f .installed
 
+# Pre-install diagnostic — stdlib-only; runs on system python without uv/venv
+doctor:
+	@python3 scripts/doctor.py $(if $(VERBOSE),--verbose) $(if $(JSON),--json) $(if $(PORT),--port $(PORT))
+
 # Service management (override port: make install-service PORT=8000)
-install-service: .installed
+install-service: doctor skills .installed
 	@MODE=$$($(PYTHON) -m think.install_guard check); \
 	RC=$$?; \
 	case "$$MODE" in \
@@ -424,9 +490,9 @@ install-service: .installed
 			;; \
 	esac; \
 	$(PYTHON) -m think.install_guard install; \
-	npx skills add ./skills/solstone -g -a claude-code -y; \
+	CI=true npx --yes skills add ./skills/solstone -g -a claude-code -y; \
 	$(VENV_BIN)/sol service install --port $(or $(PORT),5015); \
-	$(VENV_BIN)/sol service start; \
+	$(VENV_BIN)/sol service restart; \
 	echo "Waiting for service readiness..."; \
 	READY=false; \
 	for i in $$(seq 1 20); do \
@@ -469,12 +535,14 @@ uninstall-service:
 	fi; \
 	$(VENV_BIN)/sol service stop > /dev/null 2>&1 || true; \
 	$(VENV_BIN)/sol service uninstall; \
-	npx skills remove -g -a claude-code -y solstone; \
+	CI=true npx --yes skills remove -g -a claude-code -y solstone; \
 	$(PYTHON) -m think.install_guard uninstall
 
 uninstall:
 	@echo "Error: 'make uninstall' is disabled. Use the 'uninstall-service' target to remove installed user/system artifacts, or 'make clean-install' to rebuild the local dev environment." >&2
 	@exit 1
+
+FORCE:
 
 # Clean everything and reinstall
 clean-install: clean

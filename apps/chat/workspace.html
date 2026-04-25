@@ -34,6 +34,23 @@
   {% endif %}
 </section>
 
+<style>
+  .chat-talent-card--stalled {
+    border-left: 3px solid var(--warn-amber, #d39b2c);
+    opacity: 0.78;
+  }
+
+  .chat-talent-card-stalled-note {
+    color: var(--warn-amber, #a66d00);
+    font-size: 0.9em;
+    margin-top: 4px;
+  }
+
+  .chat-talent-card-detail--markdown[data-markdown="1"] {
+    visibility: hidden;
+  }
+</style>
+
 <script>
 (function () {
   const root = document.querySelector('.chat-app');
@@ -51,16 +68,25 @@
     hour: 'numeric',
     minute: '2-digit'
   });
+  const CHAT_TALENT_STALL_MS = 3 * 60 * 1000;
   let searchTimer = null;
+  let chatEventsCleanup = null;
 
   insertTimeSeparators(transcript);
   decorateBubbles(transcript);
+  bootstrapMarkdownDetails(transcript);
 
   if (isToday && window.appEvents) {
-    const off = window.appEvents.listen('chat', (msg) => {
+    chatEventsCleanup = window.appEvents.listen('chat', {
+      schema: ['kind'],
+      correlationKey: 'use_id',
+      timeout: CHAT_TALENT_STALL_MS,
+      onDrop: (err) => window.logError(err, { context: 'chat: listener drop' }),
+      onTimeout: handleChatTalentTimeout,
+    }, (msg) => {
       appendEventFromLive(msg, transcript);
     });
-    window.addEventListener('beforeunload', off, { once: true });
+    window.addEventListener('beforeunload', chatEventsCleanup, { once: true });
   }
 
   transcript.addEventListener('click', (event) => {
@@ -90,7 +116,13 @@
   if (location.hash && location.hash.startsWith('#event-')) {
     document.getElementById(location.hash.slice(1))?.scrollIntoView({ block: 'center' });
   } else {
-    transcript.scrollTop = transcript.scrollHeight;
+    const owners = transcript.querySelectorAll('.chat-event[data-kind="owner_message"]');
+    const lastOwner = owners[owners.length - 1];
+    if (!lastOwner) {
+      transcript.scrollTop = transcript.scrollHeight;
+    } else if (transcript.scrollHeight > transcript.clientHeight + 8) {
+      lastOwner.scrollIntoView({ block: 'start' });
+    }
   }
 
   function insertTimeSeparators(list) {
@@ -137,6 +169,14 @@
     });
   }
 
+  function bootstrapMarkdownDetails(list) {
+    list.querySelectorAll('[data-markdown="1"]').forEach((node) => {
+      const text = node.textContent || '';
+      node.innerHTML = window.AppServices.renderMarkdown(text);
+      node.removeAttribute('data-markdown');
+    });
+  }
+
   function appendEventFromLive(msg, list) {
     const kind = String(msg.kind || msg.event || '').trim();
     if (!kind) return;
@@ -161,6 +201,9 @@
 
     list.querySelector('.chat-empty')?.remove();
     list.appendChild(item);
+    if (kind === 'talent_spawned' && msg.use_id) {
+      chatEventsCleanup?.pending?.track(msg.use_id);
+    }
     decorateBubbles(list);
     insertTimeSeparators(list);
     list.scrollTop = list.scrollHeight;
@@ -202,7 +245,7 @@
       return buildTalentCard(event.name + ' started', event.task || '', event.use_id, 'active', 'chat-talent-card--spawned');
     }
     if (event.kind === 'talent_finished') {
-      return buildTalentCard(event.name + ' finished', event.summary || '', event.use_id, 'completed', 'chat-talent-card--finished');
+      return buildTalentCard(event.name + ' finished', event.summary || '', event.use_id, 'finished', 'chat-talent-card--finished');
     }
     if (event.kind === 'talent_errored') {
       return buildTalentCard(event.name + ' errored', event.reason || '', event.use_id, 'errored', 'chat-talent-card--errored');
@@ -249,13 +292,40 @@
     card.appendChild(labelNode);
 
     if (detail) {
-      const detailNode = document.createElement('span');
-      detailNode.className = 'chat-talent-card-detail';
-      detailNode.textContent = detail;
-      card.appendChild(detailNode);
+      if (status === 'finished' || status === 'errored') {
+        const detailNode = document.createElement('div');
+        detailNode.className = 'chat-talent-card-detail chat-talent-card-detail--markdown';
+        detailNode.innerHTML = window.AppServices.renderMarkdown(detail || '');
+        card.appendChild(detailNode);
+      } else {
+        const detailNode = document.createElement('span');
+        detailNode.className = 'chat-talent-card-detail';
+        detailNode.textContent = detail;
+        card.appendChild(detailNode);
+      }
     }
 
     return card;
+  }
+
+  function handleChatTalentTimeout(useId) {
+    if (!useId) return;
+    const cards = transcript.querySelectorAll(`[data-talent-use-id="${CSS.escape(useId)}"]`);
+    cards.forEach((card) => {
+      if (card.dataset.talentStatus === 'finished' || card.dataset.talentStatus === 'errored') {
+        return;
+      }
+      card.dataset.talentStatus = 'stalled';
+      card.classList.remove('chat-talent-card--spawned');
+      card.classList.add('chat-talent-card--stalled');
+      let note = card.querySelector('.chat-talent-card-stalled-note');
+      if (!note) {
+        note = document.createElement('span');
+        note.className = 'chat-talent-card-stalled-note';
+        card.appendChild(note);
+      }
+      note.textContent = 'Talent stopped responding — reload to retry';
+    });
   }
 
   function buildReflectionCard(dayValue, url) {

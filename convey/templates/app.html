@@ -18,6 +18,9 @@
 
   <!-- WebSocket connection for Callosum events -->
   <script src="{{ url_for('root.static', filename='websocket.js') }}"></script>
+  <script src="{{ url_for('root.static', filename='api.js') }}"></script>
+  <!-- App JavaScript (includes AppServices framework) -->
+  <script src="{{ url_for('root.static', filename='app.js') }}"></script>
 
   <!-- Apply facet theme immediately to prevent flash -->
   {% if selected_facet and app_registry.apps[app].facets_enabled() %}
@@ -39,7 +42,7 @@
 <body{% if body_classes %} class="{{ body_classes|join(' ') }}"{% endif %}>
 <script>
 // Restore sidebar state before first paint to prevent FOUC
-(function(){try{var s=localStorage.getItem('solstone:menu-state');if(s==='full'&&window.innerWidth<=768)document.body.classList.add('menu-full');else if(s==='all')document.body.classList.add('menu-all');}catch(e){}})();
+(function(){try{var s=localStorage.getItem('solstone:menu-state');if(s==='full')document.body.classList.add('menu-full');else if(s==='all')document.body.classList.add('menu-all');}catch(e){/* Default collapsed menu state is safe when storage is unavailable. */}})();
 </script>
 <a href="#main-content" class="skip-link">skip to content</a>
 <!-- Corner Tags (screen region detection) -->
@@ -95,8 +98,6 @@
   {% include app_registry.apps[app].get_workspace_template() %}
 </main>
 
-<!-- App JavaScript (includes AppServices framework) -->
-<script src="{{ url_for('root.static', filename='app.js') }}"></script>
 <script src="{{ vendor_lib('marked') }}"></script>
 <script src="{{ vendor_lib('dompurify') }}"></script>
 
@@ -373,10 +374,10 @@
 
     if (eventName === 'finish') {
       card = createTimelineCard('finished', event.ts, 'talent-view-event--finish');
-      pre = document.createElement('pre');
-      pre.className = 'talent-view-pre';
-      pre.textContent = event.summary || event.result || '';
-      card.appendChild(pre);
+      body = document.createElement('div');
+      body.className = 'talent-view-markdown';
+      body.innerHTML = window.AppServices.renderMarkdown(event.summary || event.result || '');
+      card.appendChild(body);
       return card;
     }
 
@@ -438,7 +439,9 @@
       var body = {};
       try {
         body = await response.json();
-      } catch (_err) {}
+      } catch (_err) {
+        // Fall back to generic talent-run copy when the error body is not JSON.
+      }
       throw new Error(body.error || 'Unable to load talent run');
     }
     return response.json();
@@ -495,14 +498,61 @@
     refreshTalentView(modalUseId);
   };
 
-  window.openConversation = function(text) {
+  function restoreDefaultPlaceholder() {
     if (!input) return;
-    if (typeof text === 'string' && text) {
-      input.value = text;
-      resizeComposer();
+    input.placeholder = input.dataset.defaultPlaceholder || '';
+  }
+
+  function clearConversationSuggestion() {
+    if (!input) return;
+    delete input.dataset.suggestion;
+    restoreDefaultPlaceholder();
+  }
+
+  function acceptConversationSuggestion() {
+    if (!input || !input.dataset.suggestion || input.value !== '') return false;
+    input.value = input.dataset.suggestion;
+    clearConversationSuggestion();
+    resizeComposer();
+    return true;
+  }
+
+  function handleSuggestionKeydown(event) {
+    if (!input || !input.dataset.suggestion || input.value !== '') return;
+    if (event.key === 'Tab' && !event.shiftKey) {
+      event.preventDefault();
+      acceptConversationSuggestion();
+      return;
     }
+    if (event.key === 'ArrowRight' && input.selectionStart === 0) {
+      event.preventDefault();
+      acceptConversationSuggestion();
+    }
+  }
+
+  function handleSuggestionInput() {
+    if (!input || !input.dataset.suggestion || input.value === '') return;
+    clearConversationSuggestion();
+  }
+
+  window.fillChat = function(text) {
+    if (!input) return;
     input.focus();
-    input.selectionStart = input.selectionEnd = input.value.length;
+    input.value = text;
+    clearConversationSuggestion();
+    resizeComposer();
+    if (typeof input.setSelectionRange === 'function') {
+      var end = input.value.length;
+      input.setSelectionRange(end, end);
+    }
+  };
+
+  window.suggestChat = function(text) {
+    if (!input) return;
+    if (!input.dataset.defaultPlaceholder) input.dataset.defaultPlaceholder = input.placeholder || '';
+    input.dataset.suggestion = text;
+    input.placeholder = text;
+    input.focus();
   };
 
   function handleChatEvent(msg) {
@@ -557,9 +607,7 @@
   async function hydrateChatBar() {
     if (!appBar) return;
     try {
-      var response = await fetch('/api/chat/session');
-      if (!response.ok) throw new Error('session');
-      var data = await response.json();
+      var data = await window.apiJson('/api/chat/session');
       if (data.latest_sol_message) {
         setStatus(
           data.latest_sol_message.text || '',
@@ -575,8 +623,22 @@
           updatedAt: talent.started_at || Date.now()
         });
       });
-    } catch (_err) {
-      setStatus('', '');
+      (data.completed_talents || []).forEach(function(talent) {
+        upsertTalent({
+          useId: String(talent.use_id || ''),
+          name: talent.name || '',
+          task: talent.task || '',
+          status: 'completed',
+          updatedAt: talent.finished_at
+        });
+      });
+    } catch (err) {
+      setPendingState(true);
+      setStatus(
+        "Couldn't load recent chat session. Reload to try again.",
+        "Couldn't load recent chat session. Reload to try again."
+      );
+      window.logError(err, { context: 'chat-hydrate' });
     }
   }
 
@@ -612,7 +674,9 @@
   function initChatChrome() {
     try {
       LEGACY_KEYS.forEach(function(key) { localStorage.removeItem(key); });
-    } catch (_err) {}
+    } catch (_err) {
+      // Legacy cleanup is best-effort; failing closed leaves current keys untouched.
+    }
 
     if (modal) {
       modal.addEventListener('click', function(event) {
@@ -625,6 +689,8 @@
     if (input) {
       resizeComposer();
       input.addEventListener('input', resizeComposer);
+      input.addEventListener('input', handleSuggestionInput);
+      input.addEventListener('keydown', handleSuggestionKeydown);
     }
 
     if (form) {
@@ -659,7 +725,8 @@
     {% include background_tpl %}
     {% endwith %}
   } catch (err) {
-    console.error('[AppServices] Failed to load {{ app_name }} background script:', err);
+    window.AppServices.markBackgroundFailing('{{ app_name }}', err);
+    window.logError(err, { context: 'app-bg-register', app: '{{ app_name }}' });
   }
 })();
 </script>
