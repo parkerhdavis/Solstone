@@ -26,9 +26,11 @@ import typer
 
 from think.benchmark import (
     estimate_output_tok_s,
+    estimate_segment_time_s,
     estimate_task_time_s,
     list_prevetted_models,
     load_registry,
+    load_segments,
     load_tasks,
     resolve_hardware_class,
 )
@@ -159,6 +161,13 @@ def _format_task_summary(tasks: dict[str, dict[str, Any]]) -> str:
         else:
             parts.append(f"{label}: {_format_seconds(seconds)}")
     return ", ".join(parts)
+
+
+def _format_lane(seconds: float | None) -> str:
+    """Lane row: '?' when unmeasured, formatted seconds otherwise."""
+    if seconds is None:
+        return "?"
+    return _format_seconds(seconds)
 
 
 def _format_seconds(seconds: float) -> str:
@@ -301,6 +310,123 @@ def tasks(
             f"{spec.get('prompt_tokens') or 0:>7} "
             f"{spec.get('output_tokens') or 0:>7} "
             f"{spec.get('label') or ''}"
+        )
+
+
+@app.command("segment")
+def segment(
+    scenario: str = typer.Option(
+        "solo_active",
+        "--scenario",
+        help="Scenario from segment.json (e.g. solo_active, meeting_active, idle).",
+    ),
+    vision_model: str | None = typer.Option(
+        None,
+        "--vision",
+        help="Model to attribute the vision tier (screen_frame) to.",
+    ),
+    generate_model: str | None = typer.Option(
+        None,
+        "--generate",
+        help="Model to attribute the generate tier to (entity_extraction etc.).",
+    ),
+    cogitate_model: str | None = typer.Option(
+        None,
+        "--cogitate",
+        help="Model to attribute the cogitate tier to (pulse, awareness_tender).",
+    ),
+    json: bool = typer.Option(False, "--json", help="Emit JSON instead of text."),
+) -> None:
+    """Estimate wall-clock seconds to fully process one 5-minute segment.
+
+    Headline semantic benchmark — decomposes into audio (Phase 3),
+    video (screen-frame × qualified_frames), and per-segment talents.
+    Pass one model per tier the scenario actually uses; missing tiers
+    are flagged in the notes.
+    """
+    hardware = load_hardware()
+    if hardware is None:
+        typer.echo(
+            "Hardware not yet probed. Run 'sol call benchmark profile' first.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    hardware_class = _resolved_class(hardware)
+    tier_models: dict[str, str] = {}
+    if vision_model:
+        tier_models["vision"] = vision_model
+    if generate_model:
+        tier_models["generate"] = generate_model
+    if cogitate_model:
+        tier_models["cogitate"] = cogitate_model
+
+    est = estimate_segment_time_s(tier_models, hardware_class, scenario)
+
+    if json:
+        typer.echo(
+            jsonlib.dumps(
+                {
+                    "scenario": est.scenario,
+                    "hardware_class": est.hardware_class,
+                    "total_seconds": est.total_seconds,
+                    "audio_seconds": est.audio_seconds,
+                    "video_seconds": est.video_seconds,
+                    "talent_seconds": est.talent_seconds,
+                    "overhead_seconds": est.overhead_seconds,
+                    "per_talent": est.per_talent,
+                    "confidence": est.confidence,
+                    "notes": list(est.notes),
+                    "tier_models": tier_models,
+                },
+                indent=2,
+            )
+        )
+        return
+
+    scenarios_catalog = load_segments().get("scenarios", {})
+    scenario_label = (scenarios_catalog.get(scenario) or {}).get("label") or scenario
+    total = "unknown" if est.total_seconds is None else _format_seconds(est.total_seconds)
+    typer.echo(f"Scenario:       {scenario_label} ({scenario})")
+    typer.echo(f"Hardware class: {hardware_class}")
+    typer.echo(f"Total:          {total}  ({est.confidence})")
+    typer.echo("")
+    typer.echo(f"  Audio (5 min):  {_format_lane(est.audio_seconds)}")
+    typer.echo(f"  Video frames:   {_format_lane(est.video_seconds)}")
+    typer.echo(f"  Talents:        {_format_lane(est.talent_seconds)}")
+    typer.echo(f"  Overhead:       {_format_seconds(est.overhead_seconds)}")
+    if est.per_talent:
+        typer.echo("")
+        typer.echo("  Per talent:")
+        for task_id, seconds in est.per_talent.items():
+            typer.echo(f"    {task_id:28} {_format_seconds(seconds)}")
+    if est.notes:
+        typer.echo("")
+        typer.echo("  Notes:")
+        for note in est.notes:
+            typer.echo(f"    - {note}")
+
+
+@app.command("scenarios")
+def scenarios(
+    json: bool = typer.Option(False, "--json", help="Emit JSON instead of text."),
+) -> None:
+    """List segment scenarios from segment.json."""
+    catalog = load_segments().get("scenarios", {})
+    if json:
+        typer.echo(jsonlib.dumps({"scenarios": catalog}, indent=2))
+        return
+
+    header = f"{'SCENARIO':18} {'FRAMES':>6} {'TALENTS':>8} LABEL / DESCRIPTION"
+    typer.echo(header)
+    typer.echo("-" * len(header))
+    for scenario_id, spec in catalog.items():
+        frames = spec.get("qualified_frames") or 0
+        talents = len(spec.get("talents") or [])
+        label = spec.get("label") or scenario_id
+        desc = spec.get("description") or ""
+        typer.echo(
+            f"{scenario_id:18} {frames:>6} {talents:>8} {label} — {desc}"
         )
 
 

@@ -100,6 +100,61 @@
       "presence": "background",
       "tier_role": "vision",
       "ui_priority": 1
+    },
+    "segment_sense": {
+      "label": "Segment sense",
+      "description": "Lite per-segment classification: density, content_type, activity summary, entities, facets, speakers, emotional register. Runs once per segment (talent/sense.md).",
+      "prompt_tokens": 900,
+      "output_tokens": 400,
+      "mode": "text",
+      "presence": "background",
+      "tier_role": "generate",
+      "ui_priority": 6,
+      "_provisional": true
+    },
+    "speaker_attribution_llm": {
+      "label": "Speaker attribution (LLM)",
+      "description": "Layer 4 contextual fallback for speaker labelling — runs only when embedding-based layers fail and sense reports meeting_detected (talent/speaker_attribution.md).",
+      "prompt_tokens": 1100,
+      "output_tokens": 350,
+      "mode": "text",
+      "presence": "background",
+      "tier_role": "generate",
+      "ui_priority": 7,
+      "_provisional": true
+    },
+    "screen_record": {
+      "label": "Screen record",
+      "description": "Chronological documentary record of a segment combining transcript and screen descriptions. Conditional on density=active (talent/screen.md).",
+      "prompt_tokens": 1500,
+      "output_tokens": 1500,
+      "mode": "text",
+      "presence": "background",
+      "tier_role": "generate",
+      "ui_priority": 8,
+      "_provisional": true
+    },
+    "awareness_tender": {
+      "label": "Awareness tender",
+      "description": "Per-segment housekeeping snapshot of identity / calendar / routines / recent entities (talent/awareness_tender.md).",
+      "prompt_tokens": 800,
+      "output_tokens": 500,
+      "mode": "text",
+      "presence": "background",
+      "tier_role": "cogitate",
+      "ui_priority": 9,
+      "_provisional": true
+    },
+    "pulse": {
+      "label": "Pulse",
+      "description": "Per-segment narrative pulse + 'needs you' action items, drawing on calendar, todos, and recent entities (talent/pulse.md).",
+      "prompt_tokens": 1000,
+      "output_tokens": 700,
+      "mode": "text",
+      "presence": "background",
+      "tier_role": "cogitate",
+      "ui_priority": 10,
+      "_provisional": true
     }
   }
 }
