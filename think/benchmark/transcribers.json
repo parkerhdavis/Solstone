@@ -1,8 +1,8 @@
 {
-  "_comment": "STT backends for the audio lane of the segment-time benchmark. Three orthogonal axes per entry: (1) supported_hardware — explicit list of hardware-class keys from reference.json, or ['*'] for any class; the harness refuses to RTF-capture on a class outside this list. (2) fallback — production runtime behavior, 'use this if the preferred provider is unavailable'. (3) benchmarkable — whether the harness should run RTF capture; cloud backends are not benchmarkable in the RTF sense (network noise dominates) and use a flat wall_seconds_per_5min rule of thumb instead. parakeet (Solstone-internal CoreML / linux-x86_64 ONNX) and parakeet-nim (Spark NIM HTTP backend) are DISTINCT backends with different supported_hardware — do not unify them; that's the bug that triggered this split. RTF entries populated by `python -m think.benchmark.harness --transcriber <id> --audio-fixture <path> --class <hw>`.",
+  "_comment": "STT backends for the audio lane of the segment-time benchmark. Three orthogonal axes per entry: (1) supported_hardware — explicit list of hardware-class keys from reference.json, or ['*'] for any class; the harness refuses to RTF-capture on a class outside this list. (2) fallback — production runtime behavior, 'use this if the preferred provider is unavailable'. (3) benchmarkable — whether the harness should run RTF capture; cloud backends are not benchmarkable in the RTF sense (network noise dominates) and use a flat wall_seconds_per_5min rule of thumb instead. Solstone supports two in-process ASR backends (parakeet via CoreML/ONNX, whisper via faster-whisper); both are libraries inside the Solstone Python process. parakeet-nim was investigated and explicitly deferred — see the project's Transcription Backend Architecture doc. RTF entries populated by `python -m think.benchmark.harness --transcriber <id> --audio-fixture <path> --class <hw>`.",
   "transcribers": {
     "parakeet": {
-      "label": "Parakeet TDT (Solstone-internal: CoreML / linux-x86_64 ONNX)",
+      "label": "Parakeet TDT (in-process: CoreML / linux-x86_64 ONNX)",
       "kind": "local",
       "supported_hardware": [
         "rtx-4090",
@@ -18,26 +18,16 @@
       ],
       "fallback": false,
       "benchmarkable": true,
-      "notes": "Bundled observe/transcribe/parakeet.py path: CoreML helper on macOS Apple Silicon, onnx-asr + onnxruntime on linux-x86_64. Does NOT run on linux/aarch64 (DGX Spark) — that platform uses parakeet-nim instead. The two are distinct backends; never collapse them.",
-      "benchmarks": {}
-    },
-    "parakeet-nim": {
-      "label": "Parakeet TDT (NVIDIA NIM container, HTTP)",
-      "kind": "local-http",
-      "supported_hardware": ["dgx-spark"],
-      "fallback": false,
-      "benchmarkable": true,
-      "requires": "nvcr.io/nim/nvidia/parakeet-0-6b-tdt running and reachable at PARAKEET_NIM_URL (default http://localhost:9000). Harness hard-fails with 'NIM container not running at <url>' when unreachable; never silently falls back to another backend.",
-      "notes": "Spark-specific deployment vector (Sortformer diarization + bundled Silero VAD). Provider implementation lands in Phase 3a alongside the NIM container deploy in the Cumulus stack; RTF measured in Phase 3b once the container is up.",
+      "notes": "In-process backend (observe/transcribe/parakeet.py): CoreML helper on macOS Apple Silicon, onnx-asr + onnxruntime on linux-x86_64. Does NOT run on linux/aarch64 (DGX Spark) — those hosts use whisper.",
       "benchmarks": {}
     },
     "whisper": {
-      "label": "Whisper (faster-whisper, local)",
+      "label": "Whisper (faster-whisper, in-process)",
       "kind": "local",
       "supported_hardware": ["*"],
       "fallback": true,
       "benchmarkable": true,
-      "notes": "Portable rollback only. Used in production when the preferred provider is unavailable. Whisper RTF is informative for the fallback path but should never be substituted for parakeet/parakeet-nim numbers in the headline benchmark — that would corrupt the cross-backend signal.",
+      "notes": "Cross-platform in-process backend. Universal floor: runs anywhere Python runs, including linux/aarch64 (DGX Spark). Used as the production fallback when the preferred provider is unavailable, and as the Spark default since the in-process parakeet path doesn't cover aarch64.",
       "benchmarks": {}
     },
     "gemini": {

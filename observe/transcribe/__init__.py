@@ -65,12 +65,6 @@ BACKEND_REGISTRY: dict[str, str] = {
     "revai": "observe.transcribe.revai",
     "gemini": "observe.transcribe.gemini",
     "parakeet": "observe.transcribe.parakeet",
-    # Fork-only backend: Parakeet via NIM container (HTTP). Lives under
-    # think.providers.asr/ so it doesn't touch upstream observe/transcribe
-    # files. Distinct backend from "parakeet" — different supported_hardware,
-    # different deployment vector. See docs/PROVIDERS.md and the project's
-    # Transcription Backend Architecture doc.
-    "parakeet-nim": "think.providers.asr.parakeet_nim",
 }
 
 # ---------------------------------------------------------------------------
@@ -104,18 +98,6 @@ BACKEND_METADATA: dict[str, dict] = {
         "description": "On-device speech recognition via Parakeet TDT; macOS uses a FluidAudio/CoreML helper, Linux uses onnx-asr + onnxruntime. Requires `make install`.",
         "env_key": None,
         "settings": ["model_version", "device", "timeout_sec"],
-    },
-    "parakeet-nim": {
-        "label": "Parakeet (NVIDIA NIM container, HTTP)",
-        "description": (
-            "Parakeet TDT served by the NVIDIA NIM container "
-            "(nvcr.io/nim/nvidia/parakeet-0-6b-tdt) over HTTP. Required on "
-            "linux/aarch64 + Blackwell hosts (DGX Spark). Includes Sortformer "
-            "diarization and Silero VAD. Endpoint configured via "
-            "PARAKEET_NIM_URL env var or transcribe.parakeet-nim.endpoint."
-        ),
-        "env_key": None,
-        "settings": ["endpoint", "language", "timeout_s", "model"],
     },
 }
 
