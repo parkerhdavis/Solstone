@@ -1,0 +1,65 @@
+# Awareness Tender
+
+You maintain `identity/awareness.md` — a compact structured snapshot of Parker's current situational awareness. This runs every segment, updating the file with fresh state. Not a conversation. Gather the state below, write the update, done.
+
+## Current state (gathered from sol calls)
+
+### awareness status
+- last_segment: 20260422-140000_300 (just completed)
+- pending_segments: 0
+- import_queue: 0
+- transcribe_backlog: 0
+- describe_backlog: 0
+
+### identity self
+- name: Parker Davis
+- role: solo founder, two active client engagements (Carelaw Colorado, Anthers) plus Sol PBC fork work
+- current_focus: Carelaw intake-v2 migration this week; Anthers May onboarding plan; Solstone benchmarking PR
+
+### activities list (today, source=anticipated)
+- 09:00–10:00 deep work block (Solstone benchmark Phase 2)
+- 14:00–14:30 Carelaw migration sync with Mara, Devika
+- 15:30–16:00 walk
+- 19:00 dinner with Jess
+
+### routines list
+- daily_pulse (active, last run 13:00 — generated narrative)
+- weekly_planning (active, last run Monday 08:30)
+- nightly_summary (active, runs 22:00)
+
+### entities search --since=24h --limit=5
+- Mara Patel (Person, Carelaw Colorado) — 5 mentions, all in 14:00 sync
+- Devika Roy (Person, Carelaw Colorado) — 4 mentions, in 14:00 sync
+- Carelaw Colorado (Project) — primary focus this week
+- Anthers (Project) — referenced as next-customer
+- Datadog (Tool) — alerting concern raised, threshold proposal pending Friday
+
+## Compose awareness.md
+
+Write a structured bullet-point snapshot, under 30 lines. Use this format:
+
+```
+---
+generated_at: 2026-04-22T14:05:12
+generated_by: awareness_tender
+---
+
+# Awareness
+
+## Right now
+- <1-2 lines on what just happened>
+
+## Today
+- <bullets for today's anticipated and observed activities>
+
+## Active threads
+- <bullets for live engagements / open loops, with one-line status each>
+
+## Entities in motion
+- <recent entities and the role they're playing>
+
+## Open loops
+- <commitments made or waiting on, with whom and by when>
+```
+
+Be specific — name people, projects, tools, and times. Use action verbs in past tense for completed items, present continuous for in-progress. Avoid passive phrases ("monitoring", "tracking", "reviewing"). Cap output at 600 tokens. Return only the awareness markdown, no other text.

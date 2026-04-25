@@ -1,0 +1,66 @@
+You are analyzing a segment from Parker's journal on Wednesday, April 22 2026 (20260422), covering 14:00:00 to 14:05:00. This segment contains audio of a phone meeting and screen activity in a code editor and browser.
+
+Focus your analysis on this discrete period — its context, content, and significance within the broader day.
+
+# Segment Sense
+
+Read the transcript and screen data below and produce a JSON object with these top-level fields: `density`, `content_type`, `activity_summary`, `entities`, `facets`, `meeting_detected`, `speakers`, `recommend`, `emotional_register`.
+
+## Density
+- **active**: transcript has >5 lines or >50 words, or screen shows the user interacting (browsing, typing, reading, scrolling). Default to active if there is any user-directed activity.
+- **low_change**: minimal new content AND no user interaction.
+- **idle**: <3 transcript lines AND <3 distinct screen frames.
+
+## Content type
+Choose one: `meeting`, `coding`, `browsing`, `email`, `messaging`, `reading`, `idle`, `mixed`.
+
+## Activity summary
+Describe what Parker did using action verbs. Name the tools, people, projects, and actions. Avoid passive words like "reviewing", "monitoring", "tracking", "checking", "observing". Use: wrote, sent, discussed, switched to, typed, said, decided, asked.
+
+## Entities
+Extract every named entity. Four types only: Person, Company, Project, Tool. Each has `type`, `name`, `context`, `role` (`attendee` for live participants, `mentioned` for everyone else; `attendee` requires `meeting_detected: true`), and `source` (`voice`, `speaker_label`, `transcript`, `screen`, `other`). Skip URLs, filenames, paths.
+
+## Facets
+Classify into the owner's configured facets: `meetings`, `learning`, `technical-work`, `family`, `health`. Only include facets with direct evidence. Each: `facet`, `activity` (1 sentence), `level` (`high` / `medium` / `low`).
+
+## Meeting detected
+`true` only for live, synchronous, multi-person interaction with named participants. Not for podcasts, lectures, recorded media.
+
+## Speakers
+If `meeting_detected` is true, extract participant names from screen panel, direct address, or self-introductions. Do not include Parker.
+
+## Recommend
+- `screen_record`: true if density is active AND meaningful screen content.
+- `speaker_attribution`: true if `meeting_detected` and multiple speakers.
+- `pulse_update`: true if this represents a meaningful change in activity.
+
+## Emotional register
+One of: `high_energy`, `tense`, `focused`, `collaborative`, `flat`, `celebratory`, `strained`, `neutral`.
+
+Return ONLY the JSON object, no other text.
+
+---
+
+## Transcript
+
+[14:00:04] Parker: Hey Mara, sorry I'm a minute late. Did Devika join yet?
+[14:00:11] Mara: Yeah she's here, hi Devika.
+[14:00:13] Devika: Hi both. Can we keep this to twenty minutes? I have another at 2:30.
+[14:00:18] Parker: Should be fine. So the Carelaw Colorado intake schema migration — where are we?
+[14:00:26] Mara: Two pieces. The blue-green field mapping is written and reviewed. Devika ran it against staging this morning and it looked clean. The piece I'm worried about is the Datadog alerting on the new-column read success rate. We don't have a baseline yet so the threshold is going to be guesswork.
+[14:00:48] Devika: I can pull the last week of staging traffic and compute a rolling p99 — that should give us something defensible.
+[14:01:02] Parker: Good. What about the billing export? Last time we touched that table the export job went sideways for two days.
+[14:01:14] Devika: Already mocked. The intake_legacy view stays put through cutover, billing reads from that, no changes needed on the billing side.
+[14:01:24] Mara: One more thing — Jordan from legal-ops wants to be in the loop before we cut over. Can we add her to the Slack channel?
+[14:01:33] Parker: Yes, I'll do it after this. Anything else?
+[14:01:38] Devika: Are we still planning to roll the same pattern to Anthers in May? I want to know if I'm building this for one customer or two.
+[14:01:48] Parker: Two. Anthers will be lift-and-shift. Build for two.
+[14:01:55] Mara: Okay. I'll have the Datadog thresholds proposal in the channel by Friday.
+[14:02:03] Parker: Great. Talk Friday.
+
+## Screen activity
+
+Frame 14:00:00 — VS Code, file `migrations/0042_carelaw_intake.sql` open, ~80 lines visible, `BEGIN;` and `ALTER TABLE intake ADD COLUMN ...` statements highlighted.
+Frame 14:00:45 — Browser tab "Datadog | Monitors", two graph panels showing intake_read_success_rate.
+Frame 14:01:30 — VS Code, switched to `app/billing/export.py`, line 142, `intake_legacy` view referenced.
+Frame 14:02:00 — Slack, channel `#carelaw-colorado-intake`, draft message visible mentioning "@Jordan".
