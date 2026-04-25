@@ -335,14 +335,23 @@ def segment(
         "--cogitate",
         help="Model to attribute the cogitate tier to (pulse, awareness_tender).",
     ),
+    transcriber: str | None = typer.Option(
+        None,
+        "--transcriber",
+        help=(
+            "STT backend for the audio lane (parakeet / whisper / gemini / "
+            "revai). Defaults to the configured 'transcribe.backend' from "
+            "the user's journal config."
+        ),
+    ),
     json: bool = typer.Option(False, "--json", help="Emit JSON instead of text."),
 ) -> None:
     """Estimate wall-clock seconds to fully process one 5-minute segment.
 
-    Headline semantic benchmark — decomposes into audio (Phase 3),
-    video (screen-frame × qualified_frames), and per-segment talents.
-    Pass one model per tier the scenario actually uses; missing tiers
-    are flagged in the notes.
+    Headline semantic benchmark — decomposes into audio (transcriber
+    RTF), video (screen-frame × qualified_frames), and per-segment
+    talents. Pass one model per tier the scenario actually uses;
+    missing tiers are flagged in the notes.
     """
     hardware = load_hardware()
     if hardware is None:
@@ -361,7 +370,10 @@ def segment(
     if cogitate_model:
         tier_models["cogitate"] = cogitate_model
 
-    est = estimate_segment_time_s(tier_models, hardware_class, scenario)
+    resolved_transcriber = transcriber or _configured_transcriber()
+    est = estimate_segment_time_s(
+        tier_models, hardware_class, scenario, transcriber=resolved_transcriber
+    )
 
     if json:
         typer.echo(
@@ -378,6 +390,7 @@ def segment(
                     "confidence": est.confidence,
                     "notes": list(est.notes),
                     "tier_models": tier_models,
+                    "transcriber": resolved_transcriber,
                 },
                 indent=2,
             )
@@ -389,6 +402,7 @@ def segment(
     total = "unknown" if est.total_seconds is None else _format_seconds(est.total_seconds)
     typer.echo(f"Scenario:       {scenario_label} ({scenario})")
     typer.echo(f"Hardware class: {hardware_class}")
+    typer.echo(f"Transcriber:    {resolved_transcriber or '(none)'}")
     typer.echo(f"Total:          {total}  ({est.confidence})")
     typer.echo("")
     typer.echo(f"  Audio (5 min):  {_format_lane(est.audio_seconds)}")
@@ -433,6 +447,29 @@ def scenarios(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _configured_transcriber() -> str | None:
+    """Read ``transcribe.backend`` from the user's journal config.
+
+    Returns ``None`` when no journal config is reachable — callers
+    should fall through to leaving the audio lane unmeasured. The
+    Solstone default is ``parakeet`` when the key is absent (matches
+    ``observe/transcribe/main.py``).
+    """
+    try:
+        from think.utils import get_config
+    except ImportError:
+        return None
+    try:
+        config = get_config()
+    except Exception as exc:
+        logger.debug("get_config() unavailable: %s", exc)
+        return None
+    backend = (config.get("transcribe") or {}).get("backend")
+    if isinstance(backend, str) and backend:
+        return backend
+    return "parakeet"
 
 
 def _resolved_class(hardware: dict[str, Any]) -> str:

@@ -27,6 +27,7 @@ _REFERENCE_FILE = _DATA_DIR / "reference.json"
 _REGISTRY_FILE = _DATA_DIR / "models.json"
 _TASKS_FILE = _DATA_DIR / "tasks.json"
 _SEGMENTS_FILE = _DATA_DIR / "segment.json"
+_TRANSCRIBERS_FILE = _DATA_DIR / "transcribers.json"
 
 
 Confidence = Literal["measured", "interpolated", "unknown"]
@@ -106,6 +107,12 @@ def load_tasks() -> dict[str, Any]:
 def load_segments() -> dict[str, Any]:
     """Load ``segment.json`` (cached)."""
     return json.loads(_SEGMENTS_FILE.read_text())
+
+
+@lru_cache(maxsize=1)
+def load_transcribers() -> dict[str, Any]:
+    """Load ``transcribers.json`` (cached)."""
+    return json.loads(_TRANSCRIBERS_FILE.read_text())
 
 
 # ---------------------------------------------------------------------------
@@ -351,10 +358,96 @@ _CONFIDENCE_RANK: dict[Confidence, int] = {
 }
 
 
+def _estimate_audio_lane(
+    transcriber: str | None,
+    audio_seconds_total: float,
+    hardware_class: str,
+) -> tuple[float | None, Confidence, str | None]:
+    """Return ``(audio_seconds, confidence, note_or_None)`` for the audio lane.
+
+    Resolution:
+
+    - ``transcriber=None`` → ``(None, "unknown", explanatory note)``. Callers
+      that don't know which backend is configured fall through to this
+      pathway; the segment estimator will downgrade total confidence
+      accordingly.
+    - Local backend with measured RTF for ``hardware_class`` →
+      ``rtf * audio_seconds_total``, ``confidence="measured"``.
+    - Local backend without a measurement on this class → ``(None,
+      "unknown", note)``. RTF doesn't interpolate cleanly across
+      hardware classes the way LLM tok/s does, so we don't try.
+    - Cloud backend → flat ``wall_seconds_per_5min * (audio/300)``,
+      ``confidence="interpolated"`` (rule-of-thumb, not measured here).
+    - Unknown transcriber name → ``(None, "unknown", note)``.
+    """
+    if transcriber is None:
+        return (
+            None,
+            "unknown",
+            "audio lane unknown: no transcriber specified (pass --transcriber "
+            "or read transcribe.backend from config)",
+        )
+
+    transcribers = load_transcribers().get("transcribers", {})
+    spec = transcribers.get(transcriber)
+    if spec is None:
+        return (
+            None,
+            "unknown",
+            f"audio lane unknown: transcriber '{transcriber}' missing from "
+            f"transcribers.json",
+        )
+
+    kind = spec.get("kind")
+    if kind == "local":
+        bench = (spec.get("benchmarks") or {}).get(hardware_class) or {}
+        rtf = bench.get("rtf")
+        if isinstance(rtf, (int, float)):
+            return (
+                round(float(rtf) * audio_seconds_total, 2),
+                "measured",
+                None,
+            )
+        return (
+            None,
+            "unknown",
+            f"audio lane unknown: no RTF measurement for transcriber "
+            f"'{transcriber}' on '{hardware_class}' (run "
+            f"`python -m think.benchmark.harness --transcriber {transcriber} "
+            f"--audio-fixture <path> --class {hardware_class}`)",
+        )
+
+    if kind == "cloud":
+        wall_per_5min = spec.get("wall_seconds_per_5min")
+        if isinstance(wall_per_5min, (int, float)):
+            seconds = float(wall_per_5min) * (audio_seconds_total / 300.0)
+            return (
+                round(seconds, 2),
+                "interpolated",
+                f"audio lane uses a flat rule-of-thumb wall-clock for "
+                f"cloud backend '{transcriber}' (network-bound, not "
+                f"hardware-derived)",
+            )
+        return (
+            None,
+            "unknown",
+            f"audio lane unknown: cloud transcriber '{transcriber}' has "
+            f"no wall_seconds_per_5min in transcribers.json",
+        )
+
+    return (
+        None,
+        "unknown",
+        f"audio lane unknown: transcriber '{transcriber}' has unrecognized "
+        f"kind '{kind}'",
+    )
+
+
 def estimate_segment_time_s(
     tier_models: dict[str, str],
     hardware_class: str,
     scenario: str = "solo_active",
+    transcriber: str | None = None,
 ) -> SegmentEstimate:
     """Estimate wall-clock seconds to process one 5-min segment.
 
@@ -365,9 +458,12 @@ def estimate_segment_time_s(
     per-lane breakdown so callers can render the headline number plus
     the structural detail behind it.
 
-    Audio lane is reserved for Phase 3 (transcriber RTF measurements);
-    Phase 1 always returns ``audio_seconds=None`` and downgrades total
-    confidence accordingly, with an explanatory note attached.
+    The audio lane resolves via ``transcriber``: pass the configured
+    backend name (``parakeet`` / ``whisper`` / ``gemini`` / ``revai``)
+    and the estimator looks up RTF (local) or wall-seconds-per-5min
+    (cloud) from ``transcribers.json``. Pass ``None`` to opt out and
+    leave the audio lane unmeasured (downgrades total confidence to
+    ``unknown``).
     """
     segments = load_segments().get("scenarios", {})
     spec = segments.get(scenario)
@@ -457,13 +553,15 @@ def estimate_segment_time_s(
     else:
         talent_seconds = round(sum(per_talent.values()), 2)
 
-    # --- Audio lane (Phase 3 placeholder) -----------------------------------
-    audio_seconds: float | None = None
-    leg_confidences.append("unknown")
-    notes.append(
-        "audio lane not yet measured: transcriber RTF lookup is Phase 3 "
-        "(see Benchmark Segment-Time Plan)"
+    # --- Audio lane ---------------------------------------------------------
+    audio_minutes = float(spec.get("audio_minutes") or 5)
+    audio_seconds_total = audio_minutes * 60.0
+    audio_seconds, audio_conf, audio_note = _estimate_audio_lane(
+        transcriber, audio_seconds_total, hardware_class
     )
+    leg_confidences.append(audio_conf)
+    if audio_note:
+        notes.append(audio_note)
 
     overhead_seconds = float(spec.get("fixed_overhead_s") or 0.0)
 
