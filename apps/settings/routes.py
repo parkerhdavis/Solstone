@@ -624,6 +624,134 @@ def get_benchmark_models() -> Any:
     )
 
 
+@settings_bp.route("/api/benchmark/scenarios")
+def get_benchmark_scenarios() -> Any:
+    """Return the segment-time scenario catalog from ``segment.json``.
+
+    Powers the scenario picker on the providers UI's "Background
+    processing" card. Shape mirrors ``segment.json`` directly so the
+    UI can render labels / descriptions / qualified_frames /
+    talents counts without a second round-trip.
+    """
+    try:
+        from think.benchmark import load_segments
+    except ImportError as exc:
+        return jsonify({"error": f"benchmark module unavailable: {exc}"}), 500
+
+    return jsonify(load_segments())
+
+
+@settings_bp.route("/api/benchmark/segment")
+def get_benchmark_segment() -> Any:
+    """Return a SegmentEstimate for the chosen scenario + tier-model picks.
+
+    Query parameters
+    ----------------
+    scenario : str, default "solo_active"
+        Scenario id from ``segment.json``.
+    vision, generate, cogitate : str, optional
+        Per-tier model ids. Any tier left unset falls back to the
+        smallest registry model with that capability — same comparison
+        baseline ``list_prevetted_models`` uses for the per-row
+        segment column. This makes the endpoint useful before the
+        user has explicitly picked per-tier models.
+    transcriber : str, optional
+        STT backend for the audio lane. Defaults to
+        ``transcribe.backend`` from journal config (typically
+        ``parakeet`` or ``whisper``).
+
+    Response shape mirrors ``SegmentEstimate`` plus the resolved
+    ``tier_models``, ``transcriber``, and ``hardware_class`` so the UI
+    knows exactly what was estimated.
+    """
+    try:
+        from think.benchmark import (
+            estimate_segment_time_s,
+            load_registry,
+            load_segments,
+        )
+        from think.benchmark.estimate import (
+            _pick_default_tier_models,
+            resolve_hardware_class,
+        )
+        from think.hardware import load_hardware, probe_hardware
+    except ImportError as exc:
+        return jsonify({"error": f"benchmark module unavailable: {exc}"}), 500
+
+    scenario = request.args.get("scenario", "solo_active")
+    if scenario not in (load_segments().get("scenarios") or {}):
+        return (
+            jsonify({"error": f"unknown scenario: {scenario!r}"}),
+            400,
+        )
+
+    hardware = load_hardware()
+    if hardware is None:
+        try:
+            hardware = probe_hardware()
+        except Exception as exc:
+            logger.warning("hardware probe failed: %s", exc)
+            hardware = None
+
+    gpus = (hardware or {}).get("gpus") or []
+    hardware_class = (
+        resolve_hardware_class(gpus[0].get("name")) if gpus else "cpu-only"
+    )
+
+    # Build tier_models: explicit query-param picks override the
+    # smallest-registry-model baseline.
+    tier_models = dict(_pick_default_tier_models(load_registry()))
+    for tier in ("vision", "generate", "cogitate"):
+        override = request.args.get(tier)
+        if override:
+            tier_models[tier] = override
+
+    transcriber = request.args.get("transcriber") or _configured_transcriber()
+
+    est = estimate_segment_time_s(
+        tier_models, hardware_class, scenario, transcriber=transcriber
+    )
+
+    return jsonify(
+        {
+            "scenario": est.scenario,
+            "hardware_class": est.hardware_class,
+            "transcriber": transcriber,
+            "tier_models": tier_models,
+            "total_seconds": est.total_seconds,
+            "audio_seconds": est.audio_seconds,
+            "video_seconds": est.video_seconds,
+            "talent_seconds": est.talent_seconds,
+            "overhead_seconds": est.overhead_seconds,
+            "per_talent": est.per_talent,
+            "confidence": est.confidence,
+            "notes": list(est.notes),
+        }
+    )
+
+
+def _configured_transcriber() -> str | None:
+    """Read ``transcribe.backend`` from journal config; ``None`` on failure.
+
+    Mirrors the helper in ``apps/benchmark/call.py``. Kept here as a
+    duplicate (rather than imported across app boundaries) so the
+    settings app doesn't grow a dependency on the benchmark app.
+    """
+    try:
+        from think.utils import get_config
+    except ImportError:
+        return None
+    try:
+        config = get_config()
+    except Exception as exc:
+        logger.debug("get_config() unavailable: %s", exc)
+        return None
+    backend = (config.get("transcribe") or {}).get("backend")
+    if isinstance(backend, str) and backend:
+        return backend
+    return "parakeet"
+
+
 def _list_installed_ollama_models() -> set[str]:
     """Query Ollama /api/tags; return ollama-local/<name> ids. Empty on failure."""
     try:
