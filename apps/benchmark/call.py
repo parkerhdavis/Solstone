@@ -92,12 +92,47 @@ def profile(
 @app.command("list-models")
 def list_models(
     json: bool = typer.Option(False, "--json", help="Emit JSON instead of text."),
+    scenario: str = typer.Option(
+        "solo_active",
+        "--scenario",
+        help=(
+            "Scenario from segment.json used for the headline 5-min segment "
+            "estimate. Defaults to solo_active."
+        ),
+    ),
+    transcriber: str | None = typer.Option(
+        None,
+        "--transcriber",
+        help=(
+            "STT backend for the audio lane. Defaults to the configured "
+            "transcribe.backend from the user's journal config."
+        ),
+    ),
+    detailed: bool = typer.Option(
+        False,
+        "--detailed",
+        help=(
+            "Show drill-down columns (tok/s, per-task seconds) alongside "
+            "the headline segment-time. Off by default since the segment-time "
+            "is the more useful glance metric."
+        ),
+    ),
 ) -> None:
-    """List pre-vetted models with installed status + speed estimates."""
+    """List pre-vetted models with installed status + segment-time estimates.
+
+    The headline column is **5-min segment time** for the chosen
+    scenario, computed using this row's model for whichever tier roles
+    it can serve and the smallest registry model for the other tiers.
+    Pass ``--detailed`` to also see per-token tok/s and per-task
+    seconds (the old default columns).
+    """
     hardware = load_hardware()
     installed = _list_installed_models()
+    resolved_transcriber = transcriber or _configured_transcriber()
 
-    rows = list_prevetted_models(hardware)
+    rows = list_prevetted_models(
+        hardware, scenario=scenario, transcriber=resolved_transcriber
+    )
     for row in rows:
         row["installed"] = row["model_id"] in installed
 
@@ -109,6 +144,8 @@ def list_models(
                     "hardware_class": (
                         rows[0]["estimate"]["hardware_class"] if rows else "cpu-only"
                     ),
+                    "scenario": scenario,
+                    "transcriber": resolved_transcriber,
                     "models": rows,
                 },
                 indent=2,
@@ -123,25 +160,54 @@ def list_models(
         )
         typer.echo("")
 
-    header = (
-        f"{'MODEL':40} {'INSTALLED':9} {'TIER':4} {'SIZE':>5} "
-        f"{'TOK/S':>6} {'CONF':12} {'TASK TIMES':40}"
+    typer.echo(
+        f"Scenario: {scenario}    Transcriber: {resolved_transcriber or '(none)'}"
     )
+    typer.echo("")
+
+    if detailed:
+        header = (
+            f"{'MODEL':40} {'INSTALLED':9} {'TIER':4} {'SIZE':>5} "
+            f"{'5-MIN SEGMENT':>14} {'CONF':12} "
+            f"{'TOK/S':>6} {'TASK TIMES':40}"
+        )
+    else:
+        header = (
+            f"{'MODEL':40} {'INSTALLED':9} {'TIER':4} {'SIZE':>5} "
+            f"{'5-MIN SEGMENT':>14} {'CONF':12} {'ATTRIBUTED':20}"
+        )
     typer.echo(header)
     typer.echo("-" * len(header))
     for row in rows:
-        est = row["estimate"]
-        tok_s = "?" if est["tok_s"] is None else f"{est['tok_s']:.0f}"
-        task_summary = _format_task_summary(row.get("tasks", {}))
-        typer.echo(
-            f"{_truncate(row['model_id'], 40):40} "
-            f"{'yes' if row['installed'] else 'no':9} "
-            f"{row.get('tier_hint') or '-':<4} "
-            f"{row.get('size_gb') or '?':>5} "
-            f"{tok_s:>6} "
-            f"{est['confidence']:12} "
-            f"{task_summary:40}"
-        )
+        seg = row.get("segment_estimate") or {}
+        seg_seconds = seg.get("total_seconds")
+        seg_str = "?" if seg_seconds is None else _format_seconds(seg_seconds)
+        seg_conf = seg.get("confidence", "unknown")
+        if detailed:
+            est = row["estimate"]
+            tok_s = "?" if est["tok_s"] is None else f"{est['tok_s']:.0f}"
+            task_summary = _format_task_summary(row.get("tasks", {}))
+            typer.echo(
+                f"{_truncate(row['model_id'], 40):40} "
+                f"{'yes' if row['installed'] else 'no':9} "
+                f"{row.get('tier_hint') or '-':<4} "
+                f"{row.get('size_gb') or '?':>5} "
+                f"{seg_str:>14} "
+                f"{seg_conf:12} "
+                f"{tok_s:>6} "
+                f"{task_summary:40}"
+            )
+        else:
+            attributed = ",".join(seg.get("self_attributed_tiers") or []) or "-"
+            typer.echo(
+                f"{_truncate(row['model_id'], 40):40} "
+                f"{'yes' if row['installed'] else 'no':9} "
+                f"{row.get('tier_hint') or '-':<4} "
+                f"{row.get('size_gb') or '?':>5} "
+                f"{seg_str:>14} "
+                f"{seg_conf:12} "
+                f"{_truncate(attributed, 20):20}"
+            )
 
 
 def _format_task_summary(tasks: dict[str, dict[str, Any]]) -> str:
