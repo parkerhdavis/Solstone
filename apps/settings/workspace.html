@@ -64,6 +64,24 @@
   background: #e4e4e4;
 }
 
+/* Reusable per-tab attention indicator. Any tab can opt in by setting
+   data-attention="true" on its <button class="settings-nav-item">. The
+   dot is positioned within the button so it follows the tab in both
+   desktop nav and the mobile select rendering of the same items. */
+.settings-nav-item {
+  position: relative;
+}
+.settings-nav-item[data-attention="true"]::after {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #d97706;
+  margin-left: 0.4em;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
 .settings-nav-item.active {
   background: var(--facet-color, #E8923A);
   color: white;
@@ -2535,6 +2553,15 @@ button:focus:not(:focus-visible) {
         <a href="#" id="backendKeyLink">Configure in API Keys</a>
       </div>
 
+      <!-- Hardware compatibility warning. Fires when the configured backend's
+           supported_hardware (from think/benchmark/transcribers.json) doesn't
+           include the host's hardware class. Also flips the transcription
+           tab's attention indicator on. -->
+      <div id="backendCompatWarning" class="provider-key-warning" style="display:none">
+        <span>&#9888;</span>
+        <span id="backendCompatWarningText"></span>
+      </div>
+
       <!-- Whisper-specific settings -->
       <fieldset id="whisper-settings" class="backend-settings">
         <div class="settings-field">
@@ -3238,6 +3265,25 @@ let logNextCursor = null;
 let insightsData = null;
 let keyValidationData = {};
 const escapeHtml = window.AppServices.escapeHtml;
+
+// Reusable per-tab attention indicator. Any tab can opt in by calling
+// setTabAttention('<section>', true) when its content has a problem the
+// user should notice (incompatible backend on the transcription tab,
+// missing API key referenced from the providers tab, etc.) and
+// setTabAttention('<section>', false) once the issue clears. Implemented
+// by toggling data-attention on the <button id="tab-{section}"> in the
+// nav; the CSS rule on .settings-nav-item[data-attention="true"]::after
+// draws the dot.
+function setTabAttention(section, on) {
+  const tab = document.getElementById('tab-' + section);
+  if (!tab) return;
+  if (on) {
+    tab.setAttribute('data-attention', 'true');
+  } else {
+    tab.removeAttribute('data-attention');
+  }
+}
+
 const conveyUiText = {
   networkModeOff: {{ convey_copy.SETTINGS_NETWORK_MODE_OFF | tojson }},
   networkModeOn: {{ convey_copy.SETTINGS_NETWORK_MODE_ON | tojson }},
@@ -5000,12 +5046,15 @@ function setStorageControlsDisabled(disabled) {
   }
 }
 
+let transcribeHardware = null;
+
 async function loadTranscribeBackends() {
   try {
     const data = await window.apiJson('api/transcribe');
     transcribeBackends = data.backends || [];
     transcribeApiKeys = data.api_keys || {};
     transcribeRuntimeLabel = data.runtime_label || 'unsupported';
+    transcribeHardware = data.hardware || null;
     setLoadState('transcriptionLoadState');
     const select = document.getElementById('field-transcribe-backend');
     const runtimeLabel = document.getElementById('parakeet-runtime-label');
@@ -5068,6 +5117,15 @@ function switchTranscribeBackend(backend, config) {
     warning.style.display = 'none';
   }
 
+  // Hardware compatibility check. The backend's supported_hardware list
+  // (sourced from think/benchmark/transcribers.json) declares which
+  // hardware classes it actually runs on. ['*'] means any class. If the
+  // user's host class isn't in the list, surface a callout with a
+  // suggested alternative and flip the transcription tab's attention
+  // indicator on. Cleared whenever the chosen backend is compatible
+  // (or lacks a supported_hardware claim, which we treat as "no opinion").
+  evaluateTranscribeCompatibility(backend, backendInfo);
+
   // Disable enrich toggle for gemini (it has integrated enrichment)
   const enrichCheckbox = document.getElementById('field-transcribe-enrich');
   const enrichField = enrichCheckbox?.closest('.settings-field');
@@ -5077,6 +5135,74 @@ function switchTranscribeBackend(backend, config) {
     enrichField.style.opacity = isGemini ? '0.5' : '1';
     enrichField.title = isGemini ? 'Gemini includes integrated enrichment' : '';
   }
+}
+
+function _isBackendCompatible(backendInfo, hardwareClass) {
+  // No supported_hardware claim => treat as "no opinion", don't warn.
+  // ['*'] => universal floor, always compatible.
+  // otherwise: explicit list, must include the host's class.
+  const supported = backendInfo?.supported_hardware;
+  if (!supported) return true;
+  if (Array.isArray(supported) && supported.includes('*')) return true;
+  return Array.isArray(supported) && supported.includes(hardwareClass);
+}
+
+function _suggestCompatibleBackend(currentName, hardwareClass) {
+  // Prefer whisper (the universal floor / explicit fallback) when
+  // available; otherwise pick any local backend that includes this
+  // hardware class in its supported_hardware. Avoid cloud backends
+  // that need API keys as a default suggestion since those add
+  // additional setup friction.
+  const whisper = transcribeBackends.find(b => b.name === 'whisper');
+  if (whisper && whisper.name !== currentName
+      && _isBackendCompatible(whisper, hardwareClass)) {
+    return whisper;
+  }
+  for (const b of transcribeBackends) {
+    if (b.name === currentName) continue;
+    if (b.env_key) continue; // skip cloud backends as default suggestion
+    if (_isBackendCompatible(b, hardwareClass)) return b;
+  }
+  // Last resort: any compatible backend, even if it needs a key.
+  for (const b of transcribeBackends) {
+    if (b.name === currentName) continue;
+    if (_isBackendCompatible(b, hardwareClass)) return b;
+  }
+  return null;
+}
+
+function evaluateTranscribeCompatibility(backend, backendInfo) {
+  const warning = document.getElementById('backendCompatWarning');
+  const warningText = document.getElementById('backendCompatWarningText');
+  if (!warning || !warningText) return;
+
+  // No hardware probe yet => can't evaluate. Clear any stale state.
+  if (!transcribeHardware || !transcribeHardware.probed) {
+    warning.style.display = 'none';
+    setTabAttention('transcription', false);
+    return;
+  }
+
+  const hwClass = transcribeHardware.class || 'cpu-only';
+  const hwLabel = transcribeHardware.label || hwClass;
+
+  if (_isBackendCompatible(backendInfo, hwClass)) {
+    warning.style.display = 'none';
+    setTabAttention('transcription', false);
+    return;
+  }
+
+  const currentLabel = backendInfo?.label || backend;
+  const suggestion = _suggestCompatibleBackend(backend, hwClass);
+  const suggestText = suggestion
+    ? ` You might want to try ${suggestion.label} instead.`
+    : '';
+
+  warningText.textContent =
+    `${currentLabel} doesn't list your hardware (${hwLabel}) as supported.`
+    + suggestText;
+  warning.style.display = 'flex';
+  setTabAttention('transcription', true);
 }
 
 // Backend selector change handler

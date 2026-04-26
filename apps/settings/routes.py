@@ -402,6 +402,64 @@ def get_transcribe() -> Any:
         backends = get_backend_list()
         runtime_label = _compute_runtime_label()
 
+        # Decorate each backend with supported_hardware from transcribers.json
+        # so the settings UI can flag hardware/backend incompatibilities. The
+        # benchmark module is fork-only; if it's unavailable we fall back to
+        # leaving supported_hardware unset (UI treats missing as "no claim").
+        try:
+            from think.benchmark import load_transcribers
+
+            transcribers_catalog = load_transcribers().get("transcribers", {}) or {}
+        except Exception:
+            transcribers_catalog = {}
+        for backend in backends:
+            spec = transcribers_catalog.get(backend["name"], {})
+            backend["supported_hardware"] = spec.get("supported_hardware")
+            backend["fallback"] = spec.get("fallback")
+
+        # Probe the host's hardware class so the UI can compare it against
+        # supported_hardware lists for each backend. Cached probe is preferred;
+        # fall back to a fresh probe; tolerate failures.
+        hardware_payload: dict[str, Any] = {
+            "probed": False,
+            "class": "cpu-only",
+            "label": None,
+        }
+        try:
+            from think.benchmark.estimate import (
+                load_reference,
+                resolve_hardware_class,
+            )
+            from think.hardware import load_hardware, probe_hardware
+
+            hardware = load_hardware()
+            if hardware is None:
+                try:
+                    hardware = probe_hardware()
+                except Exception as exc:
+                    logger.debug("hardware probe failed: %s", exc)
+                    hardware = None
+            if hardware is not None:
+                gpus = hardware.get("gpus") or []
+                hardware_class = (
+                    resolve_hardware_class(gpus[0].get("name")) if gpus else "cpu-only"
+                )
+                ref_label = (
+                    load_reference()
+                    .get("classes", {})
+                    .get(hardware_class, {})
+                    .get("label")
+                )
+                hardware_payload = {
+                    "probed": True,
+                    "class": hardware_class,
+                    "label": ref_label,
+                    "platform": hardware.get("platform"),
+                    "gpus": hardware.get("gpus", []),
+                }
+        except Exception as exc:
+            logger.debug("hardware-class enrichment skipped: %s", exc)
+
         # Check API key status for each backend
         api_keys = {}
         for backend in backends:
@@ -417,6 +475,7 @@ def get_transcribe() -> Any:
                 "api_keys": api_keys,
                 "config": transcribe_config,
                 "runtime_label": runtime_label,
+                "hardware": hardware_payload,
             }
         )
     except Exception:
