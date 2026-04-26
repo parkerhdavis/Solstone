@@ -27,8 +27,19 @@
       "supported_hardware": ["*"],
       "fallback": true,
       "benchmarkable": true,
-      "notes": "Cross-platform in-process backend. Universal floor: runs anywhere Python runs, including linux/aarch64 (DGX Spark). Used as the production fallback when the preferred provider is unavailable, and as the Spark default since the in-process parakeet path doesn't cover aarch64.",
-      "benchmarks": {}
+      "notes": "Cross-platform in-process backend. Universal floor: runs anywhere Python runs, including linux/aarch64 (DGX Spark). Used as the production fallback when the preferred provider is unavailable, and as the Spark default since the in-process parakeet path doesn't cover aarch64. faster-whisper auto-detects CUDA via CTranslate2 (observe/transcribe/whisper.py:_has_cuda); on the Spark this picks up the Blackwell GPU and float16, which is why the measured RTF is well under the ~1.0 baseline that 'Whisper-CPU' framing would imply.",
+      "benchmarks": {
+        "dgx-spark": {
+          "rtf": 0.182,
+          "audio_seconds_measured": 60.0,
+          "wall_seconds_measured": 10.91,
+          "measured_at": "2026-04-25",
+          "model": "medium.en",
+          "device": "cuda",
+          "compute_type": "float16",
+          "audio_fixture": "60s clip from journal/chronicle/20260205/field.audio/110000_360/audio.wav"
+        }
+      }
     },
     "gemini": {
       "label": "Gemini (cloud)",
