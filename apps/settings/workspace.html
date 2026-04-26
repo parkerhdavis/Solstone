@@ -6830,14 +6830,6 @@ function renderDetailsPanel(model, requiredCap, tasksCatalog) {
   `;
 }
 
-function escapeHtml(s) {
-  return String(s ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
 function renderRecommendedSection() {
   const section = document.getElementById('ollamaRecommendedSection');
   const list = document.getElementById('ollamaRecommendedList');
