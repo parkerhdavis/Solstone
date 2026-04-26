@@ -2051,6 +2051,66 @@ button:focus:not(:focus-visible) {
   color: var(--settings-muted, #666);
   margin-top: 2px;
 }
+.segment-benchmark-section {
+  margin-top: 1em;
+}
+.segment-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  margin-bottom: 0.5em;
+}
+.segment-controls label {
+  font-size: 0.9em;
+  color: var(--settings-muted, #666);
+}
+.segment-card {
+  padding: 0.8em 1em;
+  background: var(--settings-card-bg, #f7f7f7);
+  border: 1px solid var(--settings-card-border, #ddd);
+  border-radius: 6px;
+}
+.segment-headline {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6em;
+  margin-bottom: 0.6em;
+}
+.segment-headline .segment-total {
+  font-size: 1.6em;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.segment-headline .ollama-confidence {
+  font-size: 0.8em;
+  padding: 1px 6px;
+  border-radius: 3px;
+  text-transform: lowercase;
+}
+.segment-lanes {
+  border-top: 1px solid #ccc;
+  padding-top: 0.4em;
+}
+.segment-talent-details {
+  margin-top: 0.5em;
+}
+.segment-talent-details summary {
+  cursor: pointer;
+  list-style: revert;
+}
+.segment-talent-details summary.ollama-task-group-title {
+  display: list-item;
+}
+.segment-notes {
+  margin-top: 0.6em;
+  padding-top: 0.6em;
+  border-top: 1px dashed #ccc;
+  font-size: 0.85em;
+  color: var(--settings-muted, #666);
+}
+.segment-notes .segment-note {
+  margin: 2px 0;
+}
 .ollama-recommended-item .ollama-pull-cmd {
   font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 0.82em;
@@ -2318,6 +2378,16 @@ button:focus:not(:focus-visible) {
         <h3 class="settings-subsection-title">recommended ollama models</h3>
         <p class="settings-subsection-desc">Pre-vetted local models you don't have installed yet. Speed estimates use your hardware profile when it fits the reference table.</p>
         <div id="ollamaRecommendedList" class="ollama-recommended-list"></div>
+      </div>
+
+      <div id="segmentBenchmarkSection" class="segment-benchmark-section" style="display:none">
+        <h3 class="settings-subsection-title">background processing</h3>
+        <p class="settings-subsection-desc">Estimated wall-clock time to fully process one 5-minute audio + video segment on this host. The audio lane uses the configured transcriber's RTF; talents and screen-frame description use the smallest registry model per tier.</p>
+        <div class="segment-controls">
+          <label for="segmentScenarioSelect">scenario</label>
+          <select id="segmentScenarioSelect"></select>
+        </div>
+        <div id="segmentCard" class="segment-card"></div>
       </div>
 
       <h3 class="settings-subsection-title">google backend</h3>
@@ -6818,6 +6888,112 @@ async function refreshOllamaAnnotations() {
   renderOllamaDetailsFor('generate');
   renderOllamaDetailsFor('cogitate');
   renderRecommendedSection();
+  await renderSegmentCard();
+}
+
+let segmentScenariosData = null;
+
+async function loadSegmentScenarios() {
+  if (segmentScenariosData !== null) return segmentScenariosData;
+  try {
+    const r = await fetch('api/benchmark/scenarios');
+    if (!r.ok) throw new Error('scenarios API error');
+    segmentScenariosData = await r.json();
+  } catch (err) {
+    console.warn('Segment scenarios unavailable:', err);
+    segmentScenariosData = { scenarios: {} };
+  }
+  return segmentScenariosData;
+}
+
+async function fetchSegmentEstimate(scenario) {
+  try {
+    const r = await fetch('api/benchmark/segment?scenario=' + encodeURIComponent(scenario));
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (err) {
+    console.warn('Segment estimate fetch failed:', err);
+    return null;
+  }
+}
+
+async function renderSegmentCard() {
+  const section = document.getElementById('segmentBenchmarkSection');
+  const select = document.getElementById('segmentScenarioSelect');
+  if (!section || !select) return;
+
+  const data = await loadSegmentScenarios();
+  const scenarios = (data && data.scenarios) || {};
+  if (Object.keys(scenarios).length === 0) {
+    section.style.display = 'none';
+    return;
+  }
+
+  const previous = select.value;
+  select.innerHTML = Object.entries(scenarios)
+    .map(([id, spec]) => `<option value="${escapeHtml(id)}">${escapeHtml(spec.label || id)}</option>`)
+    .join('');
+  if (scenarios[previous]) select.value = previous;
+  else if (scenarios.solo_active) select.value = 'solo_active';
+  if (!select.dataset.bound) {
+    select.addEventListener('change', refreshSegmentEstimate);
+    select.dataset.bound = '1';
+  }
+
+  section.style.display = '';
+  await refreshSegmentEstimate();
+}
+
+async function refreshSegmentEstimate() {
+  const select = document.getElementById('segmentScenarioSelect');
+  const card = document.getElementById('segmentCard');
+  if (!select || !card) return;
+  const scenario = select.value || 'solo_active';
+
+  const est = await fetchSegmentEstimate(scenario);
+  if (!est) {
+    card.innerHTML = '<div class="segment-error">benchmark API error — try refreshing the page</div>';
+    return;
+  }
+
+  const total = est.total_seconds === null ? '?' : formatSeconds(est.total_seconds);
+  const conf = est.confidence || 'unknown';
+  const audio = est.audio_seconds === null ? '?' : formatSeconds(est.audio_seconds);
+  const video = est.video_seconds === null ? '?' : formatSeconds(est.video_seconds);
+  const talents = est.talent_seconds === null ? '?' : formatSeconds(est.talent_seconds);
+  const overhead = formatSeconds(est.overhead_seconds);
+
+  const perTalent = est.per_talent || {};
+  const perTalentRows = Object.entries(perTalent)
+    .map(([id, secs]) =>
+      `<div class="ollama-task-row"><span class="ollama-task-label">${escapeHtml(id)}</span><span class="ollama-task-time">${escapeHtml(formatSeconds(secs))}</span></div>`,
+    )
+    .join('');
+
+  const notes = est.notes || [];
+  const notesHtml = notes.length
+    ? `<div class="segment-notes">${notes.map(n => `<div class="segment-note">${escapeHtml(n)}</div>`).join('')}</div>`
+    : '';
+
+  const transcriberLine = est.transcriber
+    ? `<div class="ollama-rec-meta">transcriber: ${escapeHtml(est.transcriber)} · hardware class: ${escapeHtml(est.hardware_class || 'unknown')}</div>`
+    : `<div class="ollama-rec-meta">hardware class: ${escapeHtml(est.hardware_class || 'unknown')}</div>`;
+
+  card.innerHTML = `
+    <div class="segment-headline">
+      <span class="segment-total">${escapeHtml(total)}</span>
+      <span class="ollama-confidence ${escapeHtml(conf)}">${escapeHtml(conf)}</span>
+    </div>
+    ${transcriberLine}
+    <div class="segment-lanes">
+      <div class="ollama-task-row"><span class="ollama-task-label">Audio (5 min)</span><span class="ollama-task-time">${escapeHtml(audio)}</span></div>
+      <div class="ollama-task-row"><span class="ollama-task-label">Video frames</span><span class="ollama-task-time">${escapeHtml(video)}</span></div>
+      <div class="ollama-task-row"><span class="ollama-task-label">Talents</span><span class="ollama-task-time">${escapeHtml(talents)}</span></div>
+      <div class="ollama-task-row"><span class="ollama-task-label">Overhead</span><span class="ollama-task-time">${escapeHtml(overhead)}</span></div>
+    </div>
+    ${perTalentRows ? `<details class="segment-talent-details"><summary class="ollama-task-group-title">per talent</summary>${perTalentRows}</details>` : ''}
+    ${notesHtml}
+  `;
 }
 
 // Hook into provider / tier change events (in addition to the existing save handlers)
