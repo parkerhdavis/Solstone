@@ -2,6 +2,16 @@
 
 This document tracks significant changes made on this fork of Solstone.
 
+## ⏱️ Local Model Benchmarking
+
+![AI Providers settings tab with a benchmark card for Qwen 3.5 2B showing 87 tok/s and per-task time estimates split into foreground (Chat reply, Voice reply, Search query, Agent turn) and background (Entity extraction, Todo extraction, Meeting summary, Activity clustering, Daily insights, Segment sense, Speaker attribution, Screen record, Awareness tender, Pulse) sections.](../.github/model-benchmark-2026-04-25.png)
+
+**Files:** `apps/benchmark/`, `think/benchmark/`, `tests/test_benchmark_estimate.py`
+
+Added a `benchmark` app and supporting `think/benchmark/` module that estimates expected output tok/s for pre-vetted Ollama models on the user's hardware without requiring the models to be pulled. A reference table of measured tok/s per canonical hardware class (see `think/benchmark/reference.json`) is interpolated by FP16 throughput × memory bandwidth when the exact hardware isn't listed. The registry (`models.json`) covers text and vision models across tiers, with direct wall-clock measurements taken on DGX Spark used to ground the task-time heuristics.
+
+The `sol call benchmark` CLI exposes `profile` (probe + cache host hardware), `list-models` (pre-vetted + installed models with tok/s and task-time estimates), `estimate <model-id>` (single-model estimate, optionally `--task <task_id>` for a wall-clock estimate against a reference workload), and `tasks` (show the reference-task catalog). A harness (`think/benchmark/harness.py`) runs the fixture-backed reference tasks (`fixtures/*.txt`) to produce new measurements that feed back into the registry. The settings UI surfaces per-model tok/s alongside the cogitate details panel, with generic tier labels and a recommended-models section for quick orientation.
+
 
 ## ⌛ Segment-Time Background Processing Benchmarks
 
@@ -58,38 +68,6 @@ the new per-segment talents (`segment_sense`,
 tokenizer, consistent across model sizes).
 
 
-## 🎤 Transcriber RTF Benchmarking + `transcribers.json`
-
-**Files:** `think/benchmark/transcribers.json`,
-`think/benchmark/harness.py`, `think/benchmark/estimate.py`,
-`apps/benchmark/call.py`, `tests/test_benchmark_segment.py`
-
-Added a parallel benchmark surface for STT backends, since
-transcription doesn't fit a tok/s model — its cost is real-time
-factor (RTF = `wall_seconds / audio_seconds`) on local backends and a
-flat per-5min wall-clock heuristic on cloud backends. New
-`think/benchmark/transcribers.json` declares each backend with three
-orthogonal axes:
-
-- `supported_hardware` — explicit list of hardware-class keys from
-  `reference.json`, or `["*"]` for any. Machine-readable, enforced.
-- `fallback` — production runtime fallback eligibility (whisper is
-  `true`; parakeet is `false`).
-- `benchmarkable` — whether the harness should run RTF capture.
-  Cloud backends are not benchmarkable in the RTF sense.
-
-`think/benchmark/harness.py` gained a `--transcriber <backend>
---audio-fixture <path> --class <hw>` mode. Hard-fails before any
-transcription work runs when the chosen transcriber doesn't list the
-host's hardware class, or when a cloud backend is asked for RTF.
-
-The audio lane of `estimate_segment_time_s` resolves via these RTFs.
-Whisper's RTF on `dgx-spark` is measured (0.182, `medium.en` /
-`cuda` / `float16`) — `faster-whisper` auto-detects CUDA via
-CTranslate2 on the Spark, so the in-process whisper backend is GPU
-accelerated by default rather than CPU-bound.
-
-
 ## ⚠️ Transcription Compatibility Warning + Reusable Tab Attention
 
 ![Settings transcription tab with an attention dot in the side-nav and a callout warning that Parakeet does not list NVIDIA DGX Spark (GB10) as supported, suggesting Whisper instead.](../.github/tab-attention-2026-04-25.png)
@@ -120,15 +98,36 @@ hardware class + each backend's `supported_hardware` list so the
 client can do the compat evaluation without a second round-trip.
 
 
-## ⏱️ Local Model Benchmarking
+## 🎤 Transcriber RTF Benchmarking + `transcribers.json`
 
-![AI Providers settings tab with a benchmark card for Qwen 3.5 2B showing 87 tok/s and per-task time estimates split into foreground (Chat reply, Voice reply, Search query, Agent turn) and background (Entity extraction, Todo extraction, Meeting summary, Activity clustering, Daily insights, Segment sense, Speaker attribution, Screen record, Awareness tender, Pulse) sections.](../.github/model-benchmark-2026-04-25.png)
+**Files:** `think/benchmark/transcribers.json`,
+`think/benchmark/harness.py`, `think/benchmark/estimate.py`,
+`apps/benchmark/call.py`, `tests/test_benchmark_segment.py`
 
-**Files:** `apps/benchmark/`, `think/benchmark/`, `tests/test_benchmark_estimate.py`
+Added a parallel benchmark surface for STT backends, since
+transcription doesn't fit a tok/s model — its cost is real-time
+factor (RTF = `wall_seconds / audio_seconds`) on local backends and a
+flat per-5min wall-clock heuristic on cloud backends. New
+`think/benchmark/transcribers.json` declares each backend with three
+orthogonal axes:
 
-Added a `benchmark` app and supporting `think/benchmark/` module that estimates expected output tok/s for pre-vetted Ollama models on the user's hardware without requiring the models to be pulled. A reference table of measured tok/s per canonical hardware class (see `think/benchmark/reference.json`) is interpolated by FP16 throughput × memory bandwidth when the exact hardware isn't listed. The registry (`models.json`) covers text and vision models across tiers, with direct wall-clock measurements taken on DGX Spark used to ground the task-time heuristics.
+- `supported_hardware` — explicit list of hardware-class keys from
+  `reference.json`, or `["*"]` for any. Machine-readable, enforced.
+- `fallback` — production runtime fallback eligibility (whisper is
+  `true`; parakeet is `false`).
+- `benchmarkable` — whether the harness should run RTF capture.
+  Cloud backends are not benchmarkable in the RTF sense.
 
-The `sol call benchmark` CLI exposes `profile` (probe + cache host hardware), `list-models` (pre-vetted + installed models with tok/s and task-time estimates), `estimate <model-id>` (single-model estimate, optionally `--task <task_id>` for a wall-clock estimate against a reference workload), and `tasks` (show the reference-task catalog). A harness (`think/benchmark/harness.py`) runs the fixture-backed reference tasks (`fixtures/*.txt`) to produce new measurements that feed back into the registry. The settings UI surfaces per-model tok/s alongside the cogitate details panel, with generic tier labels and a recommended-models section for quick orientation.
+`think/benchmark/harness.py` gained a `--transcriber <backend>
+--audio-fixture <path> --class <hw>` mode. Hard-fails before any
+transcription work runs when the chosen transcriber doesn't list the
+host's hardware class, or when a cloud backend is asked for RTF.
+
+The audio lane of `estimate_segment_time_s` resolves via these RTFs.
+Whisper's RTF on `dgx-spark` is measured (0.182, `medium.en` /
+`cuda` / `float16`) — `faster-whisper` auto-detects CUDA via
+CTranslate2 on the Spark, so the in-process whisper backend is GPU
+accelerated by default rather than CPU-bound.
 
 
 ## 📓 Field Journal Test Content
