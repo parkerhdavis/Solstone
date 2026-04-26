@@ -3,7 +3,7 @@
 This document tracks significant changes made on this fork of Solstone.
 
 
-## Segment-Time Background Processing Benchmarks
+## ⌛ Segment-Time Background Processing Benchmarks
 
 ![Background processing card showing a 2m 31s estimate for a 5-minute Solo active segment, broken down into Audio, Video frames, Talents, and Overhead lanes.](../.github/segment-benchmark-2026-04-25.png)
 
@@ -58,7 +58,7 @@ the new per-segment talents (`segment_sense`,
 tokenizer, consistent across model sizes).
 
 
-## Transcriber RTF Benchmarking + `transcribers.json`
+## 🎤 Transcriber RTF Benchmarking + `transcribers.json`
 
 **Files:** `think/benchmark/transcribers.json`,
 `think/benchmark/harness.py`, `think/benchmark/estimate.py`,
@@ -90,7 +90,7 @@ CTranslate2 on the Spark, so the in-process whisper backend is GPU
 accelerated by default rather than CPU-bound.
 
 
-## Transcription Compatibility Warning + Reusable Tab Attention
+## ⚠️ Transcription Compatibility Warning + Reusable Tab Attention
 
 ![Settings transcription tab with an attention dot in the side-nav and a callout warning that Parakeet does not list NVIDIA DGX Spark (GB10) as supported, suggesting Whisper instead.](../.github/tab-attention-2026-04-25.png)
 
@@ -120,7 +120,7 @@ hardware class + each backend's `supported_hardware` list so the
 client can do the compat evaluation without a second round-trip.
 
 
-## Local Model Benchmarking
+## ⏱️ Local Model Benchmarking
 
 ![AI Providers settings tab with a benchmark card for Qwen 3.5 2B showing 87 tok/s and per-task time estimates split into foreground (Chat reply, Voice reply, Search query, Agent turn) and background (Entity extraction, Todo extraction, Meeting summary, Activity clustering, Daily insights, Segment sense, Speaker attribution, Screen record, Awareness tender, Pulse) sections.](../.github/model-benchmark-2026-04-25.png)
 
@@ -131,7 +131,7 @@ Added a `benchmark` app and supporting `think/benchmark/` module that estimates 
 The `sol call benchmark` CLI exposes `profile` (probe + cache host hardware), `list-models` (pre-vetted + installed models with tok/s and task-time estimates), `estimate <model-id>` (single-model estimate, optionally `--task <task_id>` for a wall-clock estimate against a reference workload), and `tasks` (show the reference-task catalog). A harness (`think/benchmark/harness.py`) runs the fixture-backed reference tasks (`fixtures/*.txt`) to produce new measurements that feed back into the registry. The settings UI surfaces per-model tok/s alongside the cogitate details panel, with generic tier labels and a recommended-models section for quick orientation.
 
 
-## Field Journal Test Content
+## 📓 Field Journal Test Content
 
 **Files:** `setup_field_journal.sh`, `docs/FIELD_JOURNAL.md`
 
