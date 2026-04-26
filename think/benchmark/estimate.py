@@ -603,20 +603,60 @@ def estimate_segment_time_s(
 # ---------------------------------------------------------------------------
 
 
-def list_prevetted_models(hardware: dict[str, Any] | None) -> list[dict[str, Any]]:
+def _pick_default_tier_models(registry: dict[str, Any]) -> dict[str, str]:
+    """Pick the smallest model per tier-role from the registry.
+
+    Used as the comparison baseline in ``list_prevetted_models``: each
+    row's own model takes the tier slot(s) it has capabilities for, and
+    every other tier defaults to whatever's smallest (cheapest) and
+    capable in the registry. That makes the per-row segment-time number
+    a like-for-like comparison — only this model varies, the rest of
+    the pipeline is held constant.
+
+    The registry uses ``capabilities`` matching the ``tier_role`` field
+    in ``tasks.json``: ``vision`` / ``generate`` / ``cogitate``.
+    """
+    by_tier: dict[str, list[tuple[float, str]]] = {}
+    for model_id, spec in (registry.get("models") or {}).items():
+        size = float(spec.get("size_gb") or float("inf"))
+        for cap in spec.get("capabilities") or []:
+            by_tier.setdefault(cap, []).append((size, model_id))
+    return {
+        tier: sorted(candidates)[0][1]
+        for tier, candidates in by_tier.items()
+        if candidates
+    }
+
+
+def list_prevetted_models(
+    hardware: dict[str, Any] | None,
+    *,
+    scenario: str = "solo_active",
+    transcriber: str | None = None,
+) -> list[dict[str, Any]]:
     """Return each pre-vetted model with estimates + VRAM fit flag.
 
-    Each row carries the raw ``estimate`` (output tok/s) plus a
-    ``tasks`` dict mapping task_id → task-time estimate (see
-    ``estimate_task_time_s``). Only tasks whose mode matches a
-    capability of the model are attached.
+    Each row carries the raw ``estimate`` (output tok/s), the
+    per-task ``tasks`` dict (see ``estimate_task_time_s``), **and** a
+    ``segment_estimate`` populated by ``estimate_segment_time_s``.
+
+    The segment estimate uses the row's own model for whichever tier
+    roles it can serve (``vision`` / ``generate`` / ``cogitate``) and
+    falls back to the smallest registry model for the other tiers — so
+    each row is a like-for-like comparison where only this model
+    varies. ``self_attributed_tiers`` records which tiers came from
+    this row's model vs. the comparison baseline.
 
     ``hardware`` is the cached probe from ``think.hardware.load_hardware()``;
     pass ``None`` for a hardware-agnostic listing (estimates all unknown).
+    ``transcriber`` selects the audio-lane backend; pass ``None`` to
+    leave the audio lane unmeasured (downgrades segment confidence to
+    ``unknown``).
     """
     hardware_class, user_vram_gb = _user_hardware(hardware)
     registry = load_registry()
     tasks = load_tasks().get("tasks", {})
+    default_tier_models = _pick_default_tier_models(registry)
     rows: list[dict[str, Any]] = []
 
     for model_id, spec in registry.get("models", {}).items():
@@ -637,6 +677,19 @@ def list_prevetted_models(hardware: dict[str, Any] | None) -> list[dict[str, Any
                 "tier_role": task_spec.get("tier_role"),
             }
 
+        # Build the per-row tier-model map: this model fills the slots
+        # it can serve, defaults fill the rest.
+        tier_models: dict[str, str] = dict(default_tier_models)
+        self_attributed: list[str] = []
+        for cap in capabilities:
+            if cap in tier_models:
+                tier_models[cap] = model_id
+                self_attributed.append(cap)
+
+        seg = estimate_segment_time_s(
+            tier_models, hardware_class, scenario, transcriber=transcriber
+        )
+
         rows.append(
             {
                 "model_id": model_id,
@@ -654,6 +707,18 @@ def list_prevetted_models(hardware: dict[str, Any] | None) -> list[dict[str, Any
                     "hardware_class": estimate.hardware_class,
                 },
                 "tasks": task_rows,
+                "segment_estimate": {
+                    "scenario": seg.scenario,
+                    "total_seconds": seg.total_seconds,
+                    "audio_seconds": seg.audio_seconds,
+                    "video_seconds": seg.video_seconds,
+                    "talent_seconds": seg.talent_seconds,
+                    "overhead_seconds": seg.overhead_seconds,
+                    "confidence": seg.confidence,
+                    "tier_models": tier_models,
+                    "self_attributed_tiers": self_attributed,
+                    "notes": list(seg.notes),
+                },
             }
         )
     return rows

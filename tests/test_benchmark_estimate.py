@@ -191,6 +191,92 @@ class TestListPrevettedModels:
             assert row["estimate"]["hardware_class"] == "cpu-only"
             assert row["estimate"]["confidence"] == "unknown"
 
+    def test_segment_estimate_is_attached_to_each_row(self, monkeypatch):
+        # Patch in a minimal scenario whose talents map cleanly to the
+        # FAKE_TASKS catalog used elsewhere in this file.
+        fake_segments = {
+            "scenarios": {
+                "solo_active": {
+                    "audio_minutes": 5,
+                    "qualified_frames": 3,
+                    "fixed_overhead_s": 3.0,
+                    "talents": [
+                        {"task_id": "chat_reply", "count": 1},
+                    ],
+                }
+            }
+        }
+        monkeypatch.setattr(est_mod, "load_segments", fake_segments.__call__ if False else (lambda: fake_segments))
+
+        hardware = {"gpus": [{"name": "NVIDIA GeForce RTX 3090", "vram_gb": 24}]}
+        rows = list_prevetted_models(hardware)
+        for row in rows:
+            assert "segment_estimate" in row
+            seg = row["segment_estimate"]
+            assert seg["scenario"] == "solo_active"
+            assert "tier_models" in seg
+            assert "self_attributed_tiers" in seg
+            assert "confidence" in seg
+
+    def test_segment_default_tier_models_pick_smallest_per_capability(
+        self, monkeypatch
+    ):
+        fake_segments = {
+            "scenarios": {
+                "solo_active": {
+                    "audio_minutes": 5,
+                    "qualified_frames": 1,
+                    "fixed_overhead_s": 3.0,
+                    "talents": [{"task_id": "chat_reply", "count": 1}],
+                }
+            }
+        }
+        monkeypatch.setattr(est_mod, "load_segments", lambda: fake_segments)
+
+        hardware = {"gpus": [{"name": "NVIDIA GeForce RTX 3090", "vram_gb": 24}]}
+        rows = list_prevetted_models(hardware)
+        by_id = {r["model_id"]: r for r in rows}
+
+        # The smallest generate model in FAKE_REGISTRY is measured-model:1b
+        # (1 GB) — it should be the comparison baseline for vision-only rows.
+        # The smallest vision model is huge-vision:72b (only one, 40 GB).
+        vision_row = by_id["ollama-local/huge-vision:72b"]
+        seg = vision_row["segment_estimate"]
+        # This row attributes itself to the vision tier; generate/cogitate
+        # come from the smallest applicable registry models.
+        assert seg["self_attributed_tiers"] == ["vision"]
+        assert seg["tier_models"]["vision"] == "ollama-local/huge-vision:72b"
+        assert seg["tier_models"]["generate"] == "ollama-local/measured-model:1b"
+
+        # A generate-capable row attributes itself to generate (no
+        # cogitate capability in this fixture, so cogitate doesn't appear).
+        gen_row = by_id["ollama-local/measured-model:1b"]
+        gen_seg = gen_row["segment_estimate"]
+        assert "generate" in gen_seg["self_attributed_tiers"]
+        assert gen_seg["tier_models"]["generate"] == "ollama-local/measured-model:1b"
+
+    def test_segment_total_unknown_when_audio_lane_unmeasured(self, monkeypatch):
+        # transcriber=None (default) leaves the audio lane unknown, which
+        # downgrades total_seconds to None per the existing contract.
+        fake_segments = {
+            "scenarios": {
+                "solo_active": {
+                    "audio_minutes": 5,
+                    "qualified_frames": 1,
+                    "fixed_overhead_s": 3.0,
+                    "talents": [{"task_id": "chat_reply", "count": 1}],
+                }
+            }
+        }
+        monkeypatch.setattr(est_mod, "load_segments", lambda: fake_segments)
+
+        hardware = {"gpus": [{"name": "NVIDIA GeForce RTX 3090", "vram_gb": 24}]}
+        rows = list_prevetted_models(hardware)  # transcriber=None
+        for row in rows:
+            seg = row["segment_estimate"]
+            assert seg["audio_seconds"] is None
+            assert seg["total_seconds"] is None
+
     def test_attaches_task_times_by_capability(self):
         hardware = {"gpus": [{"name": "NVIDIA GeForce RTX 3090", "vram_gb": 24}]}
         rows = list_prevetted_models(hardware)
