@@ -694,9 +694,7 @@ def get_benchmark_segment() -> Any:
             hardware = None
 
     gpus = (hardware or {}).get("gpus") or []
-    hardware_class = (
-        resolve_hardware_class(gpus[0].get("name")) if gpus else "cpu-only"
-    )
+    hardware_class = resolve_hardware_class(gpus[0].get("name")) if gpus else "cpu-only"
 
     # Build tier_models: explicit query-param picks override the
     # smallest-registry-model baseline.

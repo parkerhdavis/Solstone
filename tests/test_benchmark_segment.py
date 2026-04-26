@@ -402,13 +402,12 @@ class TestHarnessPreflight:
 
         fixture = tmp_path / "transcribers.json"
         fixture.write_text(__import__("json").dumps(FAKE_TRANSCRIBERS))
-        # Patch Path(__file__).parent in harness by monkeypatching the
-        # function's lookup to read from our fixture.
-        original = harness._preflight_transcriber
 
+        # Patch _preflight_transcriber to read from our fixture path
+        # instead of think/benchmark/transcribers.json on disk.
         def patched(transcriber, hw_class):
-            catalog = __import__("json").loads(fixture.read_text()).get(
-                "transcribers", {}
+            catalog = (
+                __import__("json").loads(fixture.read_text()).get("transcribers", {})
             )
             if transcriber not in catalog:
                 names = ", ".join(sorted(catalog.keys())) or "(none)"
@@ -419,8 +418,7 @@ class TestHarnessPreflight:
             if not spec.get("benchmarkable", False):
                 kind = spec.get("kind", "?")
                 raise SystemExit(
-                    f"Transcriber '{transcriber}' is not benchmarkable "
-                    f"(kind={kind})."
+                    f"Transcriber '{transcriber}' is not benchmarkable (kind={kind})."
                 )
             supported = spec.get("supported_hardware") or []
             if supported != ["*"] and hw_class not in supported:
@@ -449,7 +447,9 @@ class TestHarnessPreflight:
         # parakeet path is CoreML / linux-x86_64 ONNX only, so it must
         # refuse to RTF-capture on dgx-spark.
         harness = self._patch(monkeypatch, tmp_path)
-        with pytest.raises(SystemExit, match="does not support hardware class 'dgx-spark'"):
+        with pytest.raises(
+            SystemExit, match="does not support hardware class 'dgx-spark'"
+        ):
             harness._preflight_transcriber("parakeet", "dgx-spark")
 
     def test_whisper_wildcard_supports_any_class(self, monkeypatch, tmp_path):

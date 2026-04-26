@@ -457,9 +457,7 @@ def _preflight_transcriber(transcriber: str, hw_class: str) -> dict[str, Any]:
 
     if transcriber not in catalog:
         names = ", ".join(sorted(catalog.keys())) or "(none)"
-        raise SystemExit(
-            f"Unknown transcriber '{transcriber}'. Available: {names}"
-        )
+        raise SystemExit(f"Unknown transcriber '{transcriber}'. Available: {names}")
 
     spec = catalog[transcriber]
 
@@ -528,8 +526,7 @@ def _run_transcriber_mode(args: argparse.Namespace) -> int:
         elapsed_samples.append(elapsed)
         rtf = elapsed / audio_seconds
         print(
-            f"    wall={elapsed:.2f}s  audio={audio_seconds:.1f}s  "
-            f"rtf={rtf:.3f}",
+            f"    wall={elapsed:.2f}s  audio={audio_seconds:.1f}s  rtf={rtf:.3f}",
             file=sys.stderr,
         )
 
