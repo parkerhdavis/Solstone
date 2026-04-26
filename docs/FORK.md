@@ -3,7 +3,9 @@
 This document tracks significant changes made on this fork of Solstone.
 
 
-## Segment-Time Benchmark — semantic 5-min processing metric
+## Segment-Time Background Processing Benchmarks
+
+![Background processing card showing a 2m 31s estimate for a 5-minute Solo active segment, broken down into Audio, Video frames, Talents, and Overhead lanes.](../.github/segment-benchmark-2026-04-25.png)
 
 **Files:** `apps/benchmark/`, `think/benchmark/segment.json`,
 `think/benchmark/estimate.py`, `apps/settings/routes.py`,
@@ -88,7 +90,9 @@ CTranslate2 on the Spark, so the in-process whisper backend is GPU
 accelerated by default rather than CPU-bound.
 
 
-## Transcription Hardware-Compat Warning + Reusable Tab Attention
+## Transcription Compatibility Warning + Reusable Tab Attention
+
+![Settings transcription tab with an attention dot in the side-nav and a callout warning that Parakeet does not list NVIDIA DGX Spark (GB10) as supported, suggesting Whisper instead.](../.github/tab-attention-2026-04-25.png)
 
 **Files:** `apps/settings/workspace.html`, `apps/settings/routes.py`,
 `tests/test_settings_benchmark_routes.py`
@@ -116,7 +120,9 @@ hardware class + each backend's `supported_hardware` list so the
 client can do the compat evaluation without a second round-trip.
 
 
-## Local-Model Benchmark Heuristic
+## Local Model Benchmarking
+
+![AI Providers settings tab with a benchmark card for Qwen 3.5 2B showing 87 tok/s and per-task time estimates split into foreground (Chat reply, Voice reply, Search query, Agent turn) and background (Entity extraction, Todo extraction, Meeting summary, Activity clustering, Daily insights, Segment sense, Speaker attribution, Screen record, Awareness tender, Pulse) sections.](../.github/model-benchmark-2026-04-25.png)
 
 **Files:** `apps/benchmark/`, `think/benchmark/`, `tests/test_benchmark_estimate.py`
 
