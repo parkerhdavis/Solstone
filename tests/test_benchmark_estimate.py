@@ -206,7 +206,11 @@ class TestListPrevettedModels:
                 }
             }
         }
-        monkeypatch.setattr(est_mod, "load_segments", fake_segments.__call__ if False else (lambda: fake_segments))
+        monkeypatch.setattr(
+            est_mod,
+            "load_segments",
+            fake_segments.__call__ if False else (lambda: fake_segments),
+        )
 
         hardware = {"gpus": [{"name": "NVIDIA GeForce RTX 3090", "vram_gb": 24}]}
         rows = list_prevetted_models(hardware)

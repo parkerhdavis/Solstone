@@ -490,9 +490,7 @@ def estimate_segment_time_s(
     video_seconds: float | None = 0.0
     if qualified_frames > 0:
         screen_frame_spec = tasks_catalog.get("screen_frame", {})
-        vision_model = tier_models.get(
-            screen_frame_spec.get("tier_role") or "vision"
-        )
+        vision_model = tier_models.get(screen_frame_spec.get("tier_role") or "vision")
         if vision_model is None:
             video_seconds = None
             leg_confidences.append("unknown")
@@ -540,9 +538,7 @@ def estimate_segment_time_s(
         if per_call.seconds is None:
             talent_unknown = True
             leg_confidences.append("unknown")
-            notes.append(
-                f"talent '{task_id}' unknown: no estimate on {model_id}"
-            )
+            notes.append(f"talent '{task_id}' unknown: no estimate on {model_id}")
             continue
         seconds = round(per_call.seconds * count, 2)
         per_talent[task_id] = seconds
@@ -565,11 +561,7 @@ def estimate_segment_time_s(
 
     overhead_seconds = float(spec.get("fixed_overhead_s") or 0.0)
 
-    if (
-        audio_seconds is None
-        or video_seconds is None
-        or talent_seconds is None
-    ):
+    if audio_seconds is None or video_seconds is None or talent_seconds is None:
         total_seconds: float | None = None
     else:
         total_seconds = round(
@@ -580,9 +572,7 @@ def estimate_segment_time_s(
         combined: Confidence = "unknown"
     else:
         worst_rank = min(_CONFIDENCE_RANK[c] for c in leg_confidences)
-        combined = next(
-            c for c, rank in _CONFIDENCE_RANK.items() if rank == worst_rank
-        )
+        combined = next(c for c, rank in _CONFIDENCE_RANK.items() if rank == worst_rank)
 
     return SegmentEstimate(
         scenario=scenario,

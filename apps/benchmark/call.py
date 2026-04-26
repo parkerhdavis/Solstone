@@ -465,7 +465,9 @@ def segment(
 
     scenarios_catalog = load_segments().get("scenarios", {})
     scenario_label = (scenarios_catalog.get(scenario) or {}).get("label") or scenario
-    total = "unknown" if est.total_seconds is None else _format_seconds(est.total_seconds)
+    total = (
+        "unknown" if est.total_seconds is None else _format_seconds(est.total_seconds)
+    )
     typer.echo(f"Scenario:       {scenario_label} ({scenario})")
     typer.echo(f"Hardware class: {hardware_class}")
     typer.echo(f"Transcriber:    {resolved_transcriber or '(none)'}")
@@ -505,9 +507,7 @@ def scenarios(
         talents = len(spec.get("talents") or [])
         label = spec.get("label") or scenario_id
         desc = spec.get("description") or ""
-        typer.echo(
-            f"{scenario_id:18} {frames:>6} {talents:>8} {label} — {desc}"
-        )
+        typer.echo(f"{scenario_id:18} {frames:>6} {talents:>8} {label} — {desc}")
 
 
 # ---------------------------------------------------------------------------

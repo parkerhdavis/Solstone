@@ -18,8 +18,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from convey import create_app
 
 
@@ -78,18 +76,14 @@ class TestSegmentRoute:
 
     def test_specified_scenario_passes_through(self, journal_copy):
         client = _settings_client(journal_copy)
-        resp = client.get(
-            "/app/settings/api/benchmark/segment?scenario=meeting_active"
-        )
+        resp = client.get("/app/settings/api/benchmark/segment?scenario=meeting_active")
         assert resp.status_code == 200
         body = resp.get_json()
         assert body["scenario"] == "meeting_active"
 
     def test_unknown_scenario_returns_400(self, journal_copy):
         client = _settings_client(journal_copy)
-        resp = client.get(
-            "/app/settings/api/benchmark/segment?scenario=does_not_exist"
-        )
+        resp = client.get("/app/settings/api/benchmark/segment?scenario=does_not_exist")
         assert resp.status_code == 400
         body = resp.get_json()
         assert "error" in body
@@ -106,10 +100,7 @@ class TestSegmentRoute:
         )
         assert resp.status_code == 200
         body = resp.get_json()
-        assert (
-            body["tier_models"]["generate"]
-            == "ollama-local/qwen3.5:35b-a3b-bf16"
-        )
+        assert body["tier_models"]["generate"] == "ollama-local/qwen3.5:35b-a3b-bf16"
 
     def test_transcriber_query_param_carries_through(self, journal_copy):
         client = _settings_client(journal_copy)
