@@ -4610,7 +4610,11 @@ function renderContextGroups(data) {
   const container = document.getElementById('contextGroups');
   const contexts = data.context_defaults;
   const overrides = data.contexts || {};
-  const defaultTier = data.default.tier;
+  // The /api/providers response stopped exposing a single `default` key
+  // when generate/cogitate were split into separate per-tier sections.
+  // Fall back through the new keys (and the legacy one for safety) so
+  // this never throws on configs without a `default` entry.
+  const defaultTier = data.generate?.tier ?? data.cogitate?.tier ?? data.default?.tier ?? null;
   const providers = data.providers || [];
 
   // Group by group name
