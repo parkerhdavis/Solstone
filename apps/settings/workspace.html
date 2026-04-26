@@ -3961,6 +3961,15 @@ function saveField(el, section, key, value) {
           applySavedConfigResult(result, runtimeEnv);
           el.__lastKnownValue = readAutoSaveControlValue(el);
           showFieldStatus(el, 'saved');
+          // Live-refresh the providers tab's "Background processing"
+          // card whenever a transcribe.* setting is saved through the
+          // generic data-section/data-key path (e.g., the enrich /
+          // preserve_all / noise_upgrade checkboxes). The bespoke
+          // backend / whisper / revai / parakeet handlers call this
+          // directly; saveField covers the rest.
+          if (section === 'transcribe') {
+            notifySegmentCardConfigChanged();
+          }
         },
         onError: (err) => {
           window.logError(err, { context: `settings: saveField(${section}.${key}) failed` });
@@ -5220,6 +5229,7 @@ document.getElementById('field-transcribe-backend').addEventListener('change', a
     if (result.success) {
       configData = result.config;
       showFieldStatus(e.target, 'saved');
+      notifySegmentCardConfigChanged();
     } else {
       throw new Error(result.error);
     }
@@ -5252,6 +5262,7 @@ document.getElementById('backendKeyLink')?.addEventListener('click', (e) => {
       if (result.success) {
         configData = result.config;
         showFieldStatus(e.target, 'saved');
+        notifySegmentCardConfigChanged();
       } else {
         throw new Error(result.error);
       }
@@ -5276,6 +5287,7 @@ document.getElementById('field-revai-model')?.addEventListener('change', async (
     if (result.success) {
       configData = result.config;
       showFieldStatus(e.target, 'saved');
+      notifySegmentCardConfigChanged();
     } else {
       throw new Error(result.error);
     }
@@ -5301,6 +5313,7 @@ document.getElementById('field-revai-model')?.addEventListener('change', async (
       if (result.success) {
         configData = result.config;
         showFieldStatus(e.target, 'saved');
+        notifySegmentCardConfigChanged();
       } else {
         throw new Error(result.error);
       }
@@ -7064,6 +7077,18 @@ async function renderSegmentCard() {
 
   section.style.display = '';
   await refreshSegmentEstimate();
+}
+
+// Notify the providers-tab "Background processing" card that something
+// the segment-time estimate depends on has changed in journal config —
+// most commonly the transcribe.backend swap, which moves the audio
+// lane onto a different RTF (or makes it unknown). Safe to call from
+// any tab; no-ops cleanly when the card hasn't been rendered yet
+// (e.g., user hasn't visited the providers tab in this session).
+function notifySegmentCardConfigChanged() {
+  if (!document.getElementById('segmentCard')) return;
+  if (typeof refreshSegmentEstimate !== 'function') return;
+  refreshSegmentEstimate();
 }
 
 async function refreshSegmentEstimate() {
