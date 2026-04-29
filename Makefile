@@ -2,12 +2,15 @@
 # Python-based AI-driven desktop journaling toolkit
 
 # Route pytest tmp dirs to /var/tmp (disk) instead of default /tmp (tmpfs/RAM).
-# Combined with pytest's default per-run isolation (/var/tmp/pytest-of-$USER/pytest-N/),
-# concurrent test runs don't collide. Do not re-add --basetemp to pyproject — it pins
-# all runs to one path and pytest wipes it on startup, destroying concurrent state.
+# Each top-level pytest invocation also gets a unique --basetemp so concurrent
+# runs in different worktrees do not share /var/tmp/pytest-of-$USER/pytest-N/.
+# Do not re-add --basetemp to pyproject — it would pin all runs to one path and
+# pytest wipes it on startup, destroying concurrent state.
 export TMPDIR := /var/tmp
+PYTEST_BASETEMP := $(shell mktemp -d /var/tmp/solstone-pytest-XXXXXX)
+PYTEST_BASETEMP_FLAG := --basetemp $(PYTEST_BASETEMP)
 
-.PHONY: install uninstall test test-apps test-app test-only test-integration test-integration-only test-all format format-check install-checks ci clean clean-install coverage watch versions update update-prices pre-commit skills dev all sandbox sandbox-stop install-pinchtab install-models parakeet-helper parakeet-helper-clean verify-browser update-browser-baselines review verify verify-api update-api-baselines install-service uninstall-service service-logs gate-agents-rename check-layer-hygiene doctor FORCE
+.PHONY: install uninstall test test-apps test-app test-only test-integration test-integration-only test-all format format-check install-checks ci clean clean-install coverage watch versions update update-prices pre-commit skills dev all sandbox sandbox-stop install-pinchtab install-models parakeet-helper parakeet-helper-clean verify-browser update-browser-baselines review verify verify-api update-api-baselines install-service uninstall-service service-logs check-layer-hygiene doctor FORCE
 
 # Default target - install package in editable mode
 all: install
@@ -53,6 +56,12 @@ USER_BIN := $(HOME)/.local/bin
 	if [ "$$OS_NAME" = "Darwin" ] && [ "$$PY_MINOR" -ge 14 ]; then \
 		echo "Python 3.14+ detected - installing onnxruntime from nightly feed..."; \
 		$(UV) pip install --pre --no-deps --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ onnxruntime; \
+	fi
+	@OS_NAME=$$(uname -s); \
+	ARCH=$$(uname -m); \
+	if [ "$$OS_NAME" = "Linux" ] && [ "$$ARCH" = "x86_64" ]; then \
+		echo "parakeet install: PARAKEET_ONNX_VARIANT=$(PARAKEET_ONNX_VARIANT)"; \
+		$(UV) sync --extra parakeet-onnx-$(PARAKEET_ONNX_VARIANT) || { echo "parakeet install: uv sync --extra parakeet-onnx-$(PARAKEET_ONNX_VARIANT) failed" >&2; exit 1; }; \
 	fi
 	@$(VENV_BIN)/python -c "from observe.transcribe.main import PYANNOTE_OVERLAP_MODEL_PATH, PYANNOTE_OVERLAP_MODEL_SHA256, WESPEAKER_MODEL_PATH, WESPEAKER_MODEL_SHA256; from observe.utils import compute_file_sha256; actual = compute_file_sha256(WESPEAKER_MODEL_PATH); assert actual == WESPEAKER_MODEL_SHA256, f'WeSpeaker asset hash mismatch: got {actual}, expected {WESPEAKER_MODEL_SHA256}'; print(f'wespeaker asset ok ({actual[:12]}...)'); actual = compute_file_sha256(PYANNOTE_OVERLAP_MODEL_PATH); assert actual == PYANNOTE_OVERLAP_MODEL_SHA256, f'pyannote asset hash mismatch: got {actual}, expected {PYANNOTE_OVERLAP_MODEL_SHA256}'; print(f'pyannote asset ok ({actual[:12]}...)')"
 	@echo "Installing Playwright browser for sol screenshot..."
@@ -175,7 +184,7 @@ sandbox: .installed
 	echo "$$SANDBOX_JOURNAL" > .sandbox.journal; \
 	echo "Sandbox journal: $$SANDBOX_JOURNAL"; \
 	# Boot supervisor in background \
-	_SOLSTONE_JOURNAL_OVERRIDE="$$SANDBOX_JOURNAL" PATH=$(CURDIR)/$(VENV_BIN):$$PATH \
+	SOLSTONE_JOURNAL="$$SANDBOX_JOURNAL" PATH=$(CURDIR)/$(VENV_BIN):$$PATH \
 		$(VENV_BIN)/sol supervisor 0 --no-daily \
 		> "$$SANDBOX_JOURNAL/health/supervisor.log" 2>&1 & \
 	echo $$! > .sandbox.pid; \
@@ -184,7 +193,7 @@ sandbox: .installed
 	echo "Waiting for services..."; \
 	READY=false; \
 	for i in $$(seq 1 20); do \
-		if _SOLSTONE_JOURNAL_OVERRIDE="$$SANDBOX_JOURNAL" $(VENV_BIN)/sol health > /dev/null 2>&1; then \
+		if SOLSTONE_JOURNAL="$$SANDBOX_JOURNAL" $(VENV_BIN)/sol health > /dev/null 2>&1; then \
 			READY=true; \
 			break; \
 		fi; \
@@ -229,7 +238,7 @@ sandbox-stop:
 .PHONY: sandbox-seed-observers
 sandbox-seed-observers: ## Seed 4 sample observers into the running sandbox journal
 	@test -s .sandbox.journal || (echo "No sandbox running. Run 'make sandbox' first." && exit 1)
-	@_SOLSTONE_JOURNAL_OVERRIDE=$$(cat .sandbox.journal) $(VENV_BIN)/python tests/fixtures/seed_observers.py
+	@SOLSTONE_JOURNAL=$$(cat .sandbox.journal) $(VENV_BIN)/python tests/fixtures/seed_observers.py
 
 # Verify API baselines against running sandbox
 verify-api: .installed
@@ -238,8 +247,8 @@ verify-api: .installed
 	@SANDBOX_JOURNAL=$$(cat .sandbox.journal); \
 	CONVEY_PORT=$$(cat "$$SANDBOX_JOURNAL/health/convey.port"); \
 	RESULT=0; \
-	_SOLSTONE_JOURNAL_OVERRIDE="$$SANDBOX_JOURNAL" $(VENV_BIN)/sol indexer --rescan-full > /dev/null; \
-	_SOLSTONE_JOURNAL_OVERRIDE="$$SANDBOX_JOURNAL" $(VENV_BIN)/python tests/verify_api.py verify --base-url "http://localhost:$$CONVEY_PORT" || RESULT=$$?; \
+	SOLSTONE_JOURNAL="$$SANDBOX_JOURNAL" $(VENV_BIN)/sol indexer --rescan-full > /dev/null; \
+	SOLSTONE_JOURNAL="$$SANDBOX_JOURNAL" $(VENV_BIN)/python tests/verify_api.py verify --base-url "http://localhost:$$CONVEY_PORT" || RESULT=$$?; \
 	$(MAKE) sandbox-stop; \
 	exit $$RESULT
 
@@ -254,8 +263,8 @@ update-api-baselines: .installed
 		SANDBOX_JOURNAL=$$(cat .sandbox.journal); \
 		CONVEY_PORT=$$(cat "$$SANDBOX_JOURNAL/health/convey.port"); \
 		RESULT=0; \
-		_SOLSTONE_JOURNAL_OVERRIDE="$$SANDBOX_JOURNAL" $(VENV_BIN)/sol indexer --rescan-full > /dev/null; \
-		_SOLSTONE_JOURNAL_OVERRIDE="$$SANDBOX_JOURNAL" $(VENV_BIN)/python tests/verify_api.py update --base-url "http://localhost:$$CONVEY_PORT" || RESULT=$$?; \
+		SOLSTONE_JOURNAL="$$SANDBOX_JOURNAL" $(VENV_BIN)/sol indexer --rescan-full > /dev/null; \
+		SOLSTONE_JOURNAL="$$SANDBOX_JOURNAL" $(VENV_BIN)/python tests/verify_api.py update --base-url "http://localhost:$$CONVEY_PORT" || RESULT=$$?; \
 		$(MAKE) sandbox-stop; \
 		exit $$RESULT; \
 	else \
@@ -322,10 +331,10 @@ review: .installed
 	BASE_URL="http://localhost:$$CONVEY_PORT"; \
 	RESULT_API=0; \
 	RESULT_BROWSER=0; \
-	_SOLSTONE_JOURNAL_OVERRIDE="$$SANDBOX_JOURNAL" $(VENV_BIN)/sol indexer --rescan-full > /dev/null; \
+	SOLSTONE_JOURNAL="$$SANDBOX_JOURNAL" $(VENV_BIN)/sol indexer --rescan-full > /dev/null; \
 	echo ""; \
 	echo "=== API baseline verification ==="; \
-	_SOLSTONE_JOURNAL_OVERRIDE="$$SANDBOX_JOURNAL" $(VENV_BIN)/python tests/verify_api.py verify --base-url "$$BASE_URL" || RESULT_API=$$?; \
+	SOLSTONE_JOURNAL="$$SANDBOX_JOURNAL" $(VENV_BIN)/python tests/verify_api.py verify --base-url "$$BASE_URL" || RESULT_API=$$?; \
 	echo ""; \
 	echo "=== Browser scenario verification ==="; \
 	$(VENV_BIN)/python tests/verify_browser.py verify --base-url "$$BASE_URL" || RESULT_BROWSER=$$?; \
@@ -353,7 +362,7 @@ review: .installed
 	fi
 
 # Test environment - use fixtures journal for all tests
-TEST_ENV = _SOLSTONE_JOURNAL_OVERRIDE=tests/fixtures/journal
+TEST_ENV = SOLSTONE_JOURNAL=tests/fixtures/journal
 LINK_LIVE_TESTS = --ignore=tests/link/test_integration.py --ignore=tests/link/test_privacy_scan.py
 
 # Venv tool shortcuts
@@ -368,12 +377,12 @@ format-check: .installed
 # Run core tests (excluding integration and app tests)
 test: .installed format-check
 	@echo "Running core tests..."
-	$(TEST_ENV) $(PYTEST) tests/ -q --cov=. --ignore=tests/integration $(LINK_LIVE_TESTS)
+	$(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) tests/ -q --cov=. --ignore=tests/integration $(LINK_LIVE_TESTS)
 
 # Run app tests
 test-apps: .installed
 	@echo "Running app tests..."
-	$(TEST_ENV) $(PYTEST) apps/ -q
+	$(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) apps/ -q
 
 # Run specific app tests
 test-app: .installed
@@ -382,7 +391,7 @@ test-app: .installed
 		echo "Example: make test-app APP=todos"; \
 		exit 1; \
 	fi
-	$(TEST_ENV) $(PYTEST) apps/$(APP)/tests/ -v
+	$(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) apps/$(APP)/tests/ -v
 
 # Run specific test file or pattern
 test-only: .installed
@@ -392,13 +401,13 @@ test-only: .installed
 		echo "Example: make test-only TEST=\"-k test_function_name\""; \
 		exit 1; \
 	fi
-	$(TEST_ENV) $(PYTEST) $(TEST)
+	$(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) $(TEST)
 
 # Run integration tests
 test-integration: .installed
 	@echo "Running integration tests..."
 	@STATUS=0; \
-	$(TEST_ENV) $(PYTEST) tests/integration/ tests/link/test_integration.py tests/link/test_privacy_scan.py -v --tb=short --timeout=20 || STATUS=$$?; \
+	$(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) tests/integration/ tests/link/test_integration.py tests/link/test_privacy_scan.py -v --tb=short --timeout=20 || STATUS=$$?; \
 	if [ "$$STATUS" -ne 0 ] && [ "$$STATUS" -ne 5 ]; then exit $$STATUS; fi
 
 # Run specific integration test
@@ -414,13 +423,13 @@ test-integration-only: .installed
 		*) TARGET="tests/integration/$$TARGET" ;; \
 	esac; \
 	STATUS=0; \
-	$(TEST_ENV) $(PYTEST) "$$TARGET" --timeout=20 || STATUS=$$?; \
+	$(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) "$$TARGET" --timeout=20 || STATUS=$$?; \
 	if [ "$$STATUS" -ne 0 ] && [ "$$STATUS" -ne 5 ]; then exit $$STATUS; fi
 
 # Run all tests (core + apps + integration)
 test-all: .installed
 	@echo "Running all tests (core + apps + integration)..."
-	$(TEST_ENV) $(PYTEST) tests/ -v --cov=. --ignore=tests/integration $(LINK_LIVE_TESTS) && $(TEST_ENV) $(PYTEST) apps/ -v --cov=. --cov-append
+	$(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) tests/ -v --cov=. --ignore=tests/integration $(LINK_LIVE_TESTS) && $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) apps/ -v --cov=. --cov-append
 
 # Auto-format and fix code, then report any remaining issues
 format: .installed
@@ -479,7 +488,9 @@ install-service: doctor skills .installed
 			;; \
 		up""grade) \
 			echo "mode: up""grade"; \
-			$(MAKE) install-checks || exit $$?; \
+			;; \
+		current) \
+			echo "mode: current"; \
 			;; \
 		fresh) \
 			echo "mode: fresh install"; \
@@ -493,16 +504,21 @@ install-service: doctor skills .installed
 	CI=true npx --yes skills add ./skills/solstone -g -a claude-code -y; \
 	$(VENV_BIN)/sol service install --port $(or $(PORT),5015); \
 	$(VENV_BIN)/sol service restart; \
-	echo "Waiting for service readiness..."; \
+	echo "Waiting for supervisor to report healthy..."; \
 	READY=false; \
 	for i in $$(seq 1 20); do \
 		if $(VENV_BIN)/sol health > /dev/null 2>&1; then \
 			READY=true; \
 			break; \
 		fi; \
+		printf .; \
 		sleep 1; \
 	done; \
-	if [ "$$READY" = "false" ]; then \
+	if [ "$$READY" = "true" ]; then \
+		printf '\n'; \
+		echo "Service is healthy."; \
+	else \
+		printf '\n' >&2; \
 		echo "Service readiness timeout after 20s" >&2; \
 		exit 1; \
 	fi; \
@@ -557,9 +573,6 @@ install-checks: .installed
 	@echo "=== Running ruff ==="
 	@$(RUFF) check . || { echo "Run 'make format' to auto-fix"; exit 1; }
 	@echo ""
-	@echo "=== Running rename gate ==="
-	@$(MAKE) gate-agents-rename
-	@echo ""
 	@echo "=== Running layer-hygiene check ==="
 	@$(MAKE) check-layer-hygiene
 	@echo ""
@@ -586,8 +599,8 @@ watch: .installed
 
 # Generate coverage report (core + apps, excluding core integration tests)
 coverage: .installed
-	$(TEST_ENV) $(PYTEST) tests/ --cov=. --cov-report=html --cov-report=term --ignore=tests/integration $(LINK_LIVE_TESTS)
-	$(TEST_ENV) $(PYTEST) apps/ --cov=. --cov-report=html --cov-report=term --cov-append
+	$(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) tests/ --cov=. --cov-report=html --cov-report=term --ignore=tests/integration $(LINK_LIVE_TESTS)
+	$(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) apps/ --cov=. --cov-report=html --cov-report=term --cov-append
 	@echo "Coverage report generated in htmlcov/index.html"
 
 # Update all dependencies to latest versions and refresh genai-prices
@@ -618,9 +631,6 @@ pre-commit: .installed
 	@$(UV) pip show pre-commit >/dev/null 2>&1 || { echo "Installing pre-commit..."; $(UV) pip install pre-commit; }
 	$(VENV_BIN)/pre-commit install
 	@echo "Pre-commit hooks installed!"
-# Rename guard for the agents -> talents transition
-gate-agents-rename: .installed
-	$(VENV_BIN)/python scripts/gate_agents_rename.py
 
 # Low-bar layer-hygiene check (see docs/coding-standards.md § Layer Hygiene)
 check-layer-hygiene: .installed

@@ -8,6 +8,7 @@
 
   <!-- Error handling FIRST - catches all subsequent errors -->
   <script src="{{ url_for('root.static', filename='error-handler.js') }}"></script>
+  <script src="{{ url_for('root.static', filename='relative-time.js') }}"></script>
 
   <!-- Embed facets data for immediate client-side access -->
   <script>
@@ -21,6 +22,9 @@
   <script src="{{ url_for('root.static', filename='api.js') }}"></script>
   <!-- App JavaScript (includes AppServices framework) -->
   <script src="{{ url_for('root.static', filename='app.js') }}"></script>
+  <!-- Markdown rendering deps (marked + DOMPurify). Must load before workspace include. -->
+  <script src="{{ vendor_lib('marked') }}"></script>
+  <script src="{{ vendor_lib('dompurify') }}"></script>
 
   <!-- Apply facet theme immediately to prevent flash -->
   {% if selected_facet and app_registry.apps[app].facets_enabled() %}
@@ -43,6 +47,38 @@
 <script>
 // Restore sidebar state before first paint to prevent FOUC
 (function(){try{var s=localStorage.getItem('solstone:menu-state');if(s==='full')document.body.classList.add('menu-full');else if(s==='all')document.body.classList.add('menu-all');}catch(e){/* Default collapsed menu state is safe when storage is unavailable. */}})();
+// Presentation mode (?present=1, Shift+P toggle, sessionStorage-persisted).
+// Boosts typography + contrast for back-of-room legibility on a projector.
+(function(){
+  var KEY = 'solstone:presentation-mode';
+  function emit(on){
+    try { window.dispatchEvent(new CustomEvent('presentation-mode:change', { detail: { on: on } })); } catch(_) {}
+  }
+  function set(on){
+    try { if (on) sessionStorage.setItem(KEY, '1'); else sessionStorage.removeItem(KEY); } catch(_) {}
+    document.body.classList.toggle('presentation-mode', !!on);
+    emit(!!on);
+  }
+  function isOn(){ return document.body.classList.contains('presentation-mode'); }
+  // URL param wins, then sessionStorage.
+  var on = false;
+  try {
+    var p = new URL(window.location.href).searchParams.get('present');
+    if (p === '1' || p === 'on' || p === 'true') { on = true; sessionStorage.setItem(KEY, '1'); }
+    else if (p === '0' || p === 'off' || p === 'false') { on = false; sessionStorage.removeItem(KEY); }
+    else { on = sessionStorage.getItem(KEY) === '1'; }
+  } catch(_) {}
+  if (on) document.body.classList.add('presentation-mode');
+  // Shift+P toggles. Skip when typing in an input/textarea/contenteditable.
+  document.addEventListener('keydown', function(e){
+    if (e.key !== 'P' || !e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+    var t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    e.preventDefault();
+    set(!isOn());
+  });
+  window.solstonePresentation = { on: function(){ set(true); }, off: function(){ set(false); }, toggle: function(){ set(!isOn()); }, isOn: isOn };
+})();
 </script>
 <a href="#main-content" class="skip-link">skip to content</a>
 <!-- Corner Tags (screen region detection) -->
@@ -97,9 +133,6 @@
   <h1 class="visually-hidden">{{ app_registry.apps[app].label }}</h1>
   {% include app_registry.apps[app].get_workspace_template() %}
 </main>
-
-<script src="{{ vendor_lib('marked') }}"></script>
-<script src="{{ vendor_lib('dompurify') }}"></script>
 
 <script>
 (function() {
@@ -400,7 +433,7 @@
 
   function renderTalentView(data) {
     if (!modalTitle || !modalStatus || !modalTimeline) return;
-    modalTitle.textContent = data.task || 'Talent run';
+    modalTitle.textContent = data.task || 'talent run';
     modalTitle.title = data.task || '';
     modalStatus.textContent = data.status || '';
     modalStatus.dataset.status = data.status || '';
@@ -409,7 +442,7 @@
     if (!Array.isArray(data.events) || !data.events.length) {
       var empty = document.createElement('p');
       empty.className = 'talent-view-empty';
-      empty.textContent = 'No events yet.';
+      empty.textContent = 'no events yet.';
       modalTimeline.appendChild(empty);
       return;
     }
@@ -421,7 +454,7 @@
 
   function renderTalentViewError(message) {
     if (!modalTitle || !modalStatus || !modalTimeline) return;
-    modalTitle.textContent = 'Talent run';
+    modalTitle.textContent = 'talent run';
     modalStatus.textContent = 'errored';
     modalStatus.dataset.status = 'errored';
     modalTimeline.innerHTML = '';
@@ -442,7 +475,7 @@
       } catch (_err) {
         // Fall back to generic talent-run copy when the error body is not JSON.
       }
-      throw new Error(body.error || 'Unable to load talent run');
+      throw new Error(body.error || 'unable to load talent run');
     }
     return response.json();
   }
@@ -481,7 +514,7 @@
       }
     } catch (err) {
       stopTalentLiveUpdates();
-      renderTalentViewError(err && err.message ? err.message : 'Unable to load talent run');
+      renderTalentViewError(err && err.message ? err.message : 'unable to load talent run');
     }
   }
 
@@ -492,7 +525,7 @@
     stopTalentLiveUpdates();
     modalStatus.textContent = '';
     modalStatus.dataset.status = '';
-    modalTitle.textContent = 'Loading...';
+    modalTitle.textContent = 'loading...';
     modalTimeline.innerHTML = '';
     showTalentView();
     refreshTalentView(modalUseId);

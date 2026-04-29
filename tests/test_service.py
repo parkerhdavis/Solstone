@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import plistlib
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -37,17 +38,19 @@ class TestPlistGeneration:
         env = {
             "HOME": "/Users/test",
             "PATH": "/usr/bin",
-            "_SOLSTONE_JOURNAL_OVERRIDE": "/Users/test/journal",
         }
         data = service._generate_plist(env)
         plist = plistlib.loads(data)
         assert plist["Label"] == "org.solpbc.solstone"
+        assert plist["ProgramArguments"][0] == str(
+            Path.home() / ".local" / "bin" / "sol"
+        )
         assert plist["ProgramArguments"][1] == "supervisor"
         assert plist["EnvironmentVariables"] == env
         assert plist["KeepAlive"] is True
         assert plist["RunAtLoad"] is True
-        assert "launchd-stdout.log" in plist["StandardOutPath"]
-        assert "launchd-stderr.log" in plist["StandardErrorPath"]
+        assert "StandardOutPath" not in plist
+        assert "StandardErrorPath" not in plist
 
 
 class TestSystemdUnit:
@@ -55,7 +58,6 @@ class TestSystemdUnit:
         env = {
             "HOME": "/home/test",
             "PATH": "/usr/bin",
-            "_SOLSTONE_JOURNAL_OVERRIDE": "/home/test/journal",
         }
         unit = service._generate_systemd_unit(env)
         lines = unit.splitlines()
@@ -67,17 +69,49 @@ class TestSystemdUnit:
 
         assert "Type=simple" in unit
         assert "Restart=on-failure" in unit
-        assert "ExecStart=" in unit
+        assert (
+            f"ExecStart={Path.home() / '.local' / 'bin' / 'sol'} supervisor 5015"
+            in unit
+        )
         assert "supervisor" in unit
         assert "Environment=HOME=/home/test" in unit
-        assert "Environment=_SOLSTONE_JOURNAL_OVERRIDE=/home/test/journal" in unit
+        assert "Environment=PATH=/usr/bin" in unit
+        assert "SOLSTONE_JOURNAL" not in unit
         assert "WantedBy=default.target" in unit
+
+    def test_no_stdio_redirection(self):
+        env = {
+            "HOME": "/home/test",
+            "PATH": "/usr/bin",
+        }
+
+        unit = service._generate_systemd_unit(env)
+
+        assert "StandardOutput" not in unit
+        assert "StandardError" not in unit
+
+
+class TestLogs:
+    def test_reads_service_log(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setattr(sys, "platform", "darwin")
+        health_dir = tmp_path / "health"
+        health_dir.mkdir(parents=True)
+        service_log = health_dir / "service.log"
+        service_log.write_text("first line\nsecond line\n", encoding="utf-8")
+        monkeypatch.setattr(service, "get_journal", lambda: str(tmp_path))
+
+        result = service._logs(follow=False)
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert captured.out == "=== service.log ===\nfirst line\nsecond line\n\n"
+        assert captured.err == ""
 
 
 class TestEnvCollection:
     def test_no_api_keys_in_env(self, monkeypatch, tmp_path):
         """Service env must NOT contain API keys — they load at runtime via setup_cli."""
-        monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+        monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
 
         config_dir = tmp_path / "config"
         config_dir.mkdir(exist_ok=True)
@@ -99,7 +133,7 @@ class TestEnvCollection:
         assert "GOOGLE_API_KEY" not in env
 
     def test_includes_venv_in_path(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+        monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
         monkeypatch.setenv("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
         monkeypatch.setattr(
             sys, "executable", str(tmp_path / ".venv" / "bin" / "python")
@@ -112,7 +146,7 @@ class TestEnvCollection:
         )
 
     def test_path_fallback_when_unset(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+        monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
         monkeypatch.delenv("PATH", raising=False)
         monkeypatch.setattr(
             sys, "executable", str(tmp_path / ".venv" / "bin" / "python")
@@ -123,7 +157,7 @@ class TestEnvCollection:
         assert env["PATH"] == f"{venv_bin}:/usr/local/bin:/usr/bin:/bin"
 
     def test_path_deduplicates_venv_bin(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+        monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
         monkeypatch.setattr(
             sys, "executable", str(tmp_path / ".venv" / "bin" / "python")
         )
@@ -135,11 +169,81 @@ class TestEnvCollection:
         assert parts[0] == venv_bin
         assert parts.count(venv_bin) == 1
 
-    def test_journal_override_not_propagated(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+    def test_journal_env_not_propagated(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
 
         env = service._collect_env()
-        assert "_SOLSTONE_JOURNAL_OVERRIDE" not in env
+        assert "SOLSTONE_JOURNAL" not in env
+
+
+class TestServiceHelpers:
+    def test_service_is_installed_true_linux(self, monkeypatch, tmp_path):
+        unit_path = tmp_path / "solstone.service"
+        unit_path.write_text("", encoding="utf-8")
+        monkeypatch.setattr(service, "_platform", lambda: "linux")
+        monkeypatch.setattr(service, "_unit_path", lambda: unit_path)
+        assert service.service_is_installed() is True
+
+    def test_service_is_installed_false_linux(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(service, "_platform", lambda: "linux")
+        monkeypatch.setattr(
+            service, "_unit_path", lambda: tmp_path / "missing" / "solstone.service"
+        )
+        assert service.service_is_installed() is False
+
+    def test_service_is_installed_true_darwin(self, monkeypatch, tmp_path):
+        plist_path = tmp_path / "org.solpbc.solstone.plist"
+        plist_path.write_text("", encoding="utf-8")
+        monkeypatch.setattr(service, "_platform", lambda: "darwin")
+        monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
+        assert service.service_is_installed() is True
+
+    def test_service_is_installed_false_darwin(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(service, "_platform", lambda: "darwin")
+        monkeypatch.setattr(
+            service,
+            "_plist_path",
+            lambda: tmp_path / "missing" / "org.solpbc.solstone.plist",
+        )
+        assert service.service_is_installed() is False
+
+    def test_service_is_running_false_fast_when_not_installed(self, monkeypatch):
+        run_mock = MagicMock()
+        monkeypatch.setattr(service, "service_is_installed", lambda: False)
+        monkeypatch.setattr(service.subprocess, "run", run_mock)
+        assert service.service_is_running() is False
+        run_mock.assert_not_called()
+
+    def test_service_is_running_true_linux(self, monkeypatch):
+        monkeypatch.setattr(service, "service_is_installed", lambda: True)
+        monkeypatch.setattr(service, "_platform", lambda: "linux")
+        run_mock = MagicMock(return_value=MagicMock(stdout="active\n"))
+        monkeypatch.setattr(service.subprocess, "run", run_mock)
+        assert service.service_is_running() is True
+
+    @pytest.mark.parametrize("state", ["inactive\n", "failed\n"])
+    def test_service_is_running_false_linux(self, monkeypatch, state):
+        monkeypatch.setattr(service, "service_is_installed", lambda: True)
+        monkeypatch.setattr(service, "_platform", lambda: "linux")
+        run_mock = MagicMock(return_value=MagicMock(stdout=state))
+        monkeypatch.setattr(service.subprocess, "run", run_mock)
+        assert service.service_is_running() is False
+
+    def test_service_is_running_true_darwin(self, monkeypatch):
+        monkeypatch.setattr(service, "service_is_installed", lambda: True)
+        monkeypatch.setattr(service, "_platform", lambda: "darwin")
+        monkeypatch.setattr(service.os, "getuid", lambda: 501)
+        run_mock = MagicMock(return_value=MagicMock(returncode=0))
+        monkeypatch.setattr(service.subprocess, "run", run_mock)
+        assert service.service_is_running() is True
+
+    def test_service_is_running_false_darwin(self, monkeypatch):
+        monkeypatch.setattr(service, "service_is_installed", lambda: True)
+        monkeypatch.setattr(service, "_platform", lambda: "darwin")
+        monkeypatch.setattr(service.os, "getuid", lambda: 501)
+        run_mock = MagicMock(return_value=MagicMock(returncode=1))
+        monkeypatch.setattr(service.subprocess, "run", run_mock)
+        assert service.service_is_running() is False
 
 
 class TestStatus:
@@ -215,11 +319,27 @@ class TestRestart:
         assert result == 1
         assert "not installed" in capsys.readouterr().err
 
+    def test_linux_happy_path_narrates(self, capsys, monkeypatch):
+        """_restart prints stopping-old + new-process-started narration on the Linux happy path."""
+        monkeypatch.setattr(service, "_platform", lambda: "linux")
+        monkeypatch.setattr(service, "service_is_installed", lambda: True)
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda *a, **kw: subprocess.CompletedProcess(
+                args=a, returncode=0, stdout="", stderr=""
+            ),
+        )
+        result = service._restart()
+        assert result == 0
+        out = capsys.readouterr().out
+        assert "Stopping old supervisor" in out
+        assert "New supervisor process started" in out
+
 
 class TestInstall:
     def test_linux_idempotent(self, monkeypatch, tmp_path, capsys):
         monkeypatch.setattr(sys, "platform", "linux")
-        monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+        monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
 
         unit_path = tmp_path / "solstone.service"
         monkeypatch.setattr(service, "_unit_path", lambda: unit_path)

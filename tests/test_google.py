@@ -85,8 +85,12 @@ def test_google_main(monkeypatch, tmp_path, capsys):
     journal = tmp_path / "journal"
     journal.mkdir()
 
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(journal))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(journal))
     monkeypatch.setenv("GOOGLE_API_KEY", "x")
+    monkeypatch.setattr(
+        "think.utils.get_config",
+        lambda: {"providers": {"google_backend": "aistudio"}},
+    )
     monkeypatch.setattr(
         "think.providers.cli.shutil.which",
         lambda name: "/usr/bin/gemini" if name == "gemini" else None,
@@ -164,8 +168,12 @@ def test_google_cli_not_found_error(monkeypatch, tmp_path, capsys):
     journal = tmp_path / "journal"
     journal.mkdir()
 
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(journal))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(journal))
     monkeypatch.setenv("GOOGLE_API_KEY", "x")
+    monkeypatch.setattr(
+        "think.utils.get_config",
+        lambda: {"providers": {"google_backend": "aistudio"}},
+    )
     monkeypatch.setattr("think.providers.cli.shutil.which", lambda _name: None)
 
     ndjson_input = json.dumps(

@@ -23,12 +23,20 @@ from think.utils import now_ms
 
 # Global cache for entity observations: {(facet, entity_slug): list[dict]}
 _OBSERVATION_CACHE: dict[tuple[str, str], list[dict[str, Any]]] | None = None
+# Global cache for observation counts: {path: count}
+_OBSERVATION_COUNT_CACHE: dict[Path, int] | None = None
 
 
 def clear_observation_cache() -> None:
     """Clear the entity observation cache."""
     global _OBSERVATION_CACHE
     _OBSERVATION_CACHE = None
+
+
+def clear_observation_count_cache() -> None:
+    """Clear the entity observation count cache."""
+    global _OBSERVATION_COUNT_CACHE
+    _OBSERVATION_COUNT_CACHE = None
 
 
 def observations_file_path(facet: str, name: str) -> Path:
@@ -99,6 +107,34 @@ def load_observations(facet: str, name: str) -> list[dict[str, Any]]:
     return observations
 
 
+def count_observations(facet: str, name: str) -> int:
+    """Count observations for an entity."""
+    global _OBSERVATION_COUNT_CACHE
+    try:
+        obs_file = entity_memory_path(facet, name) / "observations.jsonl"
+    except ValueError:
+        return 0
+
+    if not obs_file.exists():
+        return 0
+
+    if _OBSERVATION_COUNT_CACHE is None:
+        _OBSERVATION_COUNT_CACHE = {}
+
+    cached = _OBSERVATION_COUNT_CACHE.get(obs_file)
+    if cached is not None:
+        return cached
+
+    try:
+        with open(obs_file, "r", encoding="utf-8") as f:
+            count = sum(1 for line in f if line.strip())
+    except OSError:
+        return 0
+
+    _OBSERVATION_COUNT_CACHE[obs_file] = count
+    return count
+
+
 def save_observations(
     facet: str, name: str, observations: list[dict[str, Any]]
 ) -> None:
@@ -111,6 +147,7 @@ def save_observations(
     """
     # Clear cache on modification
     clear_observation_cache()
+    clear_observation_count_cache()
 
     path = observations_file_path(facet, name)
 

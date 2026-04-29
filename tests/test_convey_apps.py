@@ -9,7 +9,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def _temp_journal(monkeypatch, tmp_path):
     """Ensure journaling defaults remain isolated from developer data."""
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
 
 
 # --- Placeholder resolution ---
@@ -27,7 +27,7 @@ class TestPlaceholderResolution:
 
         current = {"imports": {"has_imported": True}}
         result = _resolve_placeholder(current, 0)
-        assert "Capture is running" in result
+        assert "observing" in result
 
     def test_first_daily_young(self):
         from convey.apps import _resolve_placeholder
@@ -58,7 +58,7 @@ class TestPlaceholderResolution:
         from convey.apps import _resolve_placeholder
 
         result = _resolve_placeholder({}, 5)
-        assert "Capture is running" in result
+        assert "observing" in result
 
 
 class TestAttentionResolution:
@@ -114,7 +114,7 @@ class TestAttentionResolution:
 
         from convey.apps import _resolve_attention
 
-        monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+        monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
 
         today = datetime.now().strftime("%Y%m%d")
         agents_dir = tmp_path / "talents"
@@ -156,7 +156,7 @@ class TestAttentionResolution:
 
         from convey.apps import _resolve_attention
 
-        monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+        monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
 
         today = datetime.now().strftime("%Y%m%d")
         agents_dir = tmp_path / "talents"
@@ -195,7 +195,7 @@ class TestAttentionResolution:
 
         from convey.apps import _resolve_attention
 
-        monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+        monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
 
         today = datetime.now().strftime("%Y%m%d")
         agents_dir = tmp_path / "talents"
@@ -240,7 +240,7 @@ class TestAttentionResolution:
 
         from convey.apps import _resolve_attention
 
-        monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+        monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
 
         today = datetime.now().strftime("%Y%m%d")
         agents_dir = tmp_path / "talents"
@@ -273,7 +273,7 @@ class TestAttentionResolution:
 
         from convey.apps import _resolve_attention
 
-        monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+        monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
 
         today = datetime.now().strftime("%Y%m%d")
         agents_dir = tmp_path / today / "talents"

@@ -46,6 +46,7 @@ COMMANDS: dict[str, str] = {
     "top": "think.top",
     "health": "think.health_cli",
     "notify": "think.notify_cli",
+    "config": "think.config_cli",
     "password": "think.password_cli",
     "streams": "think.streams",
     "segment": "think.segment",
@@ -56,6 +57,7 @@ COMMANDS: dict[str, str] = {
     "sense": "observe.sense",
     "transfer": "observe.transfer",
     "export": "observe.export",
+    "grab": "observe.grab",
     "observer": "observe.observer_cli",
     # AI providers and talent execution
     "providers": "think.providers_cli",
@@ -110,6 +112,7 @@ GROUPS: dict[str, list[str]] = {
         "sense",
         "transfer",
         "export",
+        "grab",
         "observer",
     ],
     "Talent": [
@@ -126,6 +129,7 @@ GROUPS: dict[str, list[str]] = {
     ],
     "Specialized tools": [
         "password",
+        "config",
         "streams",
         "segment",
         "journal-stats",
@@ -261,8 +265,8 @@ def run_command(module_path: str) -> int:
 
     # Call main - it may call sys.exit() internally
     try:
-        module.main()
-        return 0
+        result = module.main()
+        return 0 if result is None else int(result)
     except SystemExit as e:
         # Preserve exit code from subcommand
         # SystemExit can have int code, string message, or None

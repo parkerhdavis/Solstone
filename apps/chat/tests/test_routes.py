@@ -32,12 +32,12 @@ def journal_copy(tmp_path, monkeypatch):
     src = Path("tests/fixtures/journal").resolve()
     dst = tmp_path / "journal"
     copytree_tracked(src, dst)
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(dst.resolve()))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(dst.resolve()))
     return dst
 
 
 def _make_env(journal, monkeypatch) -> ChatTestEnv:
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(journal))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(journal))
     app = create_app(str(journal))
     app.config["TESTING"] = True
     client = app.test_client()
@@ -99,7 +99,7 @@ def test_chat_day_renders_empty_state_for_today(journal_copy, monkeypatch):
 
     assert response.status_code == 200
     assert "no chat yet on this day" in html
-    assert 'id="chatComposerForm"' in html
+    assert 'id="chatBarForm"' in html
 
 
 def test_chat_day_renders_all_event_kinds(journal_copy, monkeypatch):
@@ -172,7 +172,7 @@ def test_chat_day_renders_all_event_kinds(journal_copy, monkeypatch):
     assert "chat had trouble" in html
 
 
-def test_chat_day_marks_talent_summary_for_markdown_bootstrap(
+def test_chat_day_emits_raw_talent_markdown_source_for_bootstrap(
     journal_copy, monkeypatch
 ):
     day = "20990102"
@@ -212,6 +212,8 @@ def test_chat_day_marks_talent_summary_for_markdown_bootstrap(
         '<div class="chat-talent-card-detail '
         'chat-talent-card-detail--markdown" data-markdown="1">**bad args**</div>'
     ) in html
+    assert "<strong>done</strong>" not in html
+    assert "<strong>bad args</strong>" not in html
 
 
 def test_chat_event_anchor_ids_are_stable(journal_copy, monkeypatch):
@@ -282,23 +284,16 @@ def test_chat_invalid_days_return_404(journal_copy, monkeypatch):
     assert env.client.get("/app/chat/20260101extra").status_code == 404
 
 
-def test_past_day_hides_composer(journal_copy, monkeypatch):
+def test_universal_chat_bar_renders_on_today_and_past_day(journal_copy, monkeypatch):
     today = "20990102"
     past_day = "20990101"
     _set_today(monkeypatch, today)
     env = _make_env(journal_copy, monkeypatch)
 
-    html = env.client.get(f"/app/chat/{past_day}").get_data(as_text=True)
+    today_html = env.client.get(f"/app/chat/{today}").get_data(as_text=True)
+    past_html = env.client.get(f"/app/chat/{past_day}").get_data(as_text=True)
 
-    assert 'id="chatComposerForm"' not in html
-    assert "past-day view" in html
-
-
-def test_today_shows_composer(journal_copy, monkeypatch):
-    today = "20990102"
-    _set_today(monkeypatch, today)
-    env = _make_env(journal_copy, monkeypatch)
-
-    html = env.client.get(f"/app/chat/{today}").get_data(as_text=True)
-
-    assert 'id="chatComposerForm"' in html
+    for html in (today_html, past_html):
+        assert 'id="chatBarForm"' in html
+        assert "past-day view" not in html
+        assert html.count('id="chatBarForm"') == 1

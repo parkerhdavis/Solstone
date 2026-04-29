@@ -1,6 +1,5 @@
 {
   "type": "cogitate",
-  "tier": 3,
 
   "title": "Daily TODO Curator",
   "description": "Carries forward unfinished tasks, aggregates per-activity todo detections, validates completions against journal evidence, and prioritises the day's checklist.",
@@ -10,8 +9,8 @@
   "multi_facet": true,
   "group": "Todos",
   "load": {
-    "talents": True,
-    "journal": True
+    "talents": true,
+    "journal": true
   }
 }
 

@@ -8,7 +8,7 @@ import os
 
 import pytest
 
-from think.utils import get_config
+from think.utils import get_config, journal_is_active
 
 
 @pytest.fixture
@@ -44,7 +44,7 @@ def config_journal(tmp_path):
 
 def test_get_config_default_structure(tmp_path, monkeypatch):
     """Test get_config returns default structure when file doesn't exist."""
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
 
     config = get_config()
 
@@ -70,7 +70,7 @@ def test_get_config_default_structure(tmp_path, monkeypatch):
 
 def test_get_config_default_is_deep_copy(tmp_path, monkeypatch):
     """Test that modifying returned defaults doesn't affect future calls."""
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
 
     config1 = get_config()
     config1["identity"]["name"] = "Modified"
@@ -83,7 +83,7 @@ def test_get_config_default_is_deep_copy(tmp_path, monkeypatch):
 
 def test_get_config_loads_existing(config_journal, monkeypatch):
     """Test get_config loads existing configuration."""
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(config_journal))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(config_journal))
 
     config = get_config()
 
@@ -103,7 +103,7 @@ def test_get_config_loads_existing(config_journal, monkeypatch):
 
 def test_get_config_existing_is_master(tmp_path, monkeypatch):
     """Test that existing journal.json is returned as-is without merging defaults."""
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
 
     # Create config with only a name - no other identity fields, no describe
     config_dir = tmp_path / "config"
@@ -130,7 +130,7 @@ def test_get_config_existing_is_master(tmp_path, monkeypatch):
 
 def test_get_config_empty_journal(tmp_path, monkeypatch):
     """Test get_config returns defaults with an empty journal directory."""
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
 
     config = get_config()
     assert "identity" in config
@@ -139,7 +139,7 @@ def test_get_config_empty_journal(tmp_path, monkeypatch):
 
 def test_get_config_handles_invalid_json(tmp_path, monkeypatch):
     """Test get_config returns defaults when JSON is invalid."""
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
 
     # Create config with invalid JSON
     config_dir = tmp_path / "config"
@@ -166,8 +166,8 @@ def test_get_config_handles_invalid_json(tmp_path, monkeypatch):
 
 def test_get_config_with_fixtures():
     """Test get_config with tests/fixtures/journal path."""
-    # Set _SOLSTONE_JOURNAL_OVERRIDE to fixtures
-    os.environ["_SOLSTONE_JOURNAL_OVERRIDE"] = "tests/fixtures/journal"
+    # Set SOLSTONE_JOURNAL to fixtures
+    os.environ["SOLSTONE_JOURNAL"] = "tests/fixtures/journal"
 
     config = get_config()
 
@@ -184,3 +184,54 @@ def test_get_config_with_fixtures():
     assert isinstance(config["identity"]["email_addresses"], list)
     assert isinstance(config["identity"]["timezone"], str)
     assert isinstance(config["identity"]["bio"], str)
+
+
+def _write_journal_config(journal_path, config):
+    config_dir = journal_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "journal.json").write_text(json.dumps(config), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        ({"identity": {"name": "Active User"}}, True),
+        ({}, False),
+        ({"identity": {"name": ""}}, False),
+        ({"identity": {"name": "   "}}, False),
+    ],
+)
+def test_journal_is_active_from_config(tmp_path, config, expected):
+    _write_journal_config(tmp_path, config)
+    assert journal_is_active(tmp_path) is expected
+
+
+def test_journal_is_active_with_fixtures(monkeypatch):
+    monkeypatch.setenv("SOLSTONE_JOURNAL", "tests/fixtures/journal")
+    assert journal_is_active("tests/fixtures/journal") is True
+
+
+def test_journal_is_active_false_for_empty_dir(tmp_path):
+    assert journal_is_active(tmp_path) is False
+
+
+def test_journal_is_active_false_without_config(tmp_path):
+    (tmp_path / "config").mkdir()
+    assert journal_is_active(tmp_path) is False
+
+
+def test_journal_is_active_false_for_malformed_json(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "journal.json").write_text("{bad json", encoding="utf-8")
+    assert journal_is_active(tmp_path) is False
+
+
+def test_journal_is_active_false_for_path_that_is_not_directory(tmp_path):
+    file_path = tmp_path / "journal.json"
+    file_path.write_text("{}", encoding="utf-8")
+    assert journal_is_active(file_path) is False
+
+
+def test_journal_is_active_false_for_absent_path(tmp_path):
+    assert journal_is_active(tmp_path / "missing") is False

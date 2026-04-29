@@ -13,6 +13,7 @@ import pytest
 
 from think.providers.cli import (
     CLIRunner,
+    QuotaExhaustedError,
     ThinkingAggregator,
     assemble_prompt,
     build_cogitate_env,
@@ -96,6 +97,21 @@ class TestAssemblePrompt:
 
         assert body == "hello"
         assert system == "Base system"
+
+    def test_assemble_prompt_appends_read_scope_hint(self):
+        body, system = assemble_prompt(
+            {
+                "prompt": "hello",
+                "system_instruction": "Base system",
+                "read_scope": ["chronicle/<day>"],
+            },
+            sol_tool_name="run_shell_command",
+        )
+
+        assert body == "hello"
+        assert system is not None
+        assert "through the `run_shell_command` tool" in system
+        assert "Limit filesystem reads to today's segment dir" in system
 
 
 # ---------------------------------------------------------------------------
@@ -242,18 +258,61 @@ def _make_process(stdout_lines, stderr_lines, return_code):
     return process
 
 
+class HangingStdout:
+    async def readline(self):
+        future = asyncio.get_running_loop().create_future()
+        return await future
+
+
+class _DelayedStdout:
+    """Stdout mock that waits before yielding each line."""
+
+    def __init__(self, lines: list[bytes], delay_seconds: float):
+        self._lines = lines
+        self._delay_seconds = delay_seconds
+        self._index = 0
+
+    async def readline(self):
+        await asyncio.sleep(self._delay_seconds)
+        if self._index >= len(self._lines):
+            return b""
+        line = self._lines[self._index]
+        self._index += 1
+        return line
+
+
+class _FirstEmitThenHangStdout:
+    """Stdout mock that emits one line and then hangs forever."""
+
+    def __init__(self, first_line: bytes, delay_seconds: float = 0.0):
+        self._first_line = first_line
+        self._delay_seconds = delay_seconds
+        self._emitted = False
+
+    async def readline(self):
+        if not self._emitted:
+            self._emitted = True
+            if self._delay_seconds:
+                await asyncio.sleep(self._delay_seconds)
+            return self._first_line
+        future = asyncio.get_running_loop().create_future()
+        return await future
+
+
 class TestCLIRunnerExitCode:
     """Tests for CLIRunner handling of non-zero exit codes."""
 
-    def test_nonzero_exit_no_output_raises(self):
-        """CLI exits with error and no result → RuntimeError with stderr."""
+    def test_quota_exhausted_stderr_raises_quota_error(self):
+        """CLI quota stderr raises QuotaExhaustedError before generic exit handling."""
         events = []
         callback = JSONEventCallback(events.append)
         aggregator = ThinkingAggregator(callback, model="test-model")
 
         process = _make_process(
             stdout_lines=[],
-            stderr_lines=[b"TerminalQuotaError: quota exhausted\n"],
+            stderr_lines=[
+                b'TerminalQuotaError: quota exhausted {"retryDelayMs": 120000}\n'
+            ],
             return_code=1,
         )
 
@@ -271,13 +330,43 @@ class TestCLIRunnerExitCode:
                 AsyncMock(return_value=process),
             ),
             patch("think.providers.cli.shutil.which", return_value="/usr/bin/fakecli"),
-            pytest.raises(RuntimeError, match="quota exhausted"),
+            pytest.raises(QuotaExhaustedError, match="quota exhausted") as exc_info,
         ):
             asyncio.run(runner.run())
 
+        assert exc_info.value.retry_delay_ms == 120000
         # CLIRunner should NOT emit error events — that's the caller's job
         error_events = [e for e in events if e.get("event") == "error"]
         assert len(error_events) == 0
+
+    def test_quota_exhausted_stdout_raises_quota_error(self):
+        events = []
+        callback = JSONEventCallback(events.append)
+        aggregator = ThinkingAggregator(callback, model="test-model")
+        process = _make_process(
+            stdout_lines=[b'{"error":"QUOTA_EXHAUSTED","retryDelayMs":42}\n'],
+            stderr_lines=[],
+            return_code=1,
+        )
+        runner = CLIRunner(
+            cmd=["fakecli", "--json"],
+            prompt_text="test",
+            translate=lambda _e, _a, _c: None,
+            callback=callback,
+            aggregator=aggregator,
+        )
+
+        with (
+            patch(
+                "think.providers.cli.asyncio.create_subprocess_exec",
+                AsyncMock(return_value=process),
+            ),
+            patch("think.providers.cli.shutil.which", return_value="/usr/bin/fakecli"),
+            pytest.raises(QuotaExhaustedError) as exc_info,
+        ):
+            asyncio.run(runner.run())
+
+        assert exc_info.value.retry_delay_ms == 42
 
     def test_nonzero_exit_with_output_returns_result(self):
         """CLI exits with error but produced output → return result + warning."""
@@ -424,17 +513,67 @@ class TestCLIRunnerExitCode:
 
         assert captured_cwd == "/tmp"
 
+    def test_read_tool_budget_overflow_terminates_process_group(self):
+        events = []
+        callback = JSONEventCallback(events.append)
+        aggregator = ThinkingAggregator(callback, model="test-model")
+        stdout_lines = [
+            (json.dumps({"type": "tool_use", "tool_name": "read_file"}) + "\n").encode(
+                "utf-8"
+            )
+            for _ in range(201)
+        ]
+        process = _make_process(stdout_lines, [], 0)
+        translated = []
+
+        def translate(event, _agg, _cb):
+            translated.append(event)
+            return None
+
+        runner = CLIRunner(
+            cmd=["fakecli", "--json"],
+            prompt_text="test",
+            translate=translate,
+            callback=callback,
+            aggregator=aggregator,
+            read_call_budget=200,
+        )
+        runner._terminate_process_group = AsyncMock()
+
+        with (
+            patch(
+                "think.providers.cli.asyncio.create_subprocess_exec",
+                AsyncMock(return_value=process),
+            ),
+            patch("think.providers.cli.shutil.which", return_value="/usr/bin/fakecli"),
+            pytest.raises(RuntimeError) as exc_info,
+        ):
+            asyncio.run(runner.run())
+
+        assert "tool_budget_exhausted" in str(exc_info.value)
+        assert "(201/200)" in str(exc_info.value)
+        assert len(translated) == 200
+        exhausted = [
+            event for event in events if event["event"] == "tool_budget_exhausted"
+        ]
+        assert exhausted == [
+            {
+                "event": "tool_budget_exhausted",
+                "tool": "read_file",
+                "budget": 200,
+                "count": 201,
+                "read_tools": ["read_file", "glob", "list_directory", "grep_search"],
+                "ts": exhausted[0]["ts"],
+            }
+        ]
+        runner._terminate_process_group.assert_called_once_with(process)
+
 
 class TestCLIRunnerFirstEventTimeout:
     def test_first_event_timeout_includes_stderr(self):
         events = []
         callback = JSONEventCallback(events.append)
         aggregator = ThinkingAggregator(callback, model="test-model")
-
-        class HangingStdout:
-            async def readline(self):
-                future = asyncio.get_running_loop().create_future()
-                return await future
 
         process = _make_process([], [b"Please authenticate first\n"], 0)
         process.stdout = HangingStdout()  # Override with hanging version
@@ -448,6 +587,10 @@ class TestCLIRunnerFirstEventTimeout:
             timeout=5,
             first_event_timeout=0.1,
         )
+        # Force single-shot behavior to keep this test focused on the give-up
+        # surface; the new retry contract is covered in
+        # TestCLIRunnerFirstEventRetry.
+        runner._already_retried_first_event = True
 
         with (
             patch(
@@ -466,6 +609,220 @@ class TestCLIRunnerFirstEventTimeout:
         error_events = [event for event in events if event.get("event") == "error"]
         assert len(error_events) == 1
         assert "Please authenticate first" in error_events[0]["error"]
+
+
+class TestCLIRunnerFirstEventRetry:
+    @staticmethod
+    def _translate_text_event(event, agg, cb):
+        if event.get("type") == "text":
+            agg.accumulate(event["content"])
+            cb.emit({"event": "text", "text": event["content"]})
+        return None
+
+    def test_short_first_event_timeout_with_slow_first_emit_raises(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr("think.providers.cli._TIMEOUT_LOG_DIR", tmp_path)
+        events = []
+        callback = JSONEventCallback(events.append)
+        aggregator = ThinkingAggregator(callback, model="test-model")
+        slow_line = b'{"type": "text", "content": "slow"}\n'
+        process_one = _make_process([], [], 0)
+        process_one.stdout = _DelayedStdout([slow_line], delay_seconds=0.5)
+        process_two = _make_process([], [], 0)
+        process_two.stdout = _DelayedStdout([slow_line], delay_seconds=0.5)
+        runner = CLIRunner(
+            cmd=["fakecli", "--json"],
+            prompt_text="test",
+            translate=self._translate_text_event,
+            callback=callback,
+            aggregator=aggregator,
+            timeout=5,
+            first_event_timeout=0.05,
+        )
+
+        with (
+            patch(
+                "think.providers.cli.asyncio.create_subprocess_exec",
+                AsyncMock(side_effect=[process_one, process_two]),
+            ) as mock_create,
+            patch("think.providers.cli.shutil.which", return_value="/usr/bin/fakecli"),
+            pytest.raises(RuntimeError),
+        ):
+            asyncio.run(runner.run())
+
+        assert mock_create.call_count == 2
+
+    def test_first_event_timeout_with_headroom_succeeds(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("think.providers.cli._TIMEOUT_LOG_DIR", tmp_path)
+        events = []
+        callback = JSONEventCallback(events.append)
+        aggregator = ThinkingAggregator(callback, model="test-model")
+        line = b'{"type": "text", "content": "headroom"}\n'
+        process = _make_process([], [], 0)
+        process.stdout = _DelayedStdout([line], delay_seconds=0.05)
+        runner = CLIRunner(
+            cmd=["fakecli", "--json"],
+            prompt_text="test",
+            translate=self._translate_text_event,
+            callback=callback,
+            aggregator=aggregator,
+            timeout=5,
+            first_event_timeout=1.0,
+        )
+
+        with (
+            patch(
+                "think.providers.cli.asyncio.create_subprocess_exec",
+                AsyncMock(return_value=process),
+            ) as mock_create,
+            patch("think.providers.cli.shutil.which", return_value="/usr/bin/fakecli"),
+        ):
+            result = asyncio.run(runner.run())
+
+        assert result == "headroom"
+        assert mock_create.call_count == 1
+        assert runner._already_retried_first_event is False
+
+    def test_first_event_timeout_triggers_one_retry(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("think.providers.cli._TIMEOUT_LOG_DIR", tmp_path)
+        events = []
+        callback = JSONEventCallback(events.append)
+        aggregator = ThinkingAggregator(callback, model="test-model")
+        hanging_proc_1 = _make_process([], [], 0)
+        hanging_proc_1.stdout = HangingStdout()
+        hanging_proc_2 = _make_process([], [], 0)
+        hanging_proc_2.stdout = HangingStdout()
+        runner = CLIRunner(
+            cmd=["fakecli", "--json"],
+            prompt_text="test",
+            translate=self._translate_text_event,
+            callback=callback,
+            aggregator=aggregator,
+            timeout=5,
+            first_event_timeout=0.05,
+        )
+
+        with (
+            patch(
+                "think.providers.cli.asyncio.create_subprocess_exec",
+                AsyncMock(side_effect=[hanging_proc_1, hanging_proc_2]),
+            ) as mock_create,
+            patch("think.providers.cli.shutil.which", return_value="/usr/bin/fakecli"),
+            pytest.raises(RuntimeError),
+        ):
+            asyncio.run(runner.run())
+
+        assert mock_create.call_count == 2
+        assert runner._already_retried_first_event is True
+
+    def test_retry_succeeds_when_second_spawn_emits(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("think.providers.cli._TIMEOUT_LOG_DIR", tmp_path)
+        events = []
+        callback = JSONEventCallback(events.append)
+        aggregator = ThinkingAggregator(callback, model="test-model")
+        hanging_proc = _make_process([], [], 0)
+        hanging_proc.stdout = HangingStdout()
+        healthy_proc = _make_process([], [], 0)
+        healthy_proc.stdout = _DelayedStdout(
+            [b'{"type": "text", "content": "retry ok"}\n'],
+            delay_seconds=0.01,
+        )
+        runner = CLIRunner(
+            cmd=["fakecli", "--json"],
+            prompt_text="test",
+            translate=self._translate_text_event,
+            callback=callback,
+            aggregator=aggregator,
+            timeout=5,
+            first_event_timeout=0.05,
+        )
+
+        with (
+            patch(
+                "think.providers.cli.asyncio.create_subprocess_exec",
+                AsyncMock(side_effect=[hanging_proc, healthy_proc]),
+            ) as mock_create,
+            patch("think.providers.cli.shutil.which", return_value="/usr/bin/fakecli"),
+        ):
+            result = asyncio.run(runner.run())
+
+        assert result == "retry ok"
+        assert mock_create.call_count == 2
+        assert runner._already_retried_first_event is True
+        assert [event for event in events if event.get("event") == "text"]
+
+    def test_timeout_log_redacts_env_values_and_prompt(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("think.providers.cli._TIMEOUT_LOG_DIR", tmp_path)
+        events = []
+        callback = JSONEventCallback(events.append)
+        aggregator = ThinkingAggregator(callback, model="test-model")
+        hanging_proc_1 = _make_process([], [], 0)
+        hanging_proc_1.stdout = HangingStdout()
+        hanging_proc_2 = _make_process([], [], 0)
+        hanging_proc_2.stdout = HangingStdout()
+        runner = CLIRunner(
+            cmd=["fakecli", "--json"],
+            prompt_text="prompt-do-not-leak-67890",
+            translate=self._translate_text_event,
+            callback=callback,
+            aggregator=aggregator,
+            env={"FAKE_KEY": "do-not-leak-me-12345"},
+            timeout=5,
+            first_event_timeout=0.05,
+        )
+
+        with (
+            patch(
+                "think.providers.cli.asyncio.create_subprocess_exec",
+                AsyncMock(side_effect=[hanging_proc_1, hanging_proc_2]),
+            ),
+            patch("think.providers.cli.shutil.which", return_value="/usr/bin/fakecli"),
+            pytest.raises(RuntimeError),
+        ):
+            asyncio.run(runner.run())
+
+        files = list(tmp_path.glob("gemini-cogitate-timeout-*.log"))
+        assert len(files) == 2
+        for file_path in files:
+            content = file_path.read_text()
+            assert "FAKE_KEY" in content
+            assert "do-not-leak-me-12345" not in content
+            assert "prompt-do-not-leak-67890" not in content
+            assert file_path.stat().st_mode & 0o777 == 0o600
+
+    def test_full_run_timeout_writes_log(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("think.providers.cli._TIMEOUT_LOG_DIR", tmp_path)
+        events = []
+        callback = JSONEventCallback(events.append)
+        aggregator = ThinkingAggregator(callback, model="test-model")
+        process = _make_process([], [], 0)
+        process.stdout = _FirstEmitThenHangStdout(
+            b'{"type": "text", "content": "first line"}\n'
+        )
+        runner = CLIRunner(
+            cmd=["fakecli", "--json"],
+            prompt_text="test",
+            translate=self._translate_text_event,
+            callback=callback,
+            aggregator=aggregator,
+            timeout=0.05,
+            first_event_timeout=1.0,
+        )
+
+        with (
+            patch(
+                "think.providers.cli.asyncio.create_subprocess_exec",
+                AsyncMock(return_value=process),
+            ),
+            patch("think.providers.cli.shutil.which", return_value="/usr/bin/fakecli"),
+            pytest.raises(RuntimeError),
+        ):
+            asyncio.run(runner.run())
+
+        files = list(tmp_path.glob("gemini-cogitate-timeout-*.log"))
+        assert len(files) == 1
+        assert "which_timeout: full_run" in files[0].read_text()
 
 
 _OVERSIZE = object()  # sentinel for oversize line in _MockStdoutWithOversize
@@ -655,6 +1012,116 @@ class TestSafeRaw:
 # ---------------------------------------------------------------------------
 
 
+def test_build_cogitate_env_allowlist_anthropic():
+    config = {"providers": {"auth": {"anthropic": "api_key"}}}
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "PATH": "/bin",
+                "HOME": "/home/test",
+                "ANTHROPIC_API_KEY": "sk-ant",
+                "CLAUDE_CONFIG_DIR": "/tmp/claude",
+                "OPENAI_API_KEY": "sk-oai",
+                "GOOGLE_API_KEY": "gk",
+                "HTTPS_PROXY": "http://proxy",
+            },
+            clear=True,
+        ),
+        patch("think.utils.get_config", return_value=config),
+    ):
+        env = build_cogitate_env("anthropic")
+
+    assert env["ANTHROPIC_API_KEY"] == "sk-ant"
+    assert env["CLAUDE_CONFIG_DIR"] == "/tmp/claude"
+    assert env["PATH"] == "/bin"
+    assert "OPENAI_API_KEY" not in env
+    assert "GOOGLE_API_KEY" not in env
+    assert "HTTPS_PROXY" not in env
+
+
+def test_build_cogitate_env_allowlist_openai():
+    config = {"providers": {"auth": {"openai": "api_key"}}}
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "PATH": "/bin",
+                "OPENAI_API_KEY": "sk-oai",
+                "OPENAI_ORG_ID": "org",
+                "ANTHROPIC_API_KEY": "sk-ant",
+                "GOOGLE_API_KEY": "gk",
+                "NODE_OPTIONS": "--inspect",
+            },
+            clear=True,
+        ),
+        patch("think.utils.get_config", return_value=config),
+    ):
+        env = build_cogitate_env("openai")
+
+    assert env["OPENAI_API_KEY"] == "sk-oai"
+    assert env["OPENAI_ORG_ID"] == "org"
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "GOOGLE_API_KEY" not in env
+    assert "NODE_OPTIONS" not in env
+
+
+def test_build_cogitate_env_allowlist_google():
+    config = {
+        "providers": {
+            "google_backend": "aistudio",
+            "auth": {"google": "api_key"},
+        }
+    }
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "PATH": "/bin",
+                "GOOGLE_API_KEY": "gk",
+                "GEMINI_HOME": "/tmp/gemini",
+                "VERTEX_REGION": "global",
+                "OPENAI_API_KEY": "sk-oai",
+                "ANTHROPIC_API_KEY": "sk-ant",
+                "HTTPS_PROXY": "http://proxy",
+            },
+            clear=True,
+        ),
+        patch("think.utils.get_config", return_value=config),
+    ):
+        env = build_cogitate_env("google")
+
+    assert env["GOOGLE_API_KEY"] == "gk"
+    assert env["GEMINI_HOME"] == "/tmp/gemini"
+    assert env["VERTEX_REGION"] == "global"
+    assert "OPENAI_API_KEY" not in env
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "HTTPS_PROXY" not in env
+
+
+def test_build_cogitate_env_vertex_strict_validation_raises():
+    config = {
+        "providers": {
+            "google_backend": "vertex",
+            "vertex_credentials": "/tmp/missing-sa.json",
+            "auth": {"google": "platform"},
+        }
+    }
+    with (
+        patch.dict(os.environ, {"GOOGLE_API_KEY": "gk-test"}, clear=True),
+        patch("think.utils.get_config", return_value=config),
+        patch("os.path.exists", return_value=False),
+        pytest.raises(
+            ValueError,
+            match=(
+                r"^Vertex provider configured but no usable SA credentials at "
+                r"/tmp/missing-sa\.json$"
+            ),
+        ),
+    ):
+        build_cogitate_env("google")
+
+
 class TestBuildCogitateEnv:
     """Tests for build_cogitate_env — API key stripping for CLI subprocesses."""
 
@@ -665,7 +1132,7 @@ class TestBuildCogitateEnv:
             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-secret"}, clear=False),
             patch("think.utils.get_config", return_value=config),
         ):
-            env = build_cogitate_env("ANTHROPIC_API_KEY")
+            env = build_cogitate_env("anthropic")
         assert "ANTHROPIC_API_KEY" not in env
 
     def test_explicit_platform_strips_key(self):
@@ -675,7 +1142,7 @@ class TestBuildCogitateEnv:
             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-secret"}, clear=False),
             patch("think.utils.get_config", return_value=config),
         ):
-            env = build_cogitate_env("ANTHROPIC_API_KEY")
+            env = build_cogitate_env("anthropic")
         assert "ANTHROPIC_API_KEY" not in env
 
     def test_api_key_mode_preserves_key(self):
@@ -685,7 +1152,7 @@ class TestBuildCogitateEnv:
             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-secret"}, clear=False),
             patch("think.utils.get_config", return_value=config),
         ):
-            env = build_cogitate_env("ANTHROPIC_API_KEY")
+            env = build_cogitate_env("anthropic")
         assert env["ANTHROPIC_API_KEY"] == "sk-secret"
 
     def test_missing_auth_section_strips_key(self):
@@ -695,7 +1162,7 @@ class TestBuildCogitateEnv:
             patch.dict(os.environ, {"OPENAI_API_KEY": "sk-openai"}, clear=False),
             patch("think.utils.get_config", return_value=config),
         ):
-            env = build_cogitate_env("OPENAI_API_KEY")
+            env = build_cogitate_env("openai")
         assert "OPENAI_API_KEY" not in env
 
     def test_other_env_vars_preserved(self):
@@ -709,7 +1176,7 @@ class TestBuildCogitateEnv:
             ),
             patch("think.utils.get_config", return_value=config),
         ):
-            env = build_cogitate_env("ANTHROPIC_API_KEY")
+            env = build_cogitate_env("anthropic")
         assert env["HOME"] == "/home/test"
 
     def test_key_not_in_env_is_harmless(self):
@@ -719,7 +1186,7 @@ class TestBuildCogitateEnv:
             patch.dict(os.environ, {}, clear=False),
             patch("think.utils.get_config", return_value=config),
         ):
-            env = build_cogitate_env("GOOGLE_API_KEY")
+            env = build_cogitate_env("google")
         assert "GOOGLE_API_KEY" not in env
 
     def test_per_provider_independence(self):
@@ -740,8 +1207,8 @@ class TestBuildCogitateEnv:
             ),
             patch("think.utils.get_config", return_value=config),
         ):
-            ant_env = build_cogitate_env("ANTHROPIC_API_KEY")
-            oai_env = build_cogitate_env("OPENAI_API_KEY")
+            ant_env = build_cogitate_env("anthropic")
+            oai_env = build_cogitate_env("openai")
         assert ant_env["ANTHROPIC_API_KEY"] == "sk-ant"
         assert "OPENAI_API_KEY" not in oai_env
 
@@ -750,14 +1217,23 @@ class TestBuildCogitateEnv:
         config = {
             "providers": {
                 "google_backend": "vertex",
+                "vertex_credentials": "/tmp/fake-sa.json",
                 "auth": {"google": "platform"},
             }
         }
         with (
             patch.dict(os.environ, {"GOOGLE_API_KEY": "gk-test"}, clear=True),
             patch("think.utils.get_config", return_value=config),
+            patch("os.path.exists", return_value=True),
+            patch(
+                "builtins.open",
+                mock_open(
+                    read_data='{"type": "service_account", "project_id": "my-gcp-project"}'
+                ),
+            ),
+            patch.object(Path, "exists", return_value=True),
         ):
-            env = build_cogitate_env("GOOGLE_API_KEY")
+            env = build_cogitate_env("google")
         assert env["GOOGLE_GENAI_USE_VERTEXAI"] == "true"
         assert "GOOGLE_API_KEY" not in env
 
@@ -774,8 +1250,15 @@ class TestBuildCogitateEnv:
             patch.dict(os.environ, {"GOOGLE_API_KEY": "gk-test"}, clear=True),
             patch("think.utils.get_config", return_value=config),
             patch("os.path.exists", return_value=True),
+            patch(
+                "builtins.open",
+                mock_open(
+                    read_data='{"type": "service_account", "project_id": "my-gcp-project"}'
+                ),
+            ),
+            patch.object(Path, "exists", return_value=True),
         ):
-            env = build_cogitate_env("GOOGLE_API_KEY")
+            env = build_cogitate_env("google")
         assert env["GOOGLE_GENAI_USE_VERTEXAI"] == "true"
         assert env["GOOGLE_APPLICATION_CREDENTIALS"] == "/tmp/fake-sa.json"
         assert "GOOGLE_API_KEY" not in env
@@ -792,19 +1275,32 @@ class TestBuildCogitateEnv:
             patch.dict(os.environ, {"GOOGLE_API_KEY": "gk-test"}, clear=True),
             patch("think.utils.get_config", return_value=config),
         ):
-            env = build_cogitate_env("GOOGLE_API_KEY")
+            env = build_cogitate_env("google")
         assert "GOOGLE_GENAI_USE_VERTEXAI" not in env
         assert env["GOOGLE_API_KEY"] == "gk-test"
 
     def test_auto_backend_detects_vertex(self):
         """Auto backend with Vertex detection sets env vars."""
-        config = {"providers": {"auth": {"google": "platform"}}}
+        config = {
+            "providers": {
+                "auth": {"google": "platform"},
+                "vertex_credentials": "/tmp/fake-sa.json",
+            }
+        }
         with (
             patch.dict(os.environ, {"GOOGLE_API_KEY": "gk-test"}, clear=True),
             patch("think.utils.get_config", return_value=config),
             patch("think.providers.google._detect_backend", return_value="vertex"),
+            patch("os.path.exists", return_value=True),
+            patch(
+                "builtins.open",
+                mock_open(
+                    read_data='{"type": "service_account", "project_id": "my-gcp-project"}'
+                ),
+            ),
+            patch.object(Path, "exists", return_value=True),
         ):
-            env = build_cogitate_env("GOOGLE_API_KEY")
+            env = build_cogitate_env("google")
         assert env["GOOGLE_GENAI_USE_VERTEXAI"] == "true"
         assert "GOOGLE_API_KEY" not in env
 
@@ -820,7 +1316,7 @@ class TestBuildCogitateEnv:
             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant"}, clear=True),
             patch("think.utils.get_config", return_value=config),
         ):
-            env = build_cogitate_env("ANTHROPIC_API_KEY")
+            env = build_cogitate_env("anthropic")
         assert "GOOGLE_GENAI_USE_VERTEXAI" not in env
         assert env["ANTHROPIC_API_KEY"] == "sk-ant"
 
@@ -843,8 +1339,9 @@ class TestBuildCogitateEnv:
                     read_data='{"type": "service_account", "project_id": "my-gcp-project"}'
                 ),
             ),
+            patch.object(Path, "exists", return_value=True),
         ):
-            env = build_cogitate_env("GOOGLE_API_KEY")
+            env = build_cogitate_env("google")
         assert env["GOOGLE_GENAI_USE_VERTEXAI"] == "true"
         assert env["GOOGLE_APPLICATION_CREDENTIALS"] == "/tmp/fake-sa.json"
         assert env["GOOGLE_CLOUD_PROJECT"] == "my-gcp-project"
@@ -852,7 +1349,7 @@ class TestBuildCogitateEnv:
         assert "GOOGLE_API_KEY" not in env
 
     def test_vertex_backend_missing_creds_no_project(self):
-        """Vertex backend still sets location without explicit SA credentials."""
+        """Vertex backend raises without explicit SA credentials."""
         config = {
             "providers": {
                 "google_backend": "vertex",
@@ -862,13 +1359,17 @@ class TestBuildCogitateEnv:
         with (
             patch.dict(os.environ, {"GOOGLE_API_KEY": "gk-test"}, clear=True),
             patch("think.utils.get_config", return_value=config),
+            pytest.raises(
+                ValueError,
+                match=(
+                    r"^Vertex provider configured but no usable SA credentials at None$"
+                ),
+            ),
         ):
-            env = build_cogitate_env("GOOGLE_API_KEY")
-        assert "GOOGLE_CLOUD_PROJECT" not in env
-        assert env["GOOGLE_CLOUD_LOCATION"] == "global"
+            build_cogitate_env("google")
 
     def test_vertex_backend_invalid_sa_json_no_project(self):
-        """Invalid SA JSON logs and skips project configuration."""
+        """Invalid SA JSON raises before spawning Gemini CLI."""
         config = {
             "providers": {
                 "google_backend": "vertex",
@@ -881,13 +1382,18 @@ class TestBuildCogitateEnv:
             patch("think.utils.get_config", return_value=config),
             patch("os.path.exists", return_value=True),
             patch("builtins.open", mock_open(read_data="not json")),
+            pytest.raises(
+                ValueError,
+                match=(
+                    r"^Vertex provider configured but no usable SA credentials at "
+                    r"/tmp/fake-sa\.json$"
+                ),
+            ),
         ):
-            env = build_cogitate_env("GOOGLE_API_KEY")
-        assert "GOOGLE_CLOUD_PROJECT" not in env
-        assert env["GOOGLE_CLOUD_LOCATION"] == "global"
+            build_cogitate_env("google")
 
     def test_vertex_backend_sa_missing_project_id(self):
-        """Missing project_id in SA JSON leaves project env unset."""
+        """Missing project_id in SA JSON raises before spawning Gemini CLI."""
         config = {
             "providers": {
                 "google_backend": "vertex",
@@ -907,10 +1413,15 @@ class TestBuildCogitateEnv:
                     )
                 ),
             ),
+            pytest.raises(
+                ValueError,
+                match=(
+                    r"^Vertex provider configured but no usable SA credentials at "
+                    r"/tmp/fake-sa\.json$"
+                ),
+            ),
         ):
-            env = build_cogitate_env("GOOGLE_API_KEY")
-        assert "GOOGLE_CLOUD_PROJECT" not in env
-        assert env["GOOGLE_CLOUD_LOCATION"] == "global"
+            build_cogitate_env("google")
 
     def test_aistudio_clears_project_and_location(self):
         """AI Studio clears inherited Vertex project context."""
@@ -932,7 +1443,7 @@ class TestBuildCogitateEnv:
             ),
             patch("think.utils.get_config", return_value=config),
         ):
-            env = build_cogitate_env("GOOGLE_API_KEY")
+            env = build_cogitate_env("google")
         assert "GOOGLE_CLOUD_PROJECT" not in env
         assert "GOOGLE_CLOUD_LOCATION" not in env
 
@@ -941,6 +1452,7 @@ class TestBuildCogitateEnv:
         config = {
             "providers": {
                 "google_backend": "vertex",
+                "vertex_credentials": "/tmp/fake-sa.json",
                 "auth": {"google": "platform"},
             }
         }
@@ -948,9 +1460,16 @@ class TestBuildCogitateEnv:
             patch.dict(os.environ, {"GOOGLE_API_KEY": "gk-test"}, clear=True),
             patch("think.utils.get_config", return_value=config),
             patch("think.utils.get_journal", return_value="/fake/journal"),
+            patch("os.path.exists", return_value=True),
+            patch(
+                "builtins.open",
+                mock_open(
+                    read_data='{"type": "service_account", "project_id": "my-gcp-project"}'
+                ),
+            ),
             patch.object(Path, "exists", return_value=True),
         ):
-            env = build_cogitate_env("GOOGLE_API_KEY")
+            env = build_cogitate_env("google")
         assert (
             env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"]
             == "/fake/journal/.config/gemini-vertex-settings.json"
@@ -968,7 +1487,7 @@ class TestBuildCogitateEnv:
             patch.dict(os.environ, {"GOOGLE_API_KEY": "gk-test"}, clear=True),
             patch("think.utils.get_config", return_value=config),
         ):
-            env = build_cogitate_env("GOOGLE_API_KEY")
+            env = build_cogitate_env("google")
         assert "GEMINI_CLI_SYSTEM_SETTINGS_PATH" not in env
 
     def test_aistudio_clears_inherited_system_settings_path(self):
@@ -990,57 +1509,63 @@ class TestBuildCogitateEnv:
             ),
             patch("think.utils.get_config", return_value=config),
         ):
-            env = build_cogitate_env("GOOGLE_API_KEY")
+            env = build_cogitate_env("google")
         assert "GEMINI_CLI_SYSTEM_SETTINGS_PATH" not in env
 
-    def test_vertex_writes_settings_file_when_absent(self):
+    def test_vertex_writes_settings_file_when_absent(self, tmp_path):
         """Vertex backend creates Gemini CLI system settings when missing."""
+        creds_path = tmp_path / "fake-sa.json"
+        creds_path.write_text(
+            '{"type": "service_account", "project_id": "my-gcp-project"}',
+            encoding="utf-8",
+        )
+        journal_path = tmp_path / "journal"
         config = {
             "providers": {
                 "google_backend": "vertex",
+                "vertex_credentials": str(creds_path),
                 "auth": {"google": "platform"},
             }
         }
         with (
             patch.dict(os.environ, {"GOOGLE_API_KEY": "gk-test"}, clear=True),
             patch("think.utils.get_config", return_value=config),
-            patch("think.utils.get_journal", return_value="/fake/journal"),
-            patch.object(Path, "exists", return_value=False),
-            patch("os.makedirs") as mock_mkdirs,
-            patch("builtins.open", mock_open()) as mock_file,
-            patch("os.chmod") as mock_chmod,
+            patch("think.utils.get_journal", return_value=str(journal_path)),
         ):
-            env = build_cogitate_env("GOOGLE_API_KEY")
-        written = "".join(call.args[0] for call in mock_file().write.call_args_list)
+            env = build_cogitate_env("google")
         assert env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"] == (
-            "/fake/journal/.config/gemini-vertex-settings.json"
+            str(journal_path / ".config" / "gemini-vertex-settings.json")
         )
-        assert mock_mkdirs.called
-        assert mock_file.called
+        written = (journal_path / ".config" / "gemini-vertex-settings.json").read_text(
+            encoding="utf-8"
+        )
         assert json.loads(written) == {
             "security": {"auth": {"selectedType": "vertex-ai"}}
         }
-        mock_chmod.assert_called_once_with(
-            "/fake/journal/.config/gemini-vertex-settings.json", 0o600
-        )
 
-    def test_vertex_skips_settings_write_when_exists(self):
+    def test_vertex_skips_settings_write_when_exists(self, tmp_path):
         """Vertex backend does not rewrite existing Gemini CLI settings."""
+        creds_path = tmp_path / "fake-sa.json"
+        creds_path.write_text(
+            '{"type": "service_account", "project_id": "my-gcp-project"}',
+            encoding="utf-8",
+        )
+        journal_path = tmp_path / "journal"
+        settings_path = journal_path / ".config" / "gemini-vertex-settings.json"
+        settings_path.parent.mkdir(parents=True)
+        settings_path.write_text('{"existing": true}', encoding="utf-8")
         config = {
             "providers": {
                 "google_backend": "vertex",
+                "vertex_credentials": str(creds_path),
                 "auth": {"google": "platform"},
             }
         }
         with (
             patch.dict(os.environ, {"GOOGLE_API_KEY": "gk-test"}, clear=True),
             patch("think.utils.get_config", return_value=config),
-            patch("think.utils.get_journal", return_value="/fake/journal"),
-            patch.object(Path, "exists", return_value=True),
-            patch("builtins.open", mock_open()) as mock_file,
+            patch("think.utils.get_journal", return_value=str(journal_path)),
         ):
-            env = build_cogitate_env("GOOGLE_API_KEY")
-        assert env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"] == (
-            "/fake/journal/.config/gemini-vertex-settings.json"
-        )
-        mock_file.assert_not_called()
+            env = build_cogitate_env("google")
+        assert env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"] == (str(settings_path))
+        assert settings_path.read_text(encoding="utf-8") == '{"existing": true}'

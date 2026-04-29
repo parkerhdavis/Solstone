@@ -28,7 +28,7 @@ class TestRunActivityPrompts:
         from think.thinking import run_activity_prompts
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", tmpdir)
+            monkeypatch.setenv("SOLSTONE_JOURNAL", tmpdir)
 
             result = run_activity_prompts(
                 day="20260209",
@@ -41,7 +41,7 @@ class TestRunActivityPrompts:
         from think.thinking import run_activity_prompts
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", tmpdir)
+            monkeypatch.setenv("SOLSTONE_JOURNAL", tmpdir)
 
             self._write_record(
                 tmpdir,
@@ -73,7 +73,7 @@ class TestRunActivityPrompts:
         from think.thinking import run_activity_prompts
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", tmpdir)
+            monkeypatch.setenv("SOLSTONE_JOURNAL", tmpdir)
 
             self._write_record(
                 tmpdir,
@@ -135,7 +135,7 @@ class TestRunActivityPrompts:
         from think.thinking import run_activity_prompts
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", tmpdir)
+            monkeypatch.setenv("SOLSTONE_JOURNAL", tmpdir)
 
             self._write_record(
                 tmpdir,
@@ -189,7 +189,7 @@ class TestRunActivityPrompts:
         from think.thinking import run_activity_prompts
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", tmpdir)
+            monkeypatch.setenv("SOLSTONE_JOURNAL", tmpdir)
 
             record = {
                 "id": "coding_100000_300",
@@ -252,7 +252,7 @@ class TestRunActivityPrompts:
         from think.thinking import run_activity_prompts
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", tmpdir)
+            monkeypatch.setenv("SOLSTONE_JOURNAL", tmpdir)
 
             self._write_record(
                 tmpdir,
@@ -300,7 +300,7 @@ class TestRunActivityPrompts:
         from think.thinking import run_activity_prompts
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", tmpdir)
+            monkeypatch.setenv("SOLSTONE_JOURNAL", tmpdir)
 
             self._write_record(
                 tmpdir,
@@ -328,7 +328,7 @@ class TestRunActivityPrompts:
         from think.thinking import run_activity_prompts
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", tmpdir)
+            monkeypatch.setenv("SOLSTONE_JOURNAL", tmpdir)
 
             self._write_record(
                 tmpdir,
@@ -362,7 +362,7 @@ class TestRunActivityPrompts:
         from think.thinking import run_activity_prompts
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", tmpdir)
+            monkeypatch.setenv("SOLSTONE_JOURNAL", tmpdir)
 
             self._write_record(
                 tmpdir,
@@ -446,7 +446,7 @@ class TestRunActivityPrompts:
         from think.thinking import run_activity_prompts
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", tmpdir)
+            monkeypatch.setenv("SOLSTONE_JOURNAL", tmpdir)
 
             activity_id = f"{activity_type}_100000_300"
             self._write_record(
@@ -520,7 +520,7 @@ class TestRunActivityPrompts:
         from think.thinking import run_activity_prompts
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", tmpdir)
+            monkeypatch.setenv("SOLSTONE_JOURNAL", tmpdir)
 
             configs = {
                 "work": {
@@ -611,7 +611,7 @@ class TestRunActivityPrompts:
         from think.thinking import run_activity_prompts
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", tmpdir)
+            monkeypatch.setenv("SOLSTONE_JOURNAL", tmpdir)
 
             full_record = {
                 "description": "skip me",
@@ -675,7 +675,7 @@ class TestActivityPersistence:
         from think.activity_state_machine import ActivityStateMachine
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", tmpdir)
+            monkeypatch.setenv("SOLSTONE_JOURNAL", tmpdir)
 
             sm = ActivityStateMachine()
             sm.update(
@@ -714,7 +714,7 @@ class TestActivityPersistence:
             # Find the ended change
             ended = [c for c in changes if c.get("state") == "ended"]
             assert len(ended) == 1
-            facet = ended[0]["_facet"]
+            facet = ended[0]["facet"]
 
             # Persist completed record (what thinking.py now does)
             completed = sm.get_completed_activities()
@@ -761,7 +761,7 @@ class TestActivityPersistenceRoundTrip:
         from think.activity_state_machine import ActivityStateMachine
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", tmpdir)
+            monkeypatch.setenv("SOLSTONE_JOURNAL", tmpdir)
 
             sm = ActivityStateMachine()
             sm.update(self._sense(content_type="coding"), "090000_300", "20260304")
@@ -777,9 +777,7 @@ class TestActivityPersistenceRoundTrip:
 
             # Simulate thinking.py facet_by_id logic
             facet_by_id = {
-                c["id"]: c.get("_facet", "__")
-                for c in changes
-                if c.get("state") == "ended"
+                c["id"]: c["facet"] for c in changes if c.get("state") == "ended"
             }
             for rec in sm.get_completed_activities():
                 if rec["id"] in facet_by_id:
@@ -800,7 +798,7 @@ class TestActivityPersistenceRoundTrip:
         from think.activity_state_machine import ActivityStateMachine
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", tmpdir)
+            monkeypatch.setenv("SOLSTONE_JOURNAL", tmpdir)
 
             sm = ActivityStateMachine()
             sm.update(self._sense(content_type="coding"), "090000_300", "20260304")
@@ -808,9 +806,7 @@ class TestActivityPersistenceRoundTrip:
             changes = sm.update(self._sense(density="idle"), "091000_300", "20260304")
 
             facet_by_id = {
-                c["id"]: c.get("_facet", "__")
-                for c in changes
-                if c.get("state") == "ended"
+                c["id"]: c["facet"] for c in changes if c.get("state") == "ended"
             }
             for rec in sm.get_completed_activities():
                 if rec["id"] in facet_by_id:
@@ -826,7 +822,7 @@ class TestActivityPersistenceRoundTrip:
         from think.activity_state_machine import ActivityStateMachine
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", tmpdir)
+            monkeypatch.setenv("SOLSTONE_JOURNAL", tmpdir)
 
             sm = ActivityStateMachine()
             sm.update(self._sense(content_type="coding"), "090000_300", "20260304")
@@ -850,7 +846,7 @@ class TestActivityPersistenceRoundTrip:
         from think.activity_state_machine import ActivityStateMachine
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", tmpdir)
+            monkeypatch.setenv("SOLSTONE_JOURNAL", tmpdir)
 
             sm = ActivityStateMachine()
             # Activity 1 ends
@@ -859,9 +855,7 @@ class TestActivityPersistenceRoundTrip:
                 self._sense(content_type="meeting"), "090500_300", "20260304"
             )
             facet_by_id = {
-                c["id"]: c.get("_facet", "__")
-                for c in changes1
-                if c.get("state") == "ended"
+                c["id"]: c["facet"] for c in changes1 if c.get("state") == "ended"
             }
             for rec in sm.get_completed_activities():
                 if rec["id"] in facet_by_id:
@@ -873,9 +867,7 @@ class TestActivityPersistenceRoundTrip:
             )
             # No ended changes in this update
             facet_by_id2 = {
-                c["id"]: c.get("_facet", "__")
-                for c in changes2
-                if c.get("state") == "ended"
+                c["id"]: c["facet"] for c in changes2 if c.get("state") == "ended"
             }
             # get_completed_activities() still returns activity 1, but
             # facet_by_id2 is empty so nothing should be re-written
@@ -892,7 +884,7 @@ class TestActivityPersistenceRoundTrip:
         from think.activity_state_machine import ActivityStateMachine
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", tmpdir)
+            monkeypatch.setenv("SOLSTONE_JOURNAL", tmpdir)
 
             entities = [
                 {"type": "Person", "name": "Alice", "context": "dev"},
@@ -923,34 +915,6 @@ class TestActivityPersistenceRoundTrip:
             assert loaded["active_entities"] == rec["active_entities"]
             assert loaded["created_at"] == rec["created_at"]
 
-    def test_pseudo_facet_persistence(self, monkeypatch):
-        """Activities with no facets use '__' pseudo-facet for persistence."""
-        from think.activities import append_activity_record, load_activity_records
-        from think.activity_state_machine import ActivityStateMachine
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", tmpdir)
-
-            sm = ActivityStateMachine()
-            sm.update(
-                self._sense(content_type="coding", facets=[]), "090000_300", "20260304"
-            )
-            changes = sm.update(self._sense(density="idle"), "090500_300", "20260304")
-
-            facet_by_id = {
-                c["id"]: c.get("_facet", "__")
-                for c in changes
-                if c.get("state") == "ended"
-            }
-            for rec in sm.get_completed_activities():
-                if rec["id"] in facet_by_id:
-                    append_activity_record(facet_by_id[rec["id"]], "20260304", rec)
-
-            # Record lands under the "__" pseudo-facet
-            records = load_activity_records("__", "20260304")
-            assert len(records) == 1
-            assert records[0]["activity"] == "coding"
-
     def test_multi_facet_ending_persists_both(self, monkeypatch):
         """Multiple facets ending simultaneously all persist correctly.
 
@@ -962,7 +926,7 @@ class TestActivityPersistenceRoundTrip:
         from think.activity_state_machine import ActivityStateMachine
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", tmpdir)
+            monkeypatch.setenv("SOLSTONE_JOURNAL", tmpdir)
 
             two = [
                 {"facet": "work", "activity": "coding", "level": "high"},
@@ -976,9 +940,7 @@ class TestActivityPersistenceRoundTrip:
 
             # Use the fixed ended_pairs approach (matches thinking.py)
             ended_pairs = [
-                (c["id"], c.get("_facet", "__"))
-                for c in changes
-                if c.get("state") == "ended"
+                (c["id"], c["facet"]) for c in changes if c.get("state") == "ended"
             ]
             completed_lookup = {}
             for rec in sm.get_completed_activities():
@@ -1011,7 +973,7 @@ class TestCreatedAtRoutesCompat:
         from think.activity_state_machine import ActivityStateMachine
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", tmpdir)
+            monkeypatch.setenv("SOLSTONE_JOURNAL", tmpdir)
 
             sm = ActivityStateMachine()
             sm.update(
@@ -1074,7 +1036,7 @@ class TestCreatedAtRoutesCompat:
         from think.activity_state_machine import ActivityStateMachine
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", tmpdir)
+            monkeypatch.setenv("SOLSTONE_JOURNAL", tmpdir)
 
             sm = ActivityStateMachine()
             sm.update(
@@ -1111,9 +1073,7 @@ class TestCreatedAtRoutesCompat:
             )
             # Persist first completed
             facet_by_id = {
-                c["id"]: c.get("_facet", "__")
-                for c in changes1
-                if c.get("state") == "ended"
+                c["id"]: c["facet"] for c in changes1 if c.get("state") == "ended"
             }
             for rec in sm.get_completed_activities():
                 if rec["id"] in facet_by_id:
@@ -1139,9 +1099,7 @@ class TestCreatedAtRoutesCompat:
                 "20260304",
             )
             facet_by_id2 = {
-                c["id"]: c.get("_facet", "__")
-                for c in changes2
-                if c.get("state") == "ended"
+                c["id"]: c["facet"] for c in changes2 if c.get("state") == "ended"
             }
             for rec in sm.get_completed_activities():
                 if rec["id"] in facet_by_id2:
@@ -1235,7 +1193,7 @@ class TestActivityTemplateVars:
     def test_facet_and_activity_md_dir_populated(self, monkeypatch, tmp_path):
         from think.talents import _build_prompt_context
 
-        monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+        monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
 
         ctx = _build_prompt_context(
             day="20260418",
@@ -1266,7 +1224,7 @@ def test_prepare_config_substitutes_facet_and_activity_md_dir_for_daily_cogitate
 
     mod = importlib.import_module("think.talents")
 
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
     day_dir = day_path("20260418")
     day_dir.mkdir(parents=True, exist_ok=True)
 

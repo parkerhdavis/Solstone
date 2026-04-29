@@ -39,7 +39,7 @@ Read, in order, when you enter the repo for a coding task:
 | `convey/` | Web app framework — app discovery, routing, bridge, screenshot tooling | layout / framework-level UI changes | `docs/CONVEY.md` |
 | `apps/` | Convey apps — each self-contained (`call.py` Typer sub-app + `routes.py` + `templates/`) | adding a user-facing feature, a `sol call <app>` verb, a UI surface | `docs/APPS.md` (required reading before modifying `apps/`) |
 | `talent/` | AI talent configs (markdown prompts + optional `.py` post-hooks) + `SKILL.md`s (journal, coder, partner, …) | defining or tuning a talent; adding a journal-side skill | `talent/journal/SKILL.md`, `docs/PROMPT_TEMPLATES.md` |
-| `scripts/` | Repo maintenance scripts — `check_layer_hygiene.py`, `gate_agents_rename.py` | tooling that guards the codebase; wired into `make ci` | (none) |
+| `scripts/` | Repo maintenance scripts — `check_layer_hygiene.py` | tooling that guards the codebase; wired into `make ci` | (none) |
 | `tests/` | Pytest suites + `tests/fixtures/journal/` mock journal | writing tests; debugging flakiness; `make dev` / `make sandbox` use fixtures as the journal | `docs/testing.md` |
 | `docs/` | All longform documentation | reference lookups; never your first stop | §10 below |
 | `journal/` | The live journal (user data). Git-ignored content; checked-in template (`AGENTS.md`, skills symlinks) | **rarely as a coder** — modify `think/`, `apps/`, or `talent/`, not journal data | `talent/journal/SKILL.md` |
@@ -54,7 +54,7 @@ Top-level dirs intentionally not in the table: `.venv/`, `scratch/`, `logs/`, `t
 
 **Key concepts, priority-ordered:**
 
-- **Journal** — the on-disk record rooted at `journal/` in the repo. Every day is a `journal/chronicle/YYYYMMDD/` directory. Segments (timestamped capture windows) are anchored to creation/modification time, not content "about" time. `get_journal()` from `think.utils` is the single source of truth for journal path resolution; trust it unconditionally. Never set `_SOLSTONE_JOURNAL_OVERRIDE` from application code (see §8).
+- **Journal** — the on-disk record rooted at `journal/` in the repo. Every day is a `journal/chronicle/YYYYMMDD/` directory. Segments (timestamped capture windows) are anchored to creation/modification time, not content "about" time. `get_journal()` from `think.utils` is the single source of truth for journal path resolution; trust it unconditionally. Installed runs inherit `SOLSTONE_JOURNAL` from the managed wrapper at `~/.local/bin/sol`; tests use the autouse fixture; sandboxes set it explicitly. Application code must not set it itself (see §8).
 - **Talents** — AI processors (markdown prompt + optional Python post-hook). Each has a config in `talent/<name>.md` with frontmatter that declares hooks, priority, model, and output. Cortex spawns them as subprocesses.
 - **Callosum** — Unix-socket JSON message bus at `journal/health/callosum.sock`. Real-time event distribution across services (`tract` + `event` + payload). If components need to talk asynchronously, they talk through callosum.
 - **Cortex** — process manager for talent runs. Listens on callosum (`tract="cortex"`, `event="request"`), spawns `python -m think.talents` subprocesses, writes `<talent>/<ts>_active.jsonl` then renames to `<talent>/<ts>.jsonl` on completion, broadcasts all events back through callosum. Read `docs/CORTEX.md` before modifying talent execution.
@@ -74,6 +74,7 @@ Two surfaces:
 **Adding a top-level command:** add an entry to `COMMANDS` in `think/sol_cli.py`; ensure the module has a `main()` function.
 
 **Adding a `sol call` sub-verb:** add it to the app's `apps/<app>/call.py` Typer sub-app. No central registration needed — `think/call.py` discovers apps automatically.
+`sol call journal export` is the CLI entry for portable journal ZIPs; read-only archive validation lives in `think/importers/journal_archive.py`.
 
 Run `sol` (no args) for live status plus the full grouped command list.
 
@@ -115,11 +116,10 @@ Verified against `Makefile`. Grouped by use.
 | `make test-all` | Everything — core + apps + integration. Pre-ship gate. |
 | `make coverage` | HTML coverage report under `htmlcov/`. Occasional. |
 | `make watch` | pytest-watch — reruns tests on file change. Useful during a test-heavy sprint. |
-| `make ci` | Format-check + ruff + agents-rename gate + layer-hygiene + tests. **Run before every commit.** |
+| `make ci` | Format-check + ruff + layer-hygiene + tests. **Run before every commit.** |
 | `make verify` | Same steps as `make ci`. Either name is fine. |
-| `make install-checks` | The pre-test half of `make ci` (format-check + ruff + gates). Called by `ci` / `verify`. |
+| `make install-checks` | The pre-test half of `make ci` (format-check + ruff + layer-hygiene). Called by `ci` / `verify`. |
 | `make check-layer-hygiene` | Run `scripts/check_layer_hygiene.py` alone. Useful when iterating on an L1–L2 violation flagged by CI. |
-| `make gate-agents-rename` | Guard against reintroducing the old `agents/` naming. Part of `install-checks`. |
 
 ### Verification against a running sandbox
 
@@ -156,7 +156,7 @@ Verified against `Makefile`. Grouped by use.
 ## 6. Testing quickstart
 
 - **Framework:** pytest. Files `test_*.py`, functions `test_*`. Shared fixtures in `tests/conftest.py`.
-- **Fixture journal:** `tests/fixtures/journal/` — a complete mock journal with facets, entities, segments, index state. Tests set `os.environ["_SOLSTONE_JOURNAL_OVERRIDE"] = "tests/fixtures/journal"` (or use `monkeypatch.setenv`); this is the **only** place that env var is valid (see §8).
+- **Fixture journal:** `tests/fixtures/journal/` — a complete mock journal with facets, entities, segments, index state. The autouse `set_test_journal_path` fixture in `tests/conftest.py` sets `SOLSTONE_JOURNAL` to this path for unit tests. Individual tests may override it with `monkeypatch.setenv` when they need an isolated tmp journal (see §8).
 - **Run one test:** `make test-only TEST=tests/test_utils.py::test_foo` or `TEST="-k test_foo"`.
 - **Run app tests:** `make test-apps` or `make test-app APP=<name>`.
 - **Integration tests** (`tests/integration/`): hit real provider APIs, require `.env` keys, run via `make test-integration`.
@@ -243,7 +243,7 @@ Any function that handles a callosum event, a scheduled tick, or a supervisor-st
 The rules above govern *where* code lives. The rules below govern *how* code behaves. They exist because we got burned.
 
 - **No backwards-compatibility shims.** All code that depends on this project lives in this repository — never add fallback aliases, re-exports for moved symbols, deprecated-parameter handling, or legacy support code. When renaming or removing something, update every usage directly. For journal data-format changes, write a migration script (see `docs/APPS.md` for `maint` commands); do not add a compatibility layer. Cogitate agents default to adding shims; resist this.
-- **Trust `get_journal()` unconditionally.** `get_journal()` from `think.utils` is the single source of truth for journal path resolution. **Never** set `_SOLSTONE_JOURNAL_OVERRIDE` from application code, agent prompts, subprocess environments, or service files. The env var exists exclusively for two external contexts: test harnesses (`monkeypatch.setenv`) and Makefile sandboxes. If you think you need to override the path from app code, you don't — fix the actual problem. See `docs/environment.md`.
+- **Trust `get_journal()` unconditionally.** `get_journal()` from `think.utils` is the single source of truth for journal path resolution. The managed wrapper at `~/.local/bin/sol` sets `SOLSTONE_JOURNAL` for installed runs; tests use the autouse fixture; Makefile sandboxes set it explicitly. Application code, agent prompts, subprocess environments, and service files must not set `SOLSTONE_JOURNAL` themselves. To rewrite the wrapper's embedded path use `sol config journal <path>`. See `docs/environment.md`.
 - **SPDX header on every source file.** All Python (and other source) files begin with:
 
   ```python
@@ -289,7 +289,7 @@ Bare links don't motivate clicking. Each entry below says when you actually need
 | `docs/PROMPT_TEMPLATES.md` | Modifying talent prompt format or frontmatter |
 | `docs/PROVIDERS.md` | Adding a new AI provider; debugging model selection |
 | `docs/testing.md` | Writing integration tests; setting up fixtures; debugging test isolation |
-| `docs/environment.md` | Journal path resolution, service install details, `_SOLSTONE_JOURNAL_OVERRIDE` rules |
+| `docs/environment.md` | Journal path resolution, managed-wrapper behavior, service install details, and `SOLSTONE_JOURNAL` rules |
 | `docs/coding-standards.md` | Full naming conventions, ruff / mypy config, dep-management details — reference for everything not promoted into this file |
 | `docs/project-structure.md` | Canonical directory layout; resolving "where does this file go" debates |
 | `docs/DOCTOR.md` | Diagnostics and debugging a running system |
@@ -310,3 +310,21 @@ The live journal also carries `journal/AGENTS.md` as its runtime-facing breadcru
 - **Not a runtime guide for cogitate talents.** Runtime CLI restrictions on talents live in `talent/journal/references/cli.md` § Talent CLI Boundaries. If you're tuning what a talent can or cannot call, look there, not here.
 - **Not the journal-layout reference.** `talent/journal/SKILL.md` + its `references/` is the cogitate-audience entry point. This file describes *how those commands are implemented*, not *which ones talents can't call*.
 - **Not an operations manual.** For debugging a live system see `docs/DOCTOR.md`; for service management, the `make install-service` family.
+
+## 13. Owner-facing copy: the system-anatomy canon
+
+- **The trinity.** In owner-facing copy, name the system in canonical order: `solstone = observers + sol agent + journal`.
+- **The canon lives elsewhere.** The source of truth is sol pbc's internal brand canon (system anatomy + voice terminology guides). This repo's branded prose follows it; the canon itself is not vendored here.
+- **Ban surveillance verbs in branded surfaces.** Never use "capture", "watch", "record", "monitor", "track", or "collect" in template copy, settings labels, error messages, onboarding text, or README / INSTALL prose. Prefer "observe alongside", "experience along with", or "take in what you take in".
+- **`capture` is code-only.** Keep it in module names such as `observe/`, function names, OS subsystem identifiers such as `com.solstone.capture`, and internal architecture diagrams. That is intentional and aligned with the canon.
+- **Name artifacts for owners, not pipelines.** In branded prose, say "raw media", "the originals", or "observations". Never say "raw captures" or "screen captures" in owner-facing strings. Code-side artifact names stay as-is.
+- **`sol` is one thing.** `sol` is the running software; there is no homunculus behind it. Use two registers for one entity: `sol` in conversation, `sol agent` in technical contexts.
+- **`keeper` is a surface-specific edge case.** `voice-terminology.md` makes `keeper` the role noun for `sol` in product copy generally. The `solstone-swift` surface bans `keeper` because the mobile UX uses the owner's chosen identity, default `sol`. When writing copy for a specific surface, follow that surface's terminology covenant.
+- **Edit with the right mental model.** Internal architecture vocabulary in this repo stays as-is: `observe/`, the capture pipeline, and screen capture log subsystems remain correct code language. Apply the canon to owner-facing strings only: UI copy, settings text, install / README prose, error messages, and onboarding. If an owner sees it, follow the canon; if it's code or internal docs about pipelines, `capture` is fine.
+
+| Surface | Terminology rule |
+|---------|------------------|
+| Code surfaces | `capture` is fine in code, module names, function names, subsystem ids, and internal architecture docs. |
+| Branded surfaces | `capture` is banned. Use owner-facing phrasing such as "observe alongside", "experience along with", "take in what you take in", "raw media", "the originals", or "observations". |
+
+Canon source of truth: sol pbc's internal brand canon (system-anatomy guide).

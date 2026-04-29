@@ -17,7 +17,9 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
+import signal
 from pathlib import Path
 from typing import Any, Callable
 
@@ -27,6 +29,38 @@ from think.utils import now_ms
 LOG = logging.getLogger("think.providers.cli")
 
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
+_TIMEOUT_LOG_DIR: Path = Path("/tmp")
+
+_QUOTA_TOKENS = ("QUOTA_EXHAUSTED", "TerminalQuotaError")
+_RETRY_DELAY_RE = re.compile(r'"?retryDelayMs"?\s*[:=]\s*"?([0-9]+(?:\.[0-9]+)?)')
+_READ_BUDGET_TOOL_NAMES: tuple[str, ...] = (
+    "read_file",
+    "glob",
+    "list_directory",
+    "grep_search",
+)
+_READ_BUDGET_TOOLS: frozenset[str] = frozenset(_READ_BUDGET_TOOL_NAMES)
+
+
+class QuotaExhaustedError(Exception):
+    """Raised when a provider CLI reports quota exhaustion."""
+
+    def __init__(self, message: str, retry_delay_ms: int | None = None) -> None:
+        super().__init__(message)
+        self.retry_delay_ms = retry_delay_ms
+
+
+def _quota_error_from_text(text: str) -> QuotaExhaustedError | None:
+    if not any(token in text for token in _QUOTA_TOKENS):
+        return None
+
+    retry_delay_ms: int | None = None
+    match = _RETRY_DELAY_RE.search(text)
+    if match:
+        retry_delay_ms = int(float(match.group(1)))
+
+    message = text.strip() or "Provider quota exhausted"
+    return QuotaExhaustedError(message, retry_delay_ms)
 
 
 async def _drain_line(stream: asyncio.StreamReader) -> None:
@@ -87,6 +121,15 @@ def assemble_prompt(
             system_instruction = f"{system_instruction}\n\n{hint}"
         else:
             system_instruction = hint
+    if config.get("read_scope"):
+        scope_hint = (
+            "Limit filesystem reads to today's segment dir unless the task explicitly requires broader history. "
+            "If you need broader scope, state what and why in your reasoning."
+        )
+        if system_instruction:
+            system_instruction = f"{system_instruction}\n\n{scope_hint}"
+        else:
+            system_instruction = scope_hint
     return prompt_body, system_instruction
 
 
@@ -180,7 +223,8 @@ class CLIRunner:
         cwd: Working directory for the subprocess. Defaults to project root.
         env: Optional complete environment for the subprocess (used as-is, not merged). When None, inherits os.environ.
         timeout: Subprocess timeout in seconds. Default 600.
-        first_event_timeout: Timeout for first stdout line in seconds. Default 30.
+        first_event_timeout: Timeout for first stdout line in seconds. Default 90.
+        read_call_budget: Optional combined budget for native read-tool calls.
     """
 
     def __init__(
@@ -196,7 +240,8 @@ class CLIRunner:
         cwd: Path | None = None,
         env: dict[str, str] | None = None,
         timeout: int = 600,
-        first_event_timeout: int = 30,
+        first_event_timeout: int = 90,
+        read_call_budget: int | None = None,
     ) -> None:
         self.cmd = cmd
         self.prompt_text = prompt_text
@@ -208,6 +253,11 @@ class CLIRunner:
         self.timeout = timeout
         self.first_event_timeout = first_event_timeout
         self._timed_out_waiting_for_first_event = False
+        self._already_retried_first_event: bool = False
+        self._quota_error: QuotaExhaustedError | None = None
+        self._read_call_budget = read_call_budget
+        self._read_call_count = 0
+        self._read_budget_tools = _READ_BUDGET_TOOLS
         self.cli_session_id: str | None = None
 
     async def run(self) -> str:
@@ -225,120 +275,251 @@ class CLIRunner:
                 f"CLI tool '{binary}' not found. Install it and ensure it's on PATH."
             )
 
-        import os
-
         proc_env = self.env if self.env is not None else os.environ.copy()
 
         LOG.info("Spawning CLI: %s (cwd=%s)", " ".join(self.cmd), self.cwd)
 
-        process = await asyncio.create_subprocess_exec(
+        self._quota_error = None
+        process: asyncio.subprocess.Process | None = None
+        stderr_task: asyncio.Task[None] | None = None
+        stderr_lines: list[str] = []
+        self._timed_out_waiting_for_first_event = False
+
+        try:
+            process = await self._spawn_process(proc_env)
+            self._send_prompt(process)
+            stderr_task = asyncio.create_task(
+                self._read_stderr(process, stderr_lines, binary)
+            )
+
+            try:
+                try:
+                    await asyncio.wait_for(
+                        self._process_stdout(process),
+                        timeout=self.timeout,
+                    )
+                except asyncio.TimeoutError:
+                    if (
+                        self._timed_out_waiting_for_first_event
+                        and not self._already_retried_first_event
+                    ):
+                        LOG.warning(
+                            "CLI first-event timed out after %ss, retrying once",
+                            self.first_event_timeout,
+                        )
+                        self._already_retried_first_event = True
+                        try:
+                            process.kill()
+                        except ProcessLookupError:
+                            pass
+                        await self._terminate_process_group(process)
+                        await stderr_task
+                        self._write_timeout_log(
+                            which_timeout="first_event",
+                            timeout_seconds=self.first_event_timeout,
+                            proc_env=proc_env,
+                            cmd=self.cmd,
+                            cwd=str(self.cwd),
+                            stderr_lines=stderr_lines,
+                        )
+
+                        process = await self._spawn_process(proc_env)
+                        self._send_prompt(process)
+
+                        stderr_lines = []
+                        stderr_task = asyncio.create_task(
+                            self._read_stderr(process, stderr_lines, binary)
+                        )
+                        self._timed_out_waiting_for_first_event = False
+                        await asyncio.wait_for(
+                            self._process_stdout(process),
+                            timeout=self.timeout,
+                        )
+                    else:
+                        raise
+            except asyncio.TimeoutError:
+                timeout_seconds = (
+                    self.first_event_timeout
+                    if self._timed_out_waiting_for_first_event
+                    else self.timeout
+                )
+                which_timeout = (
+                    "first_event"
+                    if self._timed_out_waiting_for_first_event
+                    else "full_run"
+                )
+                LOG.error("CLI process timed out after %ss, killing", timeout_seconds)
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                await self._terminate_process_group(process)
+                await stderr_task
+                self._write_timeout_log(
+                    which_timeout=which_timeout,
+                    timeout_seconds=timeout_seconds,
+                    proc_env=proc_env,
+                    cmd=self.cmd,
+                    cwd=str(self.cwd),
+                    stderr_lines=stderr_lines,
+                )
+                stderr_tail = "\n".join(stderr_lines[-20:])
+                error_message = (
+                    f"CLI process timed out after {timeout_seconds}s. "
+                    f"Stderr tail:\n{stderr_tail}\n"
+                    "Check that the CLI tool is installed and authenticated."
+                )
+                self.callback.emit(
+                    {
+                        "event": "error",
+                        "error": error_message,
+                        "ts": now_ms(),
+                    }
+                )
+                raise RuntimeError(error_message)
+
+            if self._quota_error:
+                raise self._quota_error
+
+            await stderr_task
+            if self._quota_error:
+                raise self._quota_error
+
+            return_code = await process.wait()
+            result = self.aggregator.flush_as_result()
+
+            if return_code != 0:
+                stderr_text = "\n".join(stderr_lines[-20:])  # Last 20 lines
+                if result:
+                    # CLI failed but produced output — warn and return what we got
+                    LOG.warning(
+                        "CLI process exited with code %d but produced output. Stderr: %s",
+                        return_code,
+                        stderr_text,
+                    )
+                    self.callback.emit(
+                        {
+                            "event": "warning",
+                            "message": f"CLI exited with code {return_code}",
+                            "stderr": stderr_text,
+                            "ts": now_ms(),
+                        }
+                    )
+                else:
+                    # CLI failed with no output — this is an error.
+                    # Don't emit error event here; the caller's exception
+                    # handler is responsible for error event emission.
+                    LOG.error(
+                        "CLI process exited with code %d: %s",
+                        return_code,
+                        stderr_text,
+                    )
+                    raise RuntimeError(
+                        f"CLI process exited with code {return_code}. Stderr: {stderr_text}"
+                    )
+
+            return result
+        finally:
+            if process and process.returncode is None:
+                await self._terminate_process_group(process)
+            if stderr_task:
+                await stderr_task
+
+    async def _spawn_process(
+        self, proc_env: dict[str, str]
+    ) -> asyncio.subprocess.Process:
+        return await asyncio.create_subprocess_exec(
             *self.cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            limit=1024 * 1024,  # 1 MB – tool results can exceed the 64 KB default
+            limit=1024 * 1024,
             cwd=str(self.cwd),
             env=proc_env,
+            start_new_session=True,
         )
 
-        # Pipe prompt to stdin and close
+    def _send_prompt(self, process: asyncio.subprocess.Process) -> None:
         if process.stdin:
             process.stdin.write(self.prompt_text.encode("utf-8"))
             process.stdin.close()
 
-        # Read stdout line by line, translate each JSONL event
-        stderr_lines: list[str] = []
-
-        async def _read_stderr() -> None:
-            if not process.stderr:
+    async def _read_stderr(
+        self,
+        process: asyncio.subprocess.Process,
+        stderr_lines: list[str],
+        binary: str,
+    ) -> None:
+        if not process.stderr:
+            return
+        async for raw_line in process.stderr:
+            line = raw_line.decode("utf-8", errors="replace").rstrip()
+            if not line:
+                continue
+            stderr_lines.append(line)
+            LOG.debug("[%s stderr] %s", binary, line)
+            quota_error = _quota_error_from_text(line)
+            if quota_error:
+                self._quota_error = quota_error
+                await self._terminate_process_group(process)
                 return
-            async for raw_line in process.stderr:
-                line = raw_line.decode("utf-8", errors="replace").rstrip()
-                if line:
-                    stderr_lines.append(line)
-                    LOG.debug("[%s stderr] %s", binary, line)
 
-        stderr_task = asyncio.create_task(_read_stderr())
-        self._timed_out_waiting_for_first_event = False
+    async def _terminate_process_group(
+        self,
+        process: asyncio.subprocess.Process,
+        *,
+        grace_seconds: float = 2.0,
+    ) -> None:
+        if process.returncode is not None:
+            return
 
         try:
-            await asyncio.wait_for(
-                self._process_stdout(process),
-                timeout=self.timeout,
-            )
+            pgid = os.getpgid(process.pid)
+        except ProcessLookupError:
+            pgid = None
+
+        if pgid is not None:
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        else:
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
+
+        try:
+            await asyncio.wait_for(process.wait(), timeout=grace_seconds)
+            return
         except asyncio.TimeoutError:
-            timeout_seconds = (
-                self.first_event_timeout
-                if self._timed_out_waiting_for_first_event
-                else self.timeout
-            )
-            LOG.error("CLI process timed out after %ss, killing", timeout_seconds)
+            pass
+
+        if pgid is not None:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        try:
             process.kill()
-            await stderr_task
-            stderr_tail = "\n".join(stderr_lines[-20:])
-            error_message = (
-                f"CLI process timed out after {timeout_seconds}s. "
-                f"Stderr tail:\n{stderr_tail}\n"
-                "Check that the CLI tool is installed and authenticated."
-            )
-            self.callback.emit(
-                {
-                    "event": "error",
-                    "error": error_message,
-                    "ts": now_ms(),
-                }
-            )
-            raise RuntimeError(error_message)
-        finally:
-            # Wait for stderr reader to finish
-            if not stderr_task.done():
-                await stderr_task
-
-        # Wait for process to exit
-        return_code = await process.wait()
-        result = self.aggregator.flush_as_result()
-
-        if return_code != 0:
-            stderr_text = "\n".join(stderr_lines[-20:])  # Last 20 lines
-            if result:
-                # CLI failed but produced output — warn and return what we got
-                LOG.warning(
-                    "CLI process exited with code %d but produced output. Stderr: %s",
-                    return_code,
-                    stderr_text,
-                )
-                self.callback.emit(
-                    {
-                        "event": "warning",
-                        "message": f"CLI exited with code {return_code}",
-                        "stderr": stderr_text,
-                        "ts": now_ms(),
-                    }
-                )
-            else:
-                # CLI failed with no output — this is an error.
-                # Don't emit error event here; the caller's exception
-                # handler is responsible for error event emission.
-                LOG.error(
-                    "CLI process exited with code %d: %s",
-                    return_code,
-                    stderr_text,
-                )
-                raise RuntimeError(
-                    f"CLI process exited with code {return_code}. Stderr: {stderr_text}"
-                )
-
-        return result
+        except ProcessLookupError:
+            pass
+        await process.wait()
 
     async def _process_stdout(self, process: asyncio.subprocess.Process) -> None:
         """Read and translate JSONL lines from stdout."""
         if not process.stdout:
             return
 
-        def _process_line(raw_line: bytes) -> None:
+        async def _process_line(raw_line: bytes) -> None:
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line:
                 return
+
+            quota_error = _quota_error_from_text(line)
+            if quota_error:
+                self._quota_error = quota_error
+                raise quota_error
 
             try:
                 event_data = json.loads(line)
@@ -346,10 +527,38 @@ class CLIRunner:
                 LOG.warning("Non-JSON stdout line: %s", line[:200])
                 return
 
+            tool_name = event_data.get("tool_name")
+            if (
+                event_data.get("type") == "tool_use"
+                and tool_name in self._read_budget_tools
+            ):
+                self._read_call_count += 1
+                if (
+                    self._read_call_budget is not None
+                    and self._read_call_count > self._read_call_budget
+                ):
+                    self.callback.emit(
+                        {
+                            "event": "tool_budget_exhausted",
+                            "tool": tool_name,
+                            "budget": self._read_call_budget,
+                            "count": self._read_call_count,
+                            "read_tools": list(_READ_BUDGET_TOOL_NAMES),
+                            "ts": now_ms(),
+                        }
+                    )
+                    await self._terminate_process_group(process)
+                    raise RuntimeError(
+                        "tool_budget_exhausted: read tool call budget exceeded "
+                        f"({self._read_call_count}/{self._read_call_budget})"
+                    )
+
             try:
                 session_id = self.translate(event_data, self.aggregator, self.callback)
                 if session_id:
                     self.cli_session_id = session_id
+            except QuotaExhaustedError:
+                raise
             except Exception:
                 LOG.exception("Error translating CLI event: %s", line[:200])
 
@@ -363,7 +572,7 @@ class CLIRunner:
             raise
         if not first_line:
             return
-        _process_line(first_line)
+        await _process_line(first_line)
 
         while True:
             try:
@@ -386,7 +595,46 @@ class CLIRunner:
                 continue
             if not raw_line:
                 break
-            _process_line(raw_line)
+            await _process_line(raw_line)
+
+    def _write_timeout_log(
+        self,
+        *,
+        which_timeout: str,
+        timeout_seconds: int,
+        proc_env: dict[str, str],
+        cmd: list[str],
+        cwd: str | None,
+        stderr_lines: list[str],
+    ) -> Path | None:
+        """Write a postmortem log for a CLI timeout."""
+
+        timestamp_ms = now_ms()
+        path = _TIMEOUT_LOG_DIR / f"gemini-cogitate-timeout-{timestamp_ms}.log"
+        env_keys = ", ".join(sorted(set(proc_env.keys())))
+        stderr_text = "\n".join(stderr_lines)
+        content = "\n".join(
+            [
+                f"timestamp_ms: {timestamp_ms}",
+                f"which_timeout: {which_timeout}",
+                f"timeout_seconds: {timeout_seconds}",
+                (f"already_retried_first_event: {self._already_retried_first_event}"),
+                f"cmd: {cmd!r}",
+                f"cwd: {cwd if cwd is not None else 'None'}",
+                f"env_keys: {env_keys}",
+                "stderr (full):",
+                stderr_text,
+            ]
+        )
+
+        try:
+            with open(path, "w", encoding="utf-8") as log_file:
+                log_file.write(content)
+            os.chmod(str(path), 0o600)
+        except OSError as exc:
+            LOG.warning("Could not write timeout log to %s: %s", path, exc)
+            return None
+        return path
 
 
 # ---------------------------------------------------------------------------
@@ -420,52 +668,75 @@ def check_cli_binary(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def build_cogitate_env(env_key: str) -> dict[str, str]:
+_BASE_ALLOWLIST = [
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "PWD",
+    "TERM",
+    "TMPDIR",
+    "TZ",
+    "LANG",
+    "LC_*",
+    "XDG_*",
+    "SOLSTONE_*",
+    "SOL_*",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+]
+
+_PROVIDER_ALLOWLIST: dict[str, list[str]] = {
+    "anthropic": ["ANTHROPIC_*", "CLAUDE_*"],
+    "openai": ["OPENAI_*"],
+    "google": ["GOOGLE_*", "GEMINI_*", "VERTEX_*"],
+}
+
+
+def _matches_env_pattern(key: str, pattern: str) -> bool:
+    if pattern.endswith("*"):
+        return key.startswith(pattern[:-1])
+    return key == pattern
+
+
+def build_cogitate_env(provider_name: str) -> dict[str, str]:
     """Build environment dict for a cogitate CLI subprocess.
 
-    By default, strips the provider's API key so the CLI uses its own
-    platform/account-based auth. Controlled by the ``providers.auth``
-    section in journal config:
-
-        "providers": {
-            "auth": {
-                "anthropic": "platform"   // default — strip key
-            }
-        }
-
-    Values: ``"platform"`` (default) strips the key; ``"api_key"`` preserves it.
+    The child environment is built from an allowlist. Patterns ending in ``*``
+    match the prefix before the star, including the exact prefix string.
+    No other glob characters are supported.
 
     Args:
-        env_key: Environment variable name to consider stripping
-            (e.g., ``"ANTHROPIC_API_KEY"``).
+        provider_name: Provider name (``anthropic``, ``openai``, or ``google``).
 
     Returns:
-        Copy of ``os.environ`` with the key removed when auth mode is platform.
+        Filtered environment for the provider CLI.
     """
+    from think.providers import PROVIDER_METADATA
     from think.utils import get_config
 
+    if provider_name not in _PROVIDER_ALLOWLIST:
+        valid = ", ".join(sorted(_PROVIDER_ALLOWLIST))
+        raise ValueError(f"Unsupported cogitate provider: {provider_name!r} ({valid})")
+
     config = get_config()
-    auth_config = config.get("providers", {}).get("auth", {})
+    providers_config = config.get("providers", {})
+    auth_config = providers_config.get("auth", {})
+    auth_mode = auth_config.get(provider_name, "platform")
+    env_key = PROVIDER_METADATA[provider_name]["env_key"]
+    allowlist = _BASE_ALLOWLIST + _PROVIDER_ALLOWLIST[provider_name]
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if any(_matches_env_pattern(key, pattern) for pattern in allowlist)
+    }
 
-    # Determine provider name from env_key for config lookup
-    # e.g., "ANTHROPIC_API_KEY" -> lookup auth_config for matching provider
-    # We check all auth entries; default is "platform" for any missing provider
-    auth_mode = "platform"
-    for provider, mode in auth_config.items():
-        from think.providers import PROVIDER_METADATA
-
-        meta = PROVIDER_METADATA.get(provider, {})
-        if meta.get("env_key") == env_key:
-            auth_mode = mode
-            break
-
-    env = os.environ.copy()
     if auth_mode == "platform":
         env.pop(env_key, None)
 
     # Vertex AI / AI Studio: set backend env vars for Google provider
-    if env_key == "GOOGLE_API_KEY":
-        providers_config = config.get("providers", {})
+    if provider_name == "google":
         google_backend = providers_config.get("google_backend", "auto")
 
         # Determine effective backend
@@ -486,24 +757,24 @@ def build_cogitate_env(env_key: str) -> dict[str, str]:
             env.pop("GOOGLE_API_KEY", None)
             # SA credentials: set GOOGLE_APPLICATION_CREDENTIALS
             creds_path = providers_config.get("vertex_credentials")
-            if creds_path and os.path.exists(creds_path):
-                env["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
-                # Project context lets the Gemini CLI use Vertex instead of
-                # falling back to AI Studio auth.
-                try:
-                    with open(creds_path, encoding="utf-8") as _f:
-                        _sa_data = json.load(_f)
-                    if "project_id" in _sa_data:
-                        env["GOOGLE_CLOUD_PROJECT"] = _sa_data["project_id"]
-                    else:
-                        LOG.warning(
-                            "SA credentials at %s missing project_id", creds_path
-                        )
-                except (OSError, json.JSONDecodeError) as exc:
-                    LOG.warning(
-                        "Could not read project_id from %s: %s", creds_path, exc
-                    )
-            # else: GOOGLE_APPLICATION_CREDENTIALS may be inherited from env
+            if not creds_path or not os.path.exists(creds_path):
+                raise ValueError(
+                    f"Vertex provider configured but no usable SA credentials at {creds_path}"
+                )
+            try:
+                with open(creds_path, encoding="utf-8") as _f:
+                    _sa_data = json.load(_f)
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    f"Vertex provider configured but no usable SA credentials at {creds_path}"
+                ) from exc
+            project_id = _sa_data.get("project_id")
+            if not project_id:
+                raise ValueError(
+                    f"Vertex provider configured but no usable SA credentials at {creds_path}"
+                )
+            env["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
+            env["GOOGLE_CLOUD_PROJECT"] = project_id
             env["GOOGLE_CLOUD_LOCATION"] = "global"
             from think.utils import get_journal
 
@@ -535,6 +806,7 @@ def build_cogitate_env(env_key: str) -> dict[str, str]:
 
 __all__ = [
     "CLIRunner",
+    "QuotaExhaustedError",
     "ThinkingAggregator",
     "assemble_prompt",
     "build_cogitate_env",

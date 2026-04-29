@@ -81,6 +81,37 @@ def other_target(tmp_path: Path) -> Path:
     return target
 
 
+def test_install_guard_import_succeeds_when_frontmatter_is_shadowed(tmp_path):
+    shadow_dir = tmp_path / "shadow"
+    shadow_dir.mkdir()
+    (shadow_dir / "frontmatter.py").write_text(
+        'raise ImportError("blocked for test")\n',
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    pythonpath_parts = [str(shadow_dir), str(ROOT)]
+    existing_pythonpath = env.get("PYTHONPATH")
+    if existing_pythonpath:
+        pythonpath_parts.append(existing_pythonpath)
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from think.install_guard import parse_wrapper; print('ok')",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "ok"
+
+
 class TestPythonVersion:
     def test_ok(self, doctor):
         result = doctor.python_version_check(args(doctor))
@@ -343,6 +374,25 @@ class TestPortCheck:
         assert result.status == "warn"
         assert result.severity == "advisory"
         assert "timed out" in result.detail
+
+    def test_resolve_alias_target_reads_managed_wrapper_sol_bin(
+        self, doctor, home_root, tmp_path
+    ):
+        sol_bin = tmp_path / "repo" / ".venv" / "bin" / "sol"
+        sol_bin.parent.mkdir(parents=True, exist_ok=True)
+        sol_bin.write_text("", encoding="utf-8")
+        alias = home_root / ".local" / "bin" / "sol"
+        alias.parent.mkdir(parents=True, exist_ok=True)
+        alias.write_text(
+            install_guard.render_wrapper(
+                str((tmp_path / "journal").resolve()),
+                str(sol_bin),
+            ),
+            encoding="utf-8",
+        )
+        alias.chmod(0o755)
+
+        assert doctor.resolve_alias_target() == sol_bin.resolve()
 
 
 class TestDiskSpace:

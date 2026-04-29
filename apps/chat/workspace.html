@@ -24,14 +24,6 @@
     {% endfor %}
   </ol>
 
-  {% if day == today_day %}
-    <form id="chatComposerForm" class="chat-composer">
-      <textarea id="chatComposerInput" rows="1" placeholder="{{ chat_bar_placeholder }}" aria-label="chat input"></textarea>
-      <button id="chatComposerSend" type="submit" aria-label="send">Send</button>
-    </form>
-  {% else %}
-    <p class="chat-composer-past">past-day view — new messages go to <a href="{{ url_for('app:chat.day', day=today_day) }}">today</a></p>
-  {% endif %}
 </section>
 
 <style>
@@ -74,7 +66,9 @@
 
   insertTimeSeparators(transcript);
   decorateBubbles(transcript);
-  bootstrapMarkdownDetails(transcript);
+  document.addEventListener('DOMContentLoaded', () => {
+    bootstrapMarkdownDetails(transcript);
+  }, { once: true });
 
   if (isToday && window.appEvents) {
     chatEventsCleanup = window.appEvents.listen('chat', {
@@ -97,19 +91,6 @@
       live: target.dataset.talentStatus === 'active'
     });
   });
-
-  const form = document.getElementById('chatComposerForm');
-  if (form) {
-    const input = document.getElementById('chatComposerInput');
-    resizeComposer(input);
-    input.addEventListener('input', () => resizeComposer(input));
-    form.addEventListener('submit', (event) => {
-      event.preventDefault();
-      const text = (input.value || '').trim();
-      if (!text) return;
-      postChat(text, form);
-    });
-  }
 
   wireSearch();
 
@@ -170,11 +151,24 @@
   }
 
   function bootstrapMarkdownDetails(list) {
-    list.querySelectorAll('[data-markdown="1"]').forEach((node) => {
-      const text = node.textContent || '';
-      node.innerHTML = window.AppServices.renderMarkdown(text);
-      node.removeAttribute('data-markdown');
+    const nodes = Array.from(list.querySelectorAll('[data-markdown="1"]'));
+    nodes.forEach((node) => {
+      renderTalentMarkdownInto(node, node.textContent || '');
     });
+    const remaining = list.querySelectorAll('[data-markdown="1"]');
+    if (remaining.length) {
+      throw new Error('unrendered talent markdown details remain');
+    }
+  }
+
+  function renderTalentMarkdownInto(node, source) {
+    // Single path from markdown source to rendered HTML for talent card details.
+    // SSR initial-transcript bootstrap and live-append flow both route here.
+    if (!window.AppServices || typeof window.AppServices.renderMarkdown !== 'function') {
+      throw new Error('talent markdown renderer is unavailable');
+    }
+    node.innerHTML = window.AppServices.renderMarkdown(source || '');
+    node.removeAttribute('data-markdown');
   }
 
   function appendEventFromLive(msg, list) {
@@ -295,7 +289,7 @@
       if (status === 'finished' || status === 'errored') {
         const detailNode = document.createElement('div');
         detailNode.className = 'chat-talent-card-detail chat-talent-card-detail--markdown';
-        detailNode.innerHTML = window.AppServices.renderMarkdown(detail || '');
+        renderTalentMarkdownInto(detailNode, detail || '');
         card.appendChild(detailNode);
       } else {
         const detailNode = document.createElement('span');
@@ -324,7 +318,7 @@
         note.className = 'chat-talent-card-stalled-note';
         card.appendChild(note);
       }
-      note.textContent = 'Talent stopped responding — reload to retry';
+      note.textContent = 'talent stopped responding — reload to retry';
     });
   }
 
@@ -349,32 +343,6 @@
     card.appendChild(linkNode);
 
     return card;
-  }
-
-  async function postChat(text, formNode) {
-    const button = formNode.querySelector('button[type=submit]');
-    const input = formNode.querySelector('textarea');
-    button.disabled = true;
-    input.disabled = true;
-    try {
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: text,
-          app: 'chat',
-          path: window.location.pathname,
-          facet: window.selectedFacet || ''
-        })
-      });
-      if (!response.ok) throw new Error('chat post failed');
-      input.value = '';
-      resizeComposer(input);
-    } finally {
-      button.disabled = false;
-      input.disabled = false;
-      input.focus();
-    }
   }
 
   function wireSearch() {
@@ -458,11 +426,6 @@
     });
 
     searchResults.appendChild(list);
-  }
-
-  function resizeComposer(input) {
-    input.style.height = 'auto';
-    input.style.height = Math.min(120, input.scrollHeight) + 'px';
   }
 
   function formatDay(ts) {

@@ -1,6 +1,5 @@
 {
   "type": "cogitate",
-  "tier": 3,
 
   "title": "Facet Newsletter Generator",
   "description": "Creates comprehensive daily newsletters for each facet, capturing activities, progress, and insights",
@@ -9,8 +8,8 @@
   "priority": 40,
   "multi_facet": true,
   "load": {
-    "talents": True,
-    "journal": True
+    "talents": true,
+    "journal": true
   }
 }
 

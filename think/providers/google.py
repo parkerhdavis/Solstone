@@ -40,11 +40,13 @@ from typing import Any, Callable
 from google import genai
 from google.genai import types
 
+from think.cogitate_policy import build_per_task_policy
 from think.models import GEMINI_FLASH
 from think.utils import now_ms
 
 from .cli import (
     CLIRunner,
+    QuotaExhaustedError,
     ThinkingAggregator,
     assemble_prompt,
     build_cogitate_env,
@@ -64,8 +66,6 @@ logger = logging.getLogger(__name__)
 
 # Backend detection cache
 _detected_backend: str | None = None
-
-_COGITATE_POLICY_PATH = Path(__file__).parent.parent / "policies" / "cogitate.toml"
 
 
 def _structured_to_google_contents(
@@ -760,11 +760,11 @@ async def run_cogitate(
         #   - Read-only cogitate talents run yolo + a scoped policy: full tool
         #     registry (no plan-mode stripping), but write_file / replace denied
         #     and run_shell_command narrowed to `sol` invocations.
-        # Plan mode strips run_shell_command from the registry, which drove the
-        # tool-name hallucination loop documented in
-        # vpe/workspace/gemini-cli-tool-hallucination-research.md. Deprecated
-        # --allowed-tools controls auto-approval, not availability, so it can't
-        # replace the policy file for this purpose.
+        # Plan mode strips run_shell_command from the registry, which drove a
+        # tool-name hallucination loop in earlier prototypes (documented in sol
+        # pbc's internal engineering notes). The deprecated --allowed-tools
+        # flag controls auto-approval, not availability, so it can't replace
+        # the policy file for this purpose.
         cmd = [
             "gemini",
             "-p",
@@ -777,8 +777,15 @@ async def run_cogitate(
             model,
             "--sandbox=none",
         ]
+        policy_path = None
         if not config.get("write"):
-            cmd.extend(["--policy", str(_COGITATE_POLICY_PATH)])
+            policy_path = build_per_task_policy(
+                config.get("name") or "cogitate",
+                config,
+                config.get("day") or "",
+                int(config.get("read_scope_span", 0) or 0),
+            )
+            cmd.extend(["--policy", str(policy_path)])
 
         # Resume from previous session if continuing
         if session_id:
@@ -802,10 +809,15 @@ async def run_cogitate(
             callback=callback,
             aggregator=aggregator,
             cwd=Path(cwd_value) if cwd_value else None,
-            env=build_cogitate_env("GOOGLE_API_KEY"),
+            env=build_cogitate_env("google"),
+            read_call_budget=int(config.get("read_call_budget", 200)),
         )
 
-        result = await runner.run()
+        try:
+            result = await runner.run()
+        finally:
+            if policy_path is not None:
+                policy_path.unlink(missing_ok=True)
 
         # Emit finish event (CLIRunner does not emit one)
         finish_event: dict[str, Any] = {
@@ -819,6 +831,8 @@ async def run_cogitate(
             finish_event["cli_session_id"] = runner.cli_session_id
         callback.emit(finish_event)
         return result
+    except QuotaExhaustedError:
+        raise
     except Exception as exc:
         callback.emit(
             {

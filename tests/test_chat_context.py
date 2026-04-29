@@ -58,7 +58,7 @@ def test_chat_context_injects_digest_tail_trigger_location_and_routine_state(
     monkeypatch, tmp_path
 ):
     journal = tmp_path / "journal"
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(journal))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(journal))
     (journal / "identity").mkdir(parents=True, exist_ok=True)
     (journal / "identity" / "digest.md").write_text(
         "Digest notes for today.",
@@ -135,12 +135,11 @@ def test_chat_context_injects_digest_tail_trigger_location_and_routine_state(
             "prompt": "Please brief me for my meeting",
             "facet": "work",
             "day": "20260420",
-            "trigger_kind": "owner_message",
-            "trigger_payload": {
-                "text": "Please brief me for my meeting",
-                "app": "home",
-                "path": "/app/home",
-                "facet": "work",
+            "app": "home",
+            "path": "/app/home",
+            "trigger": {
+                "type": "owner_message",
+                "message": "Please brief me for my meeting",
                 "ts": owner_ts,
             },
         }
@@ -171,7 +170,7 @@ def test_chat_context_routine_suggestion_only_counts_owner_messages(
     monkeypatch, tmp_path
 ):
     journal = tmp_path / "journal"
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(journal))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(journal))
 
     routines_config = {"_meta": {"suggestions_enabled": True, "suggestions": {}}}
     save_calls: list[dict] = []
@@ -187,8 +186,8 @@ def test_chat_context_routine_suggestion_only_counts_owner_messages(
     module.pre_process(
         {
             "prompt": "What is on my calendar today?",
-            "trigger_kind": "talent_finished",
-            "trigger_payload": {
+            "trigger": {
+                "type": "talent_finished",
                 "name": "exec",
                 "summary": "Collected the latest meeting prep notes.",
             },
@@ -201,9 +200,9 @@ def test_chat_context_routine_suggestion_only_counts_owner_messages(
     module.pre_process(
         {
             "prompt": "What is on my calendar today?",
-            "trigger_kind": "owner_message",
-            "trigger_payload": {
-                "text": "What is on my calendar today?",
+            "trigger": {
+                "type": "owner_message",
+                "message": "What is on my calendar today?",
                 "ts": _ts(10, 0),
             },
         }
@@ -214,9 +213,9 @@ def test_chat_context_routine_suggestion_only_counts_owner_messages(
     assert len(save_calls) == 1
 
 
-def test_chat_context_talent_finished_marks_report_back_only(monkeypatch, tmp_path):
+def test_chat_context_talent_finished_marks_stop_and_report(monkeypatch, tmp_path):
     journal = tmp_path / "journal"
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(journal))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(journal))
 
     append_chat_event(
         "owner_message",
@@ -253,8 +252,8 @@ def test_chat_context_talent_finished_marks_report_back_only(monkeypatch, tmp_pa
     result = _load_chat_context_module().pre_process(
         {
             "day": "20260420",
-            "trigger_kind": "talent_finished",
-            "trigger_payload": {
+            "trigger": {
+                "type": "talent_finished",
                 "name": "exec",
                 "summary": "Found the latest notes.",
             },
@@ -262,10 +261,10 @@ def test_chat_context_talent_finished_marks_report_back_only(monkeypatch, tmp_pa
     )
 
     template_vars = _assert_template_vars_result(result)
-    assert "Mode: report_back_only" in template_vars["trigger_context"]
     assert (
-        "Instruction: Answer the owner directly; do not dispatch or redispatch "
-        "a talent for this trigger."
+        "Instruction: This is a stop-and-report turn, not a dispatch turn. "
+        "Do not retry this task or request another talent for it. Stop here "
+        "and report to the owner directly using the result below."
     ) in template_vars["trigger_context"]
     assert result["messages"] == [
         {"role": "user", "content": "What happened?"},
@@ -274,18 +273,18 @@ def test_chat_context_talent_finished_marks_report_back_only(monkeypatch, tmp_pa
             "role": "user",
             "content": (
                 "[internal follow-up: talent exec finished. This is a "
-                "report-back turn, not a dispatch turn. Do not request "
-                "another talent for this task. Use the result below to "
-                "answer the owner's pending request with a short summary. "
+                "stop-and-report turn, not a dispatch turn. Do not retry "
+                "this task or request another talent for it. Stop here and "
+                "report to the owner directly using the result below. "
                 "Result: Found the latest notes.]"
             ),
         },
     ]
 
 
-def test_chat_context_talent_errored_marks_report_back_only(monkeypatch, tmp_path):
+def test_chat_context_talent_errored_marks_stop_and_report(monkeypatch, tmp_path):
     journal = tmp_path / "journal"
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(journal))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(journal))
 
     append_chat_event(
         "owner_message",
@@ -322,8 +321,8 @@ def test_chat_context_talent_errored_marks_report_back_only(monkeypatch, tmp_pat
     result = _load_chat_context_module().pre_process(
         {
             "day": "20260420",
-            "trigger_kind": "talent_errored",
-            "trigger_payload": {
+            "trigger": {
+                "type": "talent_errored",
                 "name": "exec",
                 "reason": "The lookup failed.",
             },
@@ -331,10 +330,10 @@ def test_chat_context_talent_errored_marks_report_back_only(monkeypatch, tmp_pat
     )
 
     template_vars = _assert_template_vars_result(result)
-    assert "Mode: report_back_only" in template_vars["trigger_context"]
     assert (
-        "Instruction: Answer the owner directly; do not dispatch or redispatch "
-        "a talent for this trigger."
+        "Instruction: This is a stop-and-report turn, not a dispatch turn. "
+        "Do not retry this task or request another talent for it. Stop here "
+        "and report to the owner directly using the reason below."
     ) in template_vars["trigger_context"]
     assert result["messages"] == [
         {"role": "user", "content": "What happened?"},
@@ -343,18 +342,117 @@ def test_chat_context_talent_errored_marks_report_back_only(monkeypatch, tmp_pat
             "role": "user",
             "content": (
                 "[internal follow-up: talent exec errored. This is a "
-                "report-back turn, not a dispatch turn. Do not request "
-                "another talent for this task. Briefly explain the failure "
-                "to the owner and ask for clarification only if needed. "
+                "stop-and-report turn, not a dispatch turn. Do not retry "
+                "this task or request another talent for it. Stop here and "
+                "report to the owner directly using the reason below. "
                 "Reason: The lookup failed.]"
             ),
         },
     ]
 
 
+def test_chat_context_talent_followups_are_observably_distinct(monkeypatch, tmp_path):
+    journal = tmp_path / "journal"
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(journal))
+
+    append_chat_event(
+        "owner_message",
+        ts=_ts(10, 0),
+        text="What happened?",
+        app="home",
+        path="/app/home",
+        facet="work",
+    )
+    append_chat_event(
+        "sol_message",
+        ts=_ts(10, 1),
+        use_id="use-chat-4",
+        text="Looking into it.",
+        notes="Acknowledged request.",
+        requested_target=None,
+        requested_task=None,
+    )
+
+    monkeypatch.setattr("think.routines.get_routine_state", lambda: [])
+    monkeypatch.setattr(
+        "think.routines.get_config",
+        lambda: {"_meta": {"suggestions_enabled": False, "suggestions": {}}},
+    )
+    monkeypatch.setattr("think.routines.save_config", lambda config: None)
+
+    module = _load_chat_context_module()
+    finished = module.pre_process(
+        {
+            "day": "20260420",
+            "trigger": {
+                "type": "talent_finished",
+                "name": "exec",
+                "summary": "Found the latest notes.",
+            },
+        }
+    )
+    errored = module.pre_process(
+        {
+            "day": "20260420",
+            "trigger": {
+                "type": "talent_errored",
+                "name": "exec",
+                "reason": "The lookup failed.",
+            },
+        }
+    )
+
+    finished_vars = _assert_template_vars_result(finished)
+    errored_vars = _assert_template_vars_result(errored)
+
+    finished_message = finished["messages"][-1]["content"]
+    errored_message = errored["messages"][-1]["content"]
+
+    assert finished_message == (
+        "[internal follow-up: talent exec finished. This is a stop-and-report "
+        "turn, not a dispatch turn. Do not retry this task or request another "
+        "talent for it. Stop here and report to the owner directly using the "
+        "result below. Result: Found the latest notes.]"
+    )
+    assert errored_message == (
+        "[internal follow-up: talent exec errored. This is a stop-and-report "
+        "turn, not a dispatch turn. Do not retry this task or request another "
+        "talent for it. Stop here and report to the owner directly using the "
+        "reason below. Reason: The lookup failed.]"
+    )
+    stop_and_report = (
+        "stop-and-report turn, not a dispatch turn. Do not retry this task "
+        "or request another talent for it. Stop here and report to the owner "
+        "directly using the"
+    )
+    assert stop_and_report in finished_message
+    assert stop_and_report in errored_message
+    assert "using the result below. Result:" in finished_message
+    assert "using the reason below. Reason:" in errored_message
+    assert "Do not retry this task or request another talent for it." in errored_message
+    assert (
+        "Do not retry this task or request another talent for it." in finished_message
+    )
+
+    finished_instruction = (
+        "Instruction: This is a stop-and-report turn, not a dispatch turn. "
+        "Do not retry this task or request another talent for it. Stop here "
+        "and report to the owner directly using the result below."
+    )
+    errored_instruction = (
+        "Instruction: This is a stop-and-report turn, not a dispatch turn. "
+        "Do not retry this task or request another talent for it. Stop here "
+        "and report to the owner directly using the reason below."
+    )
+    assert finished_instruction in finished_vars["trigger_context"]
+    assert errored_instruction in errored_vars["trigger_context"]
+    assert "- Result: Found the latest notes." in finished_vars["trigger_context"]
+    assert "- Reason: The lookup failed." in errored_vars["trigger_context"]
+
+
 def test_chat_context_includes_identity_grounding(monkeypatch, tmp_path):
     journal = tmp_path / "journal"
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(journal))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(journal))
     _write_journal_config(journal, {})
     ensure_identity_directory()
 
@@ -379,7 +477,7 @@ def test_chat_context_includes_identity_grounding(monkeypatch, tmp_path):
 
 def test_chat_context_preserves_save_routines_config_side_effect(monkeypatch, tmp_path):
     journal = tmp_path / "journal"
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(journal))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(journal))
 
     routines_config = {"_meta": {"suggestions_enabled": True, "suggestions": {}}}
     save_calls: list[dict] = []
@@ -393,9 +491,9 @@ def test_chat_context_preserves_save_routines_config_side_effect(monkeypatch, tm
     _load_chat_context_module().pre_process(
         {
             "prompt": "What is on my calendar today?",
-            "trigger_kind": "owner_message",
-            "trigger_payload": {
-                "text": "What is on my calendar today?",
+            "trigger": {
+                "type": "owner_message",
+                "message": "What is on my calendar today?",
                 "ts": _ts(11, 0),
             },
         }
@@ -409,7 +507,7 @@ def test_chat_context_preserves_save_routines_config_side_effect(monkeypatch, tm
 
 def test_chat_context_routines_omitted_when_empty(monkeypatch, tmp_path):
     journal = tmp_path / "journal"
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(journal))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(journal))
     monkeypatch.setattr("think.routines.get_routine_state", lambda: [])
     monkeypatch.setattr(
         "think.routines.get_config",
@@ -427,7 +525,7 @@ def test_chat_context_routines_omitted_when_empty(monkeypatch, tmp_path):
 
 def test_chat_context_enrichment_errors_are_graceful(monkeypatch, tmp_path):
     journal = tmp_path / "journal"
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(journal))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(journal))
 
     module = _load_chat_context_module()
 
@@ -444,9 +542,10 @@ def test_chat_context_enrichment_errors_are_graceful(monkeypatch, tmp_path):
     result = module.pre_process(
         {
             "prompt": "What is on my calendar today?",
-            "trigger_kind": "owner_message",
-            "trigger_payload": {
-                "text": "What is on my calendar today?",
+            "path": "/app/home",
+            "trigger": {
+                "type": "owner_message",
+                "message": "What is on my calendar today?",
                 "path": "/app/home",
                 "ts": _ts(12, 0),
             },

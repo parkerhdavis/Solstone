@@ -1018,7 +1018,7 @@
     {% set dot_class = 'active' if capture_status == 'active' else ('stale' if capture_status == 'stale' else ('offline' if capture_status == 'offline' else 'unknown')) %}
     <div class="pulse-vitals-item">
       <span class="pulse-vitals-dot {{ dot_class }}" aria-hidden="true"></span>
-      <span>capture {{ 'no observers' if capture_status == 'no_observers' else capture_status }}</span>
+      <span>observer {{ 'no observers' if capture_status == 'no_observers' else capture_status }}</span>
     </div>
     {% if segment_count > 0 %}
     <div class="pulse-vitals-sep"></div>
@@ -1074,7 +1074,7 @@
   {% if show_welcome %}
   <div class="pulse-welcome">
     <h2>welcome to your home page</h2>
-    <p>this is where your day comes together — narrative summaries, calendar events, tasks, routines, and the people in your network. as solstone captures and processes your day, sections will appear here automatically.</p>
+    <p>this is where your day comes together — narrative summaries, calendar events, tasks, routines, and the people in your network. as observers experience your day along with you and sol curates, sections will appear here automatically.</p>
     <a href="/app/health">check system health →</a>
   </div>
   {% endif %}
@@ -1095,7 +1095,7 @@
     <div class="pulse-briefing-summary">{{ briefing_summary }}</div>
     {% endif %}
     {% if briefing_phase == 'pending' and not briefing_exists %}
-    <div class="pulse-briefing-placeholder">Your morning briefing is being prepared...</div>
+    <div class="pulse-briefing-placeholder">your morning briefing is being prepared...</div>
     {% endif %}
     {% if briefing_exists %}
     <div class="pulse-briefing-body" id="pulse-briefing-body">
@@ -1140,20 +1140,20 @@
       <div class="pulse-narrative-content" id="pulse-narrative-content"></div>
       <a href="#" class="pulse-tell-more" data-conversation="Tell me more about what's happening today">tell me more →</a>
       {% if narrative_updated_at %}
-      <div class="pulse-narrative-meta">Updated at {{ narrative_updated_at }}</div>
+      <div class="pulse-narrative-meta">updated at {{ narrative_updated_at }}</div>
       {% endif %}
     </div>
   </div>
   {% elif segment_count > 0 %}
   <div class="pulse-narrative" id="pulse-narrative">
     <h2 class="pulse-section-header">{{ narrative_header or "today's flow" }}</h2>
-    <div class="pulse-narrative-empty">Analysis will be available after the next processing cycle.</div>
+    <div class="pulse-narrative-empty">analysis will be available after the next processing cycle.</div>
   </div>
   {% endif %}
   {% if narrative_content is none and segment_count == 0 and not show_welcome %}
   <div class="pulse-empty-state">
     <h2 class="pulse-section-header">today's flow</h2>
-    <div class="pulse-empty-message">no narrative yet — one will appear after solstone processes some audio. <a href="/app/health">check capture status →</a></div>
+    <div class="pulse-empty-message">no narrative yet — one will appear after solstone processes some audio. <a href="/app/health">check observer status →</a></div>
   </div>
   {% endif %}
 
@@ -1328,7 +1328,7 @@
   {% if not entities and not show_welcome %}
   <div class="pulse-empty-state">
     <h2 class="pulse-section-header">network pulse</h2>
-    <div class="pulse-empty-message">no one has appeared in today's record yet.</div>
+    <div class="pulse-empty-message">no one has appeared in today's journal yet.</div>
   </div>
   {% endif %}
 
@@ -1603,14 +1603,14 @@
         clearPulseRefreshError('pulse-vitals');
         let dotClass = data.capture_status === 'active' ? 'active' : (data.capture_status === 'stale' ? 'stale' : (data.capture_status === 'offline' ? 'offline' : 'unknown'));
         let displayStatus = data.capture_status === 'no_observers' ? 'no observers' : data.capture_status;
-        let html = '<div class="pulse-vitals-item"><span class="pulse-vitals-dot ' + dotClass + '" aria-hidden="true"></span><span>capture ' + esc(displayStatus) + '</span></div>';
+        let html = '<div class="pulse-vitals-item"><span class="pulse-vitals-dot ' + dotClass + '" aria-hidden="true"></span><span>observer ' + esc(displayStatus) + '</span></div>';
         if (data.segment_count > 0) {
           html += '<div class="pulse-vitals-sep"></div><div class="pulse-vitals-item">' + data.segment_count + ' segment' + (data.segment_count !== 1 ? 's' : '');
           if (data.duration_minutes > 0) html += ' · ' + data.duration_minutes + 'm';
           html += '</div>';
         }
         if (data.last_observe_relative) {
-          html += '<div class="pulse-vitals-sep"></div><div class="pulse-vitals-item">Last observation ' + esc(data.last_observe_relative) + '</div>';
+          html += '<div class="pulse-vitals-sep"></div><div class="pulse-vitals-item">last observation ' + esc(data.last_observe_relative) + '</div>';
         }
         if (data.attention) {
           html += '<div class="pulse-vitals-sep"></div><div class="pulse-vitals-item pulse-vitals-attention">' + esc(data.attention.placeholder_text) + '</div>';
@@ -1644,7 +1644,7 @@
           const hdr = document.querySelector('.pulse-narrative .pulse-section-header');
           if (hdr && data.narrative_header) hdr.textContent = data.narrative_header;
           const meta = document.querySelector('.pulse-narrative .pulse-narrative-meta');
-          if (meta && data.narrative_updated_at) meta.textContent = 'Updated at ' + data.narrative_updated_at;
+          if (meta && data.narrative_updated_at) meta.textContent = 'updated at ' + data.narrative_updated_at;
           var summaryEl = document.querySelector('.pulse-narrative .pulse-section-summary');
           if (summaryEl) {
             var st = data.narrative_header || '';

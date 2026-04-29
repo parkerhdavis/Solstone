@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import errno
 import json
 import logging
 import os
+import signal
 import sys
 import traceback
 from datetime import datetime
@@ -26,6 +28,7 @@ from string import Template
 from typing import Any, Callable, Optional
 
 from think.cluster import cluster, cluster_period, cluster_span
+from think.providers.cli import QuotaExhaustedError
 from think.providers.shared import Event
 from think.talent import (
     get_output_path,
@@ -71,6 +74,7 @@ class JSONEventWriter:
     def __init__(self, path: Optional[str] = None) -> None:
         self.path = path
         self.file = None
+        self._pipe_dead = False
         if path:
             try:
                 Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -80,8 +84,14 @@ class JSONEventWriter:
 
     def emit(self, data: Event) -> None:
         line = json.dumps(data, ensure_ascii=False)
-        print(line)
-        sys.stdout.flush()  # Ensure immediate output for cortex
+        if not self._pipe_dead:
+            try:
+                print(line)
+                sys.stdout.flush()  # Ensure immediate output for cortex
+            except (BrokenPipeError, OSError) as exc:
+                if not isinstance(exc, BrokenPipeError) and exc.errno != errno.EPIPE:
+                    raise
+                self._pipe_dead = True
         if self.file:
             try:
                 self.file.write(line + "\n")
@@ -456,7 +466,14 @@ def prepare_config(request: dict) -> dict:
     Returns:
         Fully prepared config dict
     """
-    from think.models import resolve_model_for_provider, resolve_provider
+    from think.models import (
+        TIER_FLASH,
+        TIER_LITE,
+        TIER_PRO,
+        _resolve_tier,
+        resolve_model_for_provider,
+        resolve_provider,
+    )
     from think.talent import get_talent, key_to_context
 
     name = request["name"]
@@ -534,11 +551,17 @@ def prepare_config(request: dict) -> dict:
     config["provider"] = provider
     config["model"] = model
     config["context"] = context
+    tier = _resolve_tier(context, talent_type)
+    config["tier"] = {
+        TIER_PRO: "pro",
+        TIER_FLASH: "flash",
+        TIER_LITE: "lite",
+    }.get(tier, str(tier))
 
     # --- Provider fallback: preflight swap if primary is unhealthy ---
     from think.models import (
         get_backup_provider,
-        is_provider_healthy,
+        is_provider_model_interface_healthy,
         load_health_status,
         should_recheck_health,
     )
@@ -547,7 +570,9 @@ def prepare_config(request: dict) -> dict:
     health_data = load_health_status()
     config["health_stale"] = should_recheck_health(health_data)
 
-    if not is_provider_healthy(provider, health_data):
+    if not is_provider_model_interface_healthy(
+        provider, model, talent_type, health_data
+    ):
         backup = get_backup_provider(talent_type)
         if backup and backup != provider:
             env_key = PROVIDER_METADATA.get(backup, {}).get("env_key")
@@ -800,6 +825,7 @@ _NON_RETRYABLE_ERRORS = (
     FileNotFoundError,
     PermissionError,
     NotImplementedError,
+    QuotaExhaustedError,
 )
 
 
@@ -810,6 +836,10 @@ def _is_retryable_error(exc: Exception) -> bool:
     Returns True for everything else (SDK connection, timeout, server errors).
     """
     return not isinstance(exc, _NON_RETRYABLE_ERRORS)
+
+
+def _should_fallback(exc: Exception) -> bool:
+    return _is_retryable_error(exc) or isinstance(exc, QuotaExhaustedError)
 
 
 async def _execute_with_tools(
@@ -852,8 +882,28 @@ async def _execute_with_tools(
     try:
         await provider_mod.run_cogitate(config=config, on_event=talent_emit_event)
     except Exception as exc:
-        if not _is_retryable_error(exc) or config.get("fallback_from"):
+        if config.get("fallback_from") or not _should_fallback(exc):
             raise
+        if isinstance(exc, QuotaExhaustedError):
+            reset_at_ms = now_ms() + (exc.retry_delay_ms or 0)
+            emit_event(
+                {
+                    "event": "error",
+                    "reason": "quota_exhausted",
+                    "error": str(exc),
+                    "reset_at_ms": reset_at_ms,
+                    "terminal": False,
+                }
+            )
+            from think.models import record_provider_failure
+
+            record_provider_failure(
+                provider,
+                config["tier"],
+                config["model"],
+                config["type"],
+                reset_at_ms,
+            )
         from think.models import (
             get_backup_provider,
             resolve_model_for_provider,
@@ -925,7 +975,7 @@ async def _execute_generate(
         emit_event: Event emission callback
     """
     from think.models import generate_with_result
-    from think.talent import key_to_context
+    from think.talent import hydrate_runtime_enums, key_to_context
 
     name = config["name"]
     messages = config.get("messages")
@@ -964,6 +1014,7 @@ async def _execute_generate(
             contents = ["No input provided."]
 
     context = key_to_context(name)
+    runtime_json_schema = hydrate_runtime_enums(config.get("json_schema"))
     try:
         gen_result = generate_with_result(
             contents=contents,
@@ -973,11 +1024,11 @@ async def _execute_generate(
             thinking_budget=thinking_budget,
             system_instruction=system_instruction,
             json_output=is_json_output,
-            json_schema=config.get("json_schema"),
+            json_schema=runtime_json_schema,
             timeout_s=timeout_s,
         )
     except Exception as exc:
-        if not _is_retryable_error(exc) or config.get("fallback_from"):
+        if config.get("fallback_from") or not _should_fallback(exc):
             raise
         from think.models import (
             get_backup_provider,
@@ -1019,7 +1070,7 @@ async def _execute_generate(
                 thinking_budget=thinking_budget,
                 system_instruction=system_instruction,
                 json_output=is_json_output,
-                json_schema=config.get("json_schema"),
+                json_schema=runtime_json_schema,
                 timeout_s=timeout_s,
                 provider=backup,
                 model=backup_model,
@@ -1239,6 +1290,16 @@ async def main_async() -> None:
 
     app_logger = setup_logging(args.verbose)
     event_writer = JSONEventWriter(None)
+    loop = asyncio.get_running_loop()
+    main_task = asyncio.current_task()
+    registered_signals: list[signal.Signals] = []
+    if main_task:
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, main_task.cancel)
+                registered_signals.append(sig)
+            except (NotImplementedError, RuntimeError):
+                LOG.debug("Signal handler registration unavailable for %s", sig)
 
     def emit_event(data: Event) -> None:
         if "ts" not in data:
@@ -1301,6 +1362,8 @@ async def main_async() -> None:
             emit_event(err)
         raise
     finally:
+        for sig in registered_signals:
+            loop.remove_signal_handler(sig)
         event_writer.close()
 
 

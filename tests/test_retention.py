@@ -223,8 +223,8 @@ class TestRetentionPolicy:
 class TestRetentionConfig:
     def test_default_policy(self):
         cfg = RetentionConfig()
-        assert cfg.policy_for_stream("default").mode == "days"
-        assert cfg.policy_for_stream("default").days == 7
+        assert cfg.policy_for_stream("default").mode == "keep"
+        assert cfg.policy_for_stream("default").days is None
 
     def test_per_stream_override(self):
         cfg = RetentionConfig(
@@ -247,8 +247,8 @@ class TestLoadRetentionConfig:
     def test_default_config(self, monkeypatch):
         monkeypatch.setattr("think.utils.get_config", lambda: {})
         cfg = load_retention_config()
-        assert cfg.default.mode == "days"
-        assert cfg.default.days == 7
+        assert cfg.default.mode == "keep"
+        assert cfg.default.days is None
         assert cfg.per_stream == {}
 
     def test_custom_config(self, monkeypatch):
@@ -268,6 +268,20 @@ class TestLoadRetentionConfig:
         assert cfg.default.mode == "days"
         assert cfg.default.days == 30
         assert cfg.per_stream["default"].mode == "processed"
+
+    def test_existing_journal_days_config_unchanged(self, monkeypatch):
+        monkeypatch.setattr(
+            "think.utils.get_config",
+            lambda: {
+                "retention": {
+                    "raw_media": "days",
+                    "raw_media_days": 7,
+                }
+            },
+        )
+        cfg = load_retention_config()
+        assert cfg.default.mode == "days"
+        assert cfg.default.days == 7
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +323,7 @@ class TestPurge:
         (day3 / "audio.flac").write_bytes(b"x" * 600)
         (day3 / "stream.json").write_text('{"stream":"default"}')
 
-        monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(journal))
+        monkeypatch.setenv("SOLSTONE_JOURNAL", str(journal))
         # Clear cached journal path
         import think.utils
 
@@ -654,3 +668,97 @@ class TestCheckStorageHealth:
             assert "message" in w
             assert "current" in w
             assert "threshold" in w
+
+
+class TestStorageHealthNudge:
+    def _make_summary(self):
+        return StorageSummary(
+            raw_media_bytes=int(10 * 1024**3),
+            derived_bytes=0,
+            total_segments=10,
+            segments_with_raw=5,
+            segments_purged=3,
+        )
+
+    def _config(self, mode: str) -> dict:
+        return {
+            "retention": {
+                "raw_media": mode,
+                "storage_warning_disk_percent": 1,
+                "storage_warning_raw_media_gb": 5.0,
+            }
+        }
+
+    def _force_disk_warning(self, tmp_path, monkeypatch) -> None:
+        usage_type = type(shutil.disk_usage(tmp_path))
+        monkeypatch.setattr(
+            "shutil.disk_usage",
+            lambda path: usage_type(1000, 950, 50),
+        )
+
+    def test_keep_mode_appends_nudge(self, tmp_path, monkeypatch):
+        self._force_disk_warning(tmp_path, monkeypatch)
+        warnings = check_storage_health(
+            self._make_summary(),
+            tmp_path,
+            config=self._config("keep"),
+        )
+        assert {warning["type"] for warning in warnings} == {
+            "disk_percent",
+            "raw_media_gb",
+        }
+        assert all(
+            "always retain observed media" in warning["message"] for warning in warnings
+        )
+
+    def test_days_mode_does_not_append_nudge(self, tmp_path, monkeypatch):
+        self._force_disk_warning(tmp_path, monkeypatch)
+        warnings = check_storage_health(
+            self._make_summary(),
+            tmp_path,
+            config=self._config("days"),
+        )
+        assert all(
+            "always retain observed media" not in warning["message"]
+            for warning in warnings
+        )
+
+    def test_processed_mode_does_not_append_nudge(self, tmp_path, monkeypatch):
+        self._force_disk_warning(tmp_path, monkeypatch)
+        warnings = check_storage_health(
+            self._make_summary(),
+            tmp_path,
+            config=self._config("processed"),
+        )
+        assert all(
+            "always retain observed media" not in warning["message"]
+            for warning in warnings
+        )
+
+
+class TestRetentionDerivationRule:
+    @staticmethod
+    def derive_retention(days_value: str, dont_retain: bool) -> tuple[str, int | None]:
+        # Mirrors the JS deriveRetention helper in convey/templates/init.html
+        # and apps/settings/workspace.html.
+        if dont_retain:
+            return ("processed", None)
+        try:
+            days = int(days_value)
+        except (TypeError, ValueError):
+            days = None
+        if days is not None and days >= 1:
+            return ("days", days)
+        return ("keep", None)
+
+    def test_empty_days_defaults_to_keep(self):
+        assert self.derive_retention("", False) == ("keep", None)
+
+    def test_numeric_days_uses_days_mode(self):
+        assert self.derive_retention("30", False) == ("days", 30)
+
+    def test_checkbox_wins_over_numeric_days(self):
+        assert self.derive_retention("30", True) == ("processed", None)
+
+    def test_checkbox_wins_when_days_empty(self):
+        assert self.derive_retention("", True) == ("processed", None)

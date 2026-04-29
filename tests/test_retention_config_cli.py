@@ -14,7 +14,7 @@ runner = CliRunner()
 
 @pytest.fixture
 def journal_env(tmp_path, monkeypatch):
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
     return tmp_path
 
 
@@ -35,7 +35,7 @@ def test_show_default(journal_env):
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload == {"default": {"mode": "days", "days": 7}, "per_stream": {}}
+    assert payload == {"default": {"mode": "keep", "days": None}, "per_stream": {}}
 
 
 def test_show_custom(journal_env):

@@ -6,7 +6,7 @@ const Dashboard = (function() {
   'use strict';
 
   const EXPECTED_SCHEMA_VERSION = 4;
-  const DISPLAY_LABELS = { transcript: 'Audio', percept: 'Screen' };
+  const DISPLAY_LABELS = { transcript: 'audio', percept: 'screen' };
 
   // DOM element factory
   function el(tag, attrs = {}, children = []) {
@@ -48,17 +48,6 @@ const Dashboard = (function() {
       return (value / 1e3).toFixed(1) + '\u2009K';
     }
     return String(Math.round(value));
-  }
-
-  function fmtRelativeTime(isoString) {
-    const seconds = Math.floor((Date.now() - new Date(isoString).getTime()) / 1000);
-    if (seconds < 60) return 'just now';
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return minutes + (minutes === 1 ? ' minute ago' : ' minutes ago');
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return hours + (hours === 1 ? ' hour ago' : ' hours ago');
-    const days = Math.floor(hours / 24);
-    return days + (days === 1 ? ' day ago' : ' days ago');
   }
 
   function fmtDay(raw) {
@@ -126,7 +115,7 @@ const Dashboard = (function() {
         el('div', {className: 'empty-chart'}, [
           el('div', {style: 'font-size: 2em;'}, ['📊']),
           el('div', {style: 'font-weight: 600; font-size: 1.1em;'}, ['No token data']),
-          el('div', {style: 'color: #999;'}, ['No token usage recorded for this model'])
+          el('div', {style: 'color: #999;'}, ['no token usage for this model'])
         ])
       );
       return;
@@ -229,7 +218,7 @@ const Dashboard = (function() {
     const legend = el('div', {className: 'token-legend'}, [
       el('div', {className: 'legend-item'}, [
         el('div', {className: 'legend-color', style: {background: '#2171b5'}, 'aria-hidden': 'true'}),
-        'Input'
+        'input'
       ]),
       el('div', {className: 'legend-item'}, [
         el('div', {
@@ -240,7 +229,7 @@ const Dashboard = (function() {
           },
           'aria-hidden': 'true'
         }),
-        'Reasoning'
+        'reasoning'
       ]),
       el('div', {className: 'legend-item'}, [
         el('div', {
@@ -252,7 +241,7 @@ const Dashboard = (function() {
           },
           'aria-hidden': 'true'
         }),
-        'Output'
+        'output'
       ])
     ]);
     container.appendChild(legend);
@@ -266,8 +255,8 @@ const Dashboard = (function() {
       container.appendChild(
         el('div', {className: 'empty-chart'}, [
           el('div', {style: 'font-size: 2em;'}, ['🎙️']),
-          el('div', {style: 'font-weight: 600; font-size: 1.1em;'}, ['No capture data']),
-          el('div', {style: 'color: #999;'}, ['No audio or screen capture hours recorded'])
+          el('div', {style: 'font-weight: 600; font-size: 1.1em;'}, ['no observations yet']),
+          el('div', {style: 'color: #999;'}, ['no audio or screen observations yet'])
         ])
       );
       return;
@@ -276,7 +265,7 @@ const Dashboard = (function() {
     // Calculate max total for scaling
     const maxTotal = Math.max(...data.map(d => d.audio + d.screen)) || 1;
 
-    const chart = el('div', {className: 'bar-chart', role: 'img', 'aria-label': 'Captured hours bar chart showing audio and screen time per day'});
+    const chart = el('div', {className: 'bar-chart', role: 'img', 'aria-label': 'observation hours bar chart showing audio and screen time per day'});
 
     data.forEach((d, i) => {
       const total = d.audio + d.screen;
@@ -334,7 +323,7 @@ const Dashboard = (function() {
     const legend = el('div', {className: 'token-legend'}, [
       el('div', {className: 'legend-item'}, [
         el('div', {className: 'legend-color', style: {background: '#2171b5'}, 'aria-hidden': 'true'}),
-        'Audio'
+        'audio'
       ]),
       el('div', {className: 'legend-item'}, [
         el('div', {
@@ -345,7 +334,7 @@ const Dashboard = (function() {
           },
           'aria-hidden': 'true'
         }),
-        'Screen'
+        'screen'
       ])
     ]);
     container.appendChild(legend);
@@ -356,7 +345,7 @@ const Dashboard = (function() {
     const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
     const maxVal = Math.max(...data.flat()) || 1;
     
-    const heatmap = el('div', {className: 'heatmap', role: 'grid', 'aria-label': 'Activity heatmap showing captures by day of week and hour'});
+    const heatmap = el('div', {className: 'heatmap', role: 'grid', 'aria-label': 'activity heatmap showing observations by day of week and hour'});
     
     // Empty top-left corner
     heatmap.appendChild(el('div'));
@@ -591,7 +580,7 @@ const Dashboard = (function() {
     const freshnessEl = document.getElementById('statsFreshness');
     if (freshnessEl) {
       freshnessEl.textContent = stats.generated_at
-        ? 'Stats generated ' + fmtRelativeTime(stats.generated_at)
+        ? 'Stats generated ' + relativeTime(Date.now() - new Date(stats.generated_at).getTime()) + ' ago'
         : '';
       const refreshLink = el('a', {
         className: 'stats-refresh',
@@ -636,7 +625,7 @@ const Dashboard = (function() {
     // Render stats cards
     const statsGrid = document.getElementById('statsGrid');
     statsGrid.innerHTML = ''; // Clear existing content
-    statsGrid.appendChild(statCard('total days', totalDays, 'days recorded'));
+    statsGrid.appendChild(statCard('total days', totalDays, 'days'));
     statsGrid.appendChild(statCard('audio hours', totalAudioHours, 'hours'));
     statsGrid.appendChild(statCard('screen hours', totalScreenHours, 'hours'));
     statsGrid.appendChild(statCard('total tokens', fmtTokens(totalTokens), 'tokens'));
@@ -646,10 +635,10 @@ const Dashboard = (function() {
     const progressSection = document.getElementById('progressSection');
     progressSection.innerHTML = ''; // Clear existing content
     progressSection.appendChild(
-      progressCard('Audio Processing', totals.transcript_sessions || 0, totals.pending_segments || 0)
+      progressCard('audio processing', totals.transcript_sessions || 0, totals.pending_segments || 0)
     );
     progressSection.appendChild(
-      progressCard('Agent Outputs', totals.outputs_processed || 0, totals.outputs_pending || 0)
+      progressCard('agent outputs', totals.outputs_processed || 0, totals.outputs_pending || 0)
     );
     
     // Token usage setup
@@ -661,8 +650,8 @@ const Dashboard = (function() {
     if (models.length > 0) {
       modelSelector.innerHTML = '';
       
-      // Add "Total" option first
-      const totalOption = el('option', {value: 'total'}, ['Total']);
+      // Add "total" option first
+      const totalOption = el('option', {value: 'total'}, ['total']);
       modelSelector.appendChild(totalOption);
       
       // Add individual models
@@ -714,8 +703,8 @@ const Dashboard = (function() {
       stats.facets.counts_by_day || {},
       {
         emptyIcon: '🏷️',
-        emptyText: 'No facet data recorded',
-        ariaLabel: 'Facets bar chart showing facet distribution over the last 30 days'
+        emptyText: 'no facet data yet',
+        ariaLabel: 'facets bar chart showing facet distribution over the last 30 days'
       }
     );
 
@@ -725,8 +714,8 @@ const Dashboard = (function() {
       stats.talents.counts_by_day || {},
       {
         emptyIcon: '⚡',
-        emptyText: 'No activity data recorded',
-        ariaLabel: 'Activities bar chart showing activity counts over the last 30 days'
+        emptyText: 'no activity data yet',
+        ariaLabel: 'activities bar chart showing activity counts over the last 30 days'
       }
     );
     
@@ -737,7 +726,7 @@ const Dashboard = (function() {
     if (hasRepairs) {
       const repairSection = document.getElementById('repairSection');
       const alert = el('div', {className: 'chart-section alert-repair'}, [
-        el('h2', {}, ['Items Needing Processing']),
+        el('h2', {}, ['items needing processing']),
         el('div', {className: 'stats-grid', id: 'repairGrid'})
       ]);
 
@@ -773,7 +762,7 @@ const Dashboard = (function() {
               window.location.reload();
               return;
             }
-            throw new Error('Failed to load data');
+            throw new Error('failed to load data');
           }
           return response.json();
         })
@@ -784,7 +773,7 @@ const Dashboard = (function() {
           document.getElementById('loading').style.display = 'none';
           document.getElementById('notice').appendChild(
             el('div', {className: 'alert alert-error'}, [
-              'Failed to load dashboard data: ' + error.message
+              'failed to load dashboard data: ' + error.message
             ])
           );
         });

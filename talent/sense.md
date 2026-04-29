@@ -38,14 +38,23 @@ Classify based on whether meaningful human activity occurred:
 
 ### content_type
 The dominant activity type observed:
-- **meeting**: Multi-person discussion with turn-taking (video call, in-person meeting, phone call)
-- **coding**: Writing or editing code, using a terminal, IDE, or code review tool
-- **browsing**: Web browsing, reading articles, searching
+- **meeting**: Video calls, in-person meetings, conferences with turn-taking
+- **coding**: Writing or editing code, IDE work, code review, debugging
+- **browsing**: Web browsing, research, reading articles online
 - **email**: Reading or composing email
 - **messaging**: Chat applications (Slack, Teams, Discord, iMessage)
+- **ai_conversation**: Conversations with AI assistants (ChatGPT, Claude, Gemini)
+- **writing**: Documents, notes, long-form writing
 - **reading**: Focused reading of documents, PDFs, books
+- **video**: Watching video or streaming content
+- **gaming**: Playing games
+- **social**: Social media browsing and interaction
+- **planning**: Scheduling, calendar management, agenda setting
+- **productivity**: Spreadsheets, slides, task management
+- **terminal**: Command line / shell sessions
+- **design**: Design tools, image editing
+- **music**: Music listening
 - **idle**: No meaningful activity
-- **mixed**: Multiple distinct activity types with no clear dominant one
 
 ### activity_summary
 Describe what $preferred did during this segment using action verbs. Be specific — name the tools, people, projects, and actions. Ban passive words: never use "reviewing", "monitoring", "tracking", "checking", "observing", "maintaining", "managing." Use instead: wrote, sent, discussed, created, switched to, typed, said, decided, asked, proposed.
@@ -75,15 +84,12 @@ Contamination guard: tool or product names visible on screen must be `source: sc
 - **other**: Use only when the entity is grounded in another clear signal that does not fit the categories above.
 
 ### facets
-Classify into the owner's configured facets. Only include facets with clear, direct evidence of activity. Be precise — assign exactly ONE primary facet in most cases. Only add a second facet if there is genuinely distinct secondary activity. For each:
+Classify into the owner's configured facets. Always include at least one facet — pick the closest configured facet. If multiple facets fit, include the dominant one as `level: high` and others at `level: medium` or `level: low`. For each:
 - `facet`: The facet ID slug — MUST be one of the configured facets listed in the input
 - `activity`: 1-sentence description of what was observed for this facet
 - `level`: "high" (primary focus), "medium" (significant), "low" (brief/peripheral)
 
-**Facet assignment rules:**
-- "meetings" — ONLY for live synchronous group meetings where $preferred is a participant. NOT for listening to lectures, podcasts, press conferences, or recorded media.
-- "learning" — Educational content: lectures, tutorials, articles, research, Wikipedia, podcasts. Includes listening to press conferences or recorded briefings.
-- "technical-work" — Hands-on technical tasks: coding, using developer tools, configuring software, installing extensions, product research for work purposes, technical document writing, online tool usage, price comparison shopping.
+**Facet assignment rules:** Do not invent facet IDs that are not in the configured journal facet list. The array always has at least one entry — pick the closest configured facet even when the match is loose, and use `level: low` to signal weak fit.
 
 ### meeting_detected
 `true` ONLY if you can identify distinct, named participants in a live multi-person interaction:
@@ -122,9 +128,9 @@ The observable emotional tone of the segment based on conversation tone, speech 
 
 1. Every field is required. Never omit a field.
 2. `entities` and `speakers` may be empty arrays `[]`.
-3. `facets` may be empty array `[]` if no configured facets match.
+3. `facets` always has at least one entry — the closest configured facet for the activity. Empty array is not allowed.
 4. Be precise with density — misclassifying active segments as idle is the worst error.
-5. For content_type, choose the single best match. Use "mixed" sparingly — only when there are truly multiple equal activities.
+5. For `content_type`, choose the single best match — the dominant activity in the segment. If two activities are roughly equal, pick the one with more durable continuation evidence (entities, repeated screen content); the `facets[]` array's `level` field already encodes secondary activity.
 6. Activity summary must describe observable actions, not inferred states.
 
 Return ONLY the JSON object, no other text or explanation.

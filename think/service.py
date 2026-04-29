@@ -55,19 +55,47 @@ def _unit_path() -> Path:
 
 
 def _sol_bin() -> str:
-    """Return absolute path to the sol binary in the current venv."""
-    return str(Path(sys.executable).parent / "sol")
+    """Return absolute path to the managed sol wrapper."""
+    return str(Path.home() / ".local" / "bin" / "sol")
+
+
+def service_is_installed() -> bool:
+    """Return whether the user service definition is installed."""
+    return _plist_path().exists() if _platform() == "darwin" else _unit_path().exists()
+
+
+def service_is_running() -> bool:
+    """Return whether the background service is currently running."""
+    if not service_is_installed():
+        return False
+    if _platform() == "darwin":
+        result = subprocess.run(
+            ["launchctl", "print", f"gui/{os.getuid()}/{SERVICE_LABEL}"],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0
+    result = subprocess.run(
+        ["systemctl", "--user", "is-active", SYSTEMD_UNIT],
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip() == "active"
 
 
 def _collect_env() -> dict[str, str]:
     """Collect environment variables for the service file.
 
-    Captures HOME and PATH (with venv bin prepended). The real PATH is read
-    from os.environ so installed services inherit the shell's tool visibility.
-    Falls back to /usr/local/bin:/usr/bin:/bin if PATH is unset. API keys are
-    NOT written into service files — the supervisor reads them from journal.json
-    at process startup via setup_cli(). Never propagate _SOLSTONE_JOURNAL_OVERRIDE
-    into service files — installed services should use default path resolution.
+    Captures HOME and PATH (with venv bin prepended). Real PATH is read
+    from os.environ so installed services inherit the shell's tool
+    visibility. Falls back to /usr/local/bin:/usr/bin:/bin if PATH is unset.
+    API keys are NOT written into service files — the supervisor reads them
+    from journal.json at process startup via setup_cli().
+
+    Never propagate SOLSTONE_JOURNAL into service files. Installed services
+    invoke ~/.local/bin/sol, which is a managed wrapper that sets
+    SOLSTONE_JOURNAL itself. The service's job is to start the wrapper, not
+    to configure the journal path.
     """
     venv_bin = str(Path(sys.executable).parent)
     base_path = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
@@ -81,7 +109,6 @@ def _collect_env() -> dict[str, str]:
 
 def _generate_plist(env: dict[str, str], port: int = DEFAULT_SERVICE_PORT) -> bytes:
     """Generate a launchd plist for the solstone supervisor."""
-    journal_path = str(Path(get_journal()).resolve())
     sol = _sol_bin()
 
     plist = {
@@ -90,8 +117,6 @@ def _generate_plist(env: dict[str, str], port: int = DEFAULT_SERVICE_PORT) -> by
         "EnvironmentVariables": env,
         "RunAtLoad": True,
         "KeepAlive": True,
-        "StandardOutPath": f"{journal_path}/health/launchd-stdout.log",
-        "StandardErrorPath": f"{journal_path}/health/launchd-stderr.log",
     }
     return plistlib.dumps(plist)
 
@@ -147,7 +172,7 @@ def remove_stale_plists() -> tuple[int, int]:
         if not extracted.endswith("/sol"):
             continue
 
-        if extracted == current and Path(extracted).exists():
+        if extracted == current:
             continue
 
         result = subprocess.run(
@@ -262,7 +287,9 @@ def _install(port: int = DEFAULT_SERVICE_PORT) -> int:
         path.write_text(unit_content)
         print(f"Wrote {path}")
 
+        print("Reloading systemd user units...")
         subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+        print("Enabling solstone.service...")
         subprocess.run(["systemctl", "--user", "enable", SYSTEMD_UNIT], check=True)
         print("Service enabled")
 
@@ -377,12 +404,7 @@ def _stop() -> int:
 
 def _restart(if_installed: bool = False) -> int:
     platform = _platform()
-    if platform == "darwin":
-        installed = _plist_path().exists()
-    else:
-        installed = _unit_path().exists()
-
-    if not installed:
+    if not service_is_installed():
         if if_installed:
             return 0
         print(
@@ -390,6 +412,10 @@ def _restart(if_installed: bool = False) -> int:
             file=sys.stderr,
         )
         return 1
+
+    print(
+        "Stopping old supervisor (waits for in-flight work to finish — may take a moment)..."
+    )
 
     if platform == "darwin":
         uid = os.getuid()
@@ -415,37 +441,28 @@ def _restart(if_installed: bool = False) -> int:
             print(f"Error restarting service: {result.stderr.strip()}", file=sys.stderr)
             return 1
 
-    print("Service restarted")
+    print("New supervisor process started (warming up)")
     return 0
 
 
 def _status() -> int:
     platform = _platform()
 
-    if platform == "darwin":
-        installed = _plist_path().exists()
-    else:
-        installed = _unit_path().exists()
-
-    if not installed:
+    if not service_is_installed():
         print("Service: not installed")
         print("Run 'sol service install' to install, or 'sol up' to install and start.")
         return 1
 
     print("Service: installed")
 
-    if platform == "darwin":
-        uid = os.getuid()
-        result = subprocess.run(
-            ["launchctl", "print", f"gui/{uid}/{SERVICE_LABEL}"],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
+    if service_is_running():
+        if platform == "darwin":
             print("State: running (launchd)")
         else:
-            print("State: stopped")
-            return 0
+            print("State: running (systemd)")
+    elif platform == "darwin":
+        print("State: stopped")
+        return 0
     else:
         result = subprocess.run(
             ["systemctl", "--user", "is-active", SYSTEMD_UNIT],
@@ -453,11 +470,8 @@ def _status() -> int:
             text=True,
         )
         state = result.stdout.strip()
-        if state == "active":
-            print("State: running (systemd)")
-        else:
-            print(f"State: {state}")
-            return 0
+        print(f"State: {state}")
+        return 0
 
     print()
     from think.health_cli import health_check
@@ -466,68 +480,34 @@ def _status() -> int:
 
 
 def _logs(follow: bool = False) -> int:
-    platform = _platform()
+    _platform()
+    journal_path = Path(get_journal())
+    service_log = journal_path / "health" / "service.log"
 
-    if platform == "linux":
-        cmd = ["journalctl", "--user", "-u", SYSTEMD_UNIT, "--no-pager", "-n", "100"]
-        if follow:
-            cmd.append("--follow")
-        result = subprocess.run(cmd)
+    if follow:
+        if not service_log.exists():
+            print("No service log file found", file=sys.stderr)
+            return 1
+        result = subprocess.run(["/usr/bin/tail", "-f", str(service_log)])
         return result.returncode
     else:
-        journal_path = Path(get_journal())
-        stdout_log = journal_path / "health" / "launchd-stdout.log"
-        stderr_log = journal_path / "health" / "launchd-stderr.log"
-
-        if follow:
-            logs_to_follow = [str(p) for p in [stdout_log, stderr_log] if p.exists()]
-            if not logs_to_follow:
-                print("No service log files found", file=sys.stderr)
-                return 1
-            result = subprocess.run(["/usr/bin/tail", "-f"] + logs_to_follow)
-            return result.returncode
+        if service_log.exists():
+            print(f"=== {service_log.name} ===")
+            print(service_log.read_text(errors="replace")[-10000:])
         else:
-            for log_path in [stdout_log, stderr_log]:
-                if log_path.exists():
-                    print(f"=== {log_path.name} ===")
-                    print(log_path.read_text(errors="replace")[-10000:])
-                else:
-                    print(f"=== {log_path.name} === (not found)")
-            return 0
+            print(f"=== {service_log.name} === (not found)")
+        return 0
 
 
 def _up(port: int = DEFAULT_SERVICE_PORT) -> int:
     """Install if needed, start if not running, show status."""
-    platform = _platform()
-
-    if platform == "darwin":
-        installed = _plist_path().exists()
-    else:
-        installed = _unit_path().exists()
-
-    if not installed:
+    if not service_is_installed():
         print("Installing service...")
         rc = _install(port=port)
         if rc != 0:
             return rc
 
-    if platform == "darwin":
-        uid = os.getuid()
-        result = subprocess.run(
-            ["launchctl", "print", f"gui/{uid}/{SERVICE_LABEL}"],
-            capture_output=True,
-            text=True,
-        )
-        running = result.returncode == 0
-    else:
-        result = subprocess.run(
-            ["systemctl", "--user", "is-active", SYSTEMD_UNIT],
-            capture_output=True,
-            text=True,
-        )
-        running = result.stdout.strip() == "active"
-
-    if not running:
+    if not service_is_running():
         print("Starting service...")
         rc = _start()
         if rc != 0:

@@ -15,7 +15,7 @@
     </details>
 
     <div id="capture-status-section" style="margin-top: 12px; display: none;">
-      <h4 style="margin: 0 0 4px 0; font-size: 13px; font-weight: 600;">capture</h4>
+      <h4 style="margin: 0 0 4px 0; font-size: 13px; font-weight: 600;">observer status</h4>
       <span id="capture-status-text" style="font-size: 13px;"></span>
     </div>
 
@@ -163,7 +163,7 @@
     if (wsLastMessageRaw) {
       if (metrics.lastMessageMs !== null) {
         const seconds = Math.floor(metrics.lastMessageMs / 1000);
-        wsLastMessageRaw.textContent = seconds === 0 ? 'just now' : `${formatDuration(seconds)} ago`;
+        wsLastMessageRaw.textContent = `${relativeTime(seconds * 1000)} ago`;
       } else if (metrics.connected) {
         wsLastMessageRaw.textContent = 'no messages yet';
       } else {
@@ -171,7 +171,7 @@
       }
     }
 
-    // Update composite icon if we have capture data
+    // Update composite icon if we have observer data
     if (_lastCaptureStatus !== null) updateCompositeIcon();
 
     // Update notification history
@@ -204,7 +204,7 @@
       text.style.color = '#10b981';
     } else if (status === 'stale') {
       const names = (capture.observers || []).filter(o => o.status === 'stale').map(o => o.name).join(', ');
-      text.textContent = 'capture ' + displayStatus + (names ? ' — ' + names : '');
+      text.textContent = 'observer ' + displayStatus + (names ? ' — ' + names : '');
       text.style.color = '#f59e0b';
       return;
     } else if (status === 'offline') {
@@ -212,7 +212,7 @@
     } else {
       text.style.color = '#9ca3af';
     }
-    text.textContent = 'capture ' + displayStatus;
+    text.textContent = 'observer ' + displayStatus;
   }
 
   function renderVersionSection(version) {
@@ -239,7 +239,7 @@
     const metrics = window.appEvents?.getMetrics?.();
     const wsState = metrics?.state || 'disconnected';
 
-    // Map capture status to severity: active=0, no_observers=0, stale=1, offline=2
+    // Map observer status to severity: active=0, no_observers=0, stale=1, offline=2
     // Map WS state to severity: connected=0, connecting=1, disconnected=2
     const captureSeverity = { active: 0, no_observers: 0, stale: 1, offline: 2 };
     const wsSeverity = { connected: 0, connecting: 1, disconnected: 2 };
@@ -247,7 +247,7 @@
     const cs = captureSeverity[_lastCaptureStatus] ?? 0;
     const ws = wsSeverity[wsState] ?? 2;
 
-    // Only override icon if capture makes it worse than WS alone
+    // Only override icon if observer status makes it worse than WS alone
     if (cs <= ws) return;
 
     const worst = Math.max(cs, ws);
@@ -283,11 +283,11 @@
 
     const escape = window.AppServices.escapeHtml;
     list.innerHTML = notifs.map(n => {
-      const timeAgo = window.AppServices.notifications._getRelativeTime(n.ts);
+      const relativeAge = window.AppServices.notifications._getRelativeTime(n.ts);
       const src = escape(n.source || '');
       const msg = escape((n.message || '').slice(0, 120));
       return `<div style="display: flex; align-items: center; gap: 8px; padding: 4px 0;">
-        <span style="color: #9ca3af; font-size: 11px; flex-shrink: 0;">${timeAgo}</span>
+        <span style="color: #9ca3af; font-size: 11px; flex-shrink: 0;">${relativeAge}</span>
         <code style="flex-shrink: 0; font-size: 11px;">${src}</code>
         <span style="color: #fca5a5; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${msg}</span>
       </div>`;
@@ -309,20 +309,20 @@
     }
 
     container.innerHTML = history.map(n => {
-      const timeAgo = window.AppServices.notifications._getRelativeTime(n.timestamp);
+      const relativeAge = window.AppServices.notifications._getRelativeTime(n.timestamp);
 
       if (n.action) {
         return `<a href="${escape(n.action)}" class="status-pane-history-item" style="display: flex; align-items: center; gap: 8px; padding: 6px 8px; margin: 0 -8px; border-radius: 4px; text-decoration: none; color: inherit;"
           ${n.facet ? `onclick="window.selectFacet && window.selectFacet('${escape(n.facet)}')"` : ''}>
           <span style="font-size: 16px; flex-shrink: 0;">${escape(n.icon)}</span>
           <span style="font-weight: 500; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escape(n.title)}</span>
-          <span style="color: #9ca3af; font-size: 11px; flex-shrink: 0;">${timeAgo}</span>
+          <span style="color: #9ca3af; font-size: 11px; flex-shrink: 0;">${relativeAge}</span>
         </a>`;
       } else {
         return `<div style="display: flex; align-items: center; gap: 8px; padding: 6px 8px; margin: 0 -8px;">
           <span style="font-size: 16px; flex-shrink: 0;">${escape(n.icon)}</span>
           <span style="font-weight: 500; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escape(n.title)}</span>
-          <span style="color: #9ca3af; font-size: 11px; flex-shrink: 0;">${timeAgo}</span>
+          <span style="color: #9ca3af; font-size: 11px; flex-shrink: 0;">${relativeAge}</span>
         </div>`;
       }
     }).join('');

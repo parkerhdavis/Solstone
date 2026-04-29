@@ -25,7 +25,7 @@ runner = CliRunner()
 
 @pytest.fixture
 def skill_cli_env(monkeypatch, tmp_path):
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
     return Path(tmp_path)
 
 
@@ -290,7 +290,7 @@ def test_observe_idempotent_exits_0_with_already_recorded(skill_cli_env):
     )
 
     assert result.exit_code == 0
-    assert "already recorded" in result.stderr
+    assert "already observed" in result.stderr
     rows = load_patterns()
     assert len(rows[0]["observations"]) == 1
 

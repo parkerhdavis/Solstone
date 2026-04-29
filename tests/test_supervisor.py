@@ -4,66 +4,13 @@
 import importlib
 import io
 import os
+import signal
 import subprocess
 import sys
 from unittest.mock import MagicMock
 
 import psutil
 import pytest
-
-
-@pytest.mark.asyncio
-async def test_send_notification(monkeypatch):
-    mod = importlib.import_module("think.supervisor")
-    called = []
-
-    class FakeNotifier:
-        async def send(self, title, message, urgency):
-            called.append({"title": title, "message": message, "urgency": urgency})
-            return "test-notification-id"
-
-    def fake_get_notifier():
-        return FakeNotifier()
-
-    monkeypatch.setattr(mod, "_get_notifier", fake_get_notifier)
-    await mod.send_notification("test message", alert_key=("test", "key"))
-    assert len(called) == 1
-    assert called[0]["message"] == "test message"
-    assert called[0]["title"] == "solstone Supervisor"
-    assert ("test", "key") in mod._notification_ids
-    assert mod._notification_ids[("test", "key")] == "test-notification-id"
-
-
-@pytest.mark.asyncio
-async def test_clear_notification(monkeypatch):
-    mod = importlib.import_module("think.supervisor")
-    cleared = []
-
-    class FakeNotifier:
-        async def send(self, title, message, urgency):
-            return "test-notification-id"
-
-        async def clear(self, notification_id):
-            cleared.append(notification_id)
-
-    def fake_get_notifier():
-        return FakeNotifier()
-
-    monkeypatch.setattr(mod, "_get_notifier", fake_get_notifier)
-
-    # First send a notification to track
-    await mod.send_notification("test message", alert_key=("test", "key"))
-    assert ("test", "key") in mod._notification_ids
-
-    # Now clear it
-    await mod.clear_notification(("test", "key"))
-    assert len(cleared) == 1
-    assert cleared[0] == "test-notification-id"
-    assert ("test", "key") not in mod._notification_ids
-
-    # Clearing a non-existent notification should be a no-op
-    await mod.clear_notification(("nonexistent", "key"))
-    assert len(cleared) == 1  # Still just one clear call
 
 
 def test_start_sense(tmp_path, mock_callosum, monkeypatch):
@@ -98,7 +45,7 @@ def test_start_sense(tmp_path, mock_callosum, monkeypatch):
         return proc
 
     monkeypatch.setattr(mod.subprocess, "Popen", fake_popen)
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
 
     # Test start_sense()
     sense_proc = mod.start_sense()
@@ -129,6 +76,23 @@ def test_parse_args_remote_flag_optional():
     args = parser.parse_args([])
 
     assert args.remote is None
+
+
+def test_parse_args_lifecycle_verb_hint(monkeypatch, capsys):
+    mod = importlib.reload(importlib.import_module("think.supervisor"))
+    monkeypatch.setattr(sys, "argv", ["sol", "supervisor", "stop"])
+
+    parser = mod.parse_args()
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args(["stop"])
+
+    captured = capsys.readouterr()
+    assert exc_info.value.code == 2
+    assert (
+        "sol supervisor is the server-launch command (takes a port). "
+        "For lifecycle, use: sol service <verb>. "
+        "Did you mean: sol service stop ?"
+    ) in captured.err
 
 
 def test_shutdown_stops_in_reverse_order(monkeypatch):
@@ -588,10 +552,93 @@ def test_stale_queue_detected_on_submit(monkeypatch):
     assert len(mod._task_queue._queues["indexer"]) == 1
 
 
+class _TaskProcessStub:
+    def __init__(self):
+        self.send_signal = MagicMock()
+        self.kill = MagicMock()
+
+
+class _TaskManagedStub:
+    def __init__(self, *, cmd, start_time=100.0):
+        self.cmd = cmd
+        self.start_time = start_time
+        self.process = _TaskProcessStub()
+
+
+def test_taskqueue_set_cap_records_cap():
+    mod = importlib.import_module("think.supervisor")
+    queue = mod.TaskQueue(on_queue_change=None)
+
+    queue.set_cap("import", 1800)
+
+    assert queue._caps["import"] == 1800
+
+
+def test_enforce_deadlines_sends_sigterm_when_elapsed_exceeds_cap(caplog):
+    mod = importlib.import_module("think.supervisor")
+    queue = mod.TaskQueue(on_queue_change=None)
+    managed = _TaskManagedStub(
+        cmd=["sol", "import", "--sync", "plaud", "--save"],
+        start_time=100.0,
+    )
+    queue._active["ref-1"] = managed
+    queue.set_cap("import", 50)
+
+    caplog.set_level("WARNING")
+    queue.enforce_deadlines(200.0)
+
+    managed.process.send_signal.assert_called_once_with(signal.SIGTERM)
+    assert queue._terminations["ref-1"] == 200.0
+    assert (
+        "Task import (cmd=sol import --sync plaud --save, ref=ref-1) exceeded "
+        "max_runtime of 50s (elapsed=100s); sending SIGTERM"
+    ) in caplog.text
+
+
+def test_enforce_deadlines_escalates_to_sigkill_after_15s(caplog):
+    mod = importlib.import_module("think.supervisor")
+    queue = mod.TaskQueue(on_queue_change=None)
+    managed = _TaskManagedStub(cmd=["sol", "import"], start_time=100.0)
+    queue._active["ref-1"] = managed
+    queue._terminations["ref-1"] = 200.0
+
+    caplog.set_level("WARNING")
+    queue.enforce_deadlines(216.0)
+
+    managed.process.kill.assert_called_once_with()
+    assert queue._terminations["ref-1"] == 0.0
+    assert (
+        "Task import (ref=ref-1) did not exit 15s after SIGTERM; sending SIGKILL"
+    ) in caplog.text
+
+
+def test_enforce_deadlines_clears_termination_state_when_ref_exits():
+    mod = importlib.import_module("think.supervisor")
+    queue = mod.TaskQueue(on_queue_change=None)
+    queue._terminations["ref-1"] = 200.0
+
+    queue.enforce_deadlines(216.0)
+
+    assert "ref-1" not in queue._terminations
+
+
+def test_enforce_deadlines_noop_when_no_cap():
+    mod = importlib.import_module("think.supervisor")
+    queue = mod.TaskQueue(on_queue_change=None)
+    managed = _TaskManagedStub(cmd=["sol", "import"], start_time=100.0)
+    queue._active["ref-1"] = managed
+
+    queue.enforce_deadlines(10_000.0)
+
+    managed.process.send_signal.assert_not_called()
+    managed.process.kill.assert_not_called()
+    assert queue._terminations == {}
+
+
 def test_supervisor_singleton_lock_acquired(tmp_path, monkeypatch):
     mod = importlib.reload(importlib.import_module("think.supervisor"))
 
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
     (tmp_path / "health").mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(sys, "argv", ["supervisor"])
 
@@ -622,7 +669,7 @@ def test_supervisor_singleton_lock_blocked(tmp_path, monkeypatch, capsys):
 
     mod = importlib.reload(importlib.import_module("think.supervisor"))
 
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
     health_dir = tmp_path / "health"
     health_dir.mkdir(parents=True, exist_ok=True)
     lock_file = open(health_dir / "supervisor.lock", "w")
@@ -651,7 +698,7 @@ def test_supervisor_singleton_lock_blocked_with_health(tmp_path, monkeypatch, ca
 
     mod = importlib.reload(importlib.import_module("think.supervisor"))
 
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
     health_dir = tmp_path / "health"
     health_dir.mkdir(parents=True, exist_ok=True)
     lock_file = open(health_dir / "supervisor.lock", "w")
@@ -682,7 +729,7 @@ def test_supervisor_singleton_lock_blocked_with_health(tmp_path, monkeypatch, ca
 def test_is_supervisor_up_without_pid_file(tmp_path, monkeypatch):
     mod = importlib.reload(importlib.import_module("think.supervisor"))
 
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
     (tmp_path / "health").mkdir(parents=True, exist_ok=True)
 
     assert mod.is_supervisor_up() is False
@@ -691,7 +738,7 @@ def test_is_supervisor_up_without_pid_file(tmp_path, monkeypatch):
 def test_is_supervisor_up_with_dead_pid(tmp_path, monkeypatch):
     mod = importlib.reload(importlib.import_module("think.supervisor"))
 
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
     health_dir = tmp_path / "health"
     health_dir.mkdir(parents=True, exist_ok=True)
 
@@ -705,7 +752,7 @@ def test_is_supervisor_up_with_dead_pid(tmp_path, monkeypatch):
 def test_is_supervisor_up_with_live_pid_missing_start_time(tmp_path, monkeypatch):
     mod = importlib.reload(importlib.import_module("think.supervisor"))
 
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
     health_dir = tmp_path / "health"
     health_dir.mkdir(parents=True, exist_ok=True)
     (health_dir / "supervisor.pid").write_text(str(os.getpid()))
@@ -716,7 +763,7 @@ def test_is_supervisor_up_with_live_pid_missing_start_time(tmp_path, monkeypatch
 def test_is_supervisor_up_with_live_pid_mismatched_start_time(tmp_path, monkeypatch):
     mod = importlib.reload(importlib.import_module("think.supervisor"))
 
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
     health_dir = tmp_path / "health"
     health_dir.mkdir(parents=True, exist_ok=True)
     (health_dir / "supervisor.pid").write_text(str(os.getpid()))
@@ -729,7 +776,7 @@ def test_is_supervisor_up_with_live_pid_mismatched_start_time(tmp_path, monkeypa
 def test_is_supervisor_up_with_matching_process_identity(tmp_path, monkeypatch):
     mod = importlib.reload(importlib.import_module("think.supervisor"))
 
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
     health_dir = tmp_path / "health"
     health_dir.mkdir(parents=True, exist_ok=True)
     (health_dir / "supervisor.pid").write_text(str(os.getpid()))

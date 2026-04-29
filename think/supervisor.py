@@ -18,7 +18,6 @@ from datetime import datetime
 from pathlib import Path
 
 import psutil
-from desktop_notifier import DesktopNotifier, Urgency
 
 from think import routines, scheduler
 from think.callosum import CallosumConnection, CallosumServer
@@ -43,12 +42,87 @@ DEFAULT_THRESHOLD = 60
 CHECK_INTERVAL = 30
 MAX_UPDATED_CATCHUP = 4
 TEMPFAIL_DELAY = 15  # seconds to wait before retrying a tempfail exit
+_ORPHAN_WORKER_NAMES = {
+    "sol:convey",
+    "sol:sense",
+    "sol:cortex",
+    "sol:link",
+    "sol:think",
+    "sol:heartbeat",
+}
+_SERVICE_LIFECYCLE_VERBS = {
+    "start",
+    "stop",
+    "restart",
+    "status",
+    "install",
+    "uninstall",
+    "logs",
+}
 
 # Global shutdown flag
 shutdown_requested = False
 # Supervisor identity (set in main() once ref is assigned)
 _supervisor_ref: str | None = None
 _supervisor_start: float | None = None
+
+
+def _find_reparented_sol_workers() -> list[tuple[int, str]]:
+    if sys.platform != "linux":
+        return []
+
+    orphans: list[tuple[int, str]] = []
+    for proc in psutil.process_iter(["pid", "name", "ppid"]):
+        try:
+            info = proc.info
+            pid = int(info["pid"])
+            name = str(info.get("name") or "")
+            ppid = int(info.get("ppid") or 0)
+        except (KeyError, TypeError, ValueError):
+            continue
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+        if name in _ORPHAN_WORKER_NAMES and ppid == 1:
+            orphans.append((pid, name))
+    return orphans
+
+
+def _reap_orphan_workers(orphans: list[tuple[int, str]], grace: float = 5.0) -> int:
+    if not orphans:
+        return 0
+
+    reaped = 0
+    for pid, name in orphans:
+        try:
+            logging.warning("Terminating orphaned sol worker %s (PID %d)", name, pid)
+            os.kill(pid, signal.SIGTERM)
+            reaped += 1
+        except ProcessLookupError:
+            reaped += 1
+        except (PermissionError, OSError):
+            logging.exception(
+                "Failed to terminate orphaned sol worker %s (PID %d)", name, pid
+            )
+
+    deadline = time.time() + grace
+    while time.time() < deadline:
+        if all(not psutil.pid_exists(pid) for pid, _name in orphans):
+            return reaped
+        time.sleep(0.1)
+
+    for pid, name in orphans:
+        if not psutil.pid_exists(pid):
+            continue
+        try:
+            logging.warning("Killing orphaned sol worker %s (PID %d)", name, pid)
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            continue
+        except (PermissionError, OSError):
+            logging.exception(
+                "Failed to kill orphaned sol worker %s (PID %d)", name, pid
+            )
+    return reaped
 
 
 class CallosumLogHandler(logging.Handler):
@@ -84,49 +158,20 @@ class CallosumLogHandler(logging.Handler):
             self._emitting = False
 
 
-# Desktop notification system
-_notifier: DesktopNotifier | None = None
-_notification_ids: dict[tuple, str] = {}  # Maps alert_key -> notification_id
-
-
-class AlertManager:
-    """Manages alerts with exponential backoff and notification clearing."""
-
-    def __init__(self, initial_backoff: int = 60, max_backoff: int = 3600):
-        self._state: dict[tuple, tuple[float, int]] = {}  # {key: (last_time, backoff)}
-        self._initial_backoff = initial_backoff
-        self._max_backoff = max_backoff
-
-    async def alert_if_ready(self, key: tuple, message: str) -> bool:
-        """Send alert with exponential backoff. Returns True if sent."""
-        now = time.time()
-
-        if key in self._state:
-            last_time, backoff = self._state[key]
-            if now - last_time >= backoff:
-                await send_notification(message, alert_key=key)
-                new_backoff = min(backoff * 2, self._max_backoff)
-                self._state[key] = (now, new_backoff)
-                logging.info(f"Alert sent, next backoff: {new_backoff}s")
-                return True
-            else:
-                remaining = int(backoff - (now - last_time))
-                logging.info(f"Suppressing alert, next in {remaining}s")
-                return False
-        else:
-            await send_notification(message, alert_key=key)
-            self._state[key] = (now, self._initial_backoff)
-            return True
-
-    async def clear(self, key: tuple) -> None:
-        """Clear alert state and notification."""
-        if key in self._state:
-            del self._state[key]
-        await clear_notification(key)
-
-    def clear_matching(self, predicate) -> None:
-        """Clear alert states matching predicate."""
-        self._state = {k: v for k, v in self._state.items() if not predicate(k, v)}
+class SupervisorArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        mistaken = next(
+            (arg for arg in sys.argv[1:] if arg in _SERVICE_LIFECYCLE_VERBS),
+            None,
+        )
+        if mistaken:
+            self.exit(
+                2,
+                "sol supervisor is the server-launch command (takes a port). "
+                "For lifecycle, use: sol service <verb>. "
+                f"Did you mean: sol service {mistaken} ?\n",
+            )
+        super().error(message)
 
 
 class TaskQueue:
@@ -152,6 +197,8 @@ class TaskQueue:
         ] = {}  # command_name -> {"ref": str, "thread": Thread}
         self._queues: dict[str, list] = {}  # command_name -> list of {refs, cmd} dicts
         self._active: dict[str, RunnerManagedProcess] = {}  # ref -> process
+        self._caps: dict[str, int] = {}
+        self._terminations: dict[str, float] = {}
         self._pending: list[dict] = []
         self._ready = ready
         self._lock = threading.Lock()
@@ -274,6 +321,63 @@ class TaskQueue:
 
         return None
 
+    def set_cap(self, cmd_name: str, seconds: int) -> None:
+        """Set a max runtime cap in seconds for a queued command name."""
+        with self._lock:
+            self._caps[cmd_name] = seconds
+
+    def enforce_deadlines(self, now: float) -> None:
+        """Enforce configured task runtime caps without blocking the supervisor tick."""
+        with self._lock:
+            active_refs = set(self._active)
+            for ref in list(self._terminations):
+                if ref not in active_refs:
+                    self._terminations.pop(ref, None)
+
+            for ref, managed in list(self._active.items()):
+                cmd_name = self.get_command_name(managed.cmd)
+                termination_started = self._terminations.get(ref)
+                if termination_started is not None:
+                    if termination_started <= 0:
+                        continue
+                    if now - termination_started >= 15:
+                        logging.warning(
+                            "Task %s (ref=%s) did not exit 15s after SIGTERM; "
+                            "sending SIGKILL",
+                            cmd_name,
+                            ref,
+                        )
+                        try:
+                            managed.process.kill()
+                        except (ProcessLookupError, OSError):
+                            pass
+                        self._terminations[ref] = 0.0
+                    continue
+
+                cap = self._caps.get(cmd_name)
+                if not cap:
+                    continue
+
+                elapsed = now - managed.start_time
+                if elapsed <= cap:
+                    continue
+
+                elapsed_seconds = int(elapsed)
+                logging.warning(
+                    "Task %s (cmd=%s, ref=%s) exceeded max_runtime of %ds "
+                    "(elapsed=%ds); sending SIGTERM",
+                    cmd_name,
+                    " ".join(managed.cmd),
+                    ref,
+                    cap,
+                    elapsed_seconds,
+                )
+                try:
+                    managed.process.send_signal(signal.SIGTERM)
+                    self._terminations[ref] = now
+                except (ProcessLookupError, OSError):
+                    pass
+
     def set_ready(self) -> None:
         """Allow buffered tasks to start dispatching through the normal queue path."""
         with self._lock:
@@ -320,7 +424,8 @@ class TaskQueue:
             managed = RunnerManagedProcess.spawn(
                 cmd, ref=primary_ref, callosum=callosum, day=day
             )
-            self._active[primary_ref] = managed
+            with self._lock:
+                self._active[primary_ref] = managed
 
             callosum.emit(
                 "supervisor",
@@ -370,7 +475,8 @@ class TaskQueue:
                     managed.cleanup()
             except Exception:
                 logging.exception(f"Task {cmd_name} ({primary_ref}): cleanup failed")
-            self._active.pop(primary_ref, None)
+            with self._lock:
+                self._active.pop(primary_ref, None)
             try:
                 callosum.stop()
             except Exception:
@@ -649,58 +755,6 @@ def _launch_process(
         threads=managed._threads,
         ref=managed.ref,
     )
-
-
-def _get_notifier() -> DesktopNotifier:
-    """Get or create the global desktop notifier instance."""
-    global _notifier
-    if _notifier is None:
-        _notifier = DesktopNotifier(app_name="solstone Supervisor")
-    return _notifier
-
-
-async def send_notification(message: str, alert_key: tuple | None = None) -> None:
-    """Send a desktop notification with ``message``.
-
-    Args:
-        message: The notification message to display
-        alert_key: Optional key to track this notification for later clearing
-    """
-    try:
-        notifier = _get_notifier()
-        notification_id = await notifier.send(
-            title="solstone Supervisor",
-            message=message,
-            urgency=Urgency.Critical,
-        )
-
-        # Store notification ID if we have an alert key
-        if alert_key and notification_id:
-            _notification_ids[alert_key] = notification_id
-            logging.debug(f"Stored notification {notification_id} for key {alert_key}")
-
-    except Exception as exc:  # pragma: no cover - system issues
-        logging.error("Failed to send notification: %s", exc)
-
-
-async def clear_notification(alert_key: tuple) -> None:
-    """Clear a notification by its alert key.
-
-    Args:
-        alert_key: The key used when the notification was sent
-    """
-    if alert_key not in _notification_ids:
-        return
-
-    try:
-        notifier = _get_notifier()
-        notification_id = _notification_ids[alert_key]
-        await notifier.clear(notification_id)
-        del _notification_ids[alert_key]
-        logging.debug(f"Cleared notification for key {alert_key}")
-
-    except Exception as exc:  # pragma: no cover - system issues
-        logging.error("Failed to clear notification: %s", exc)
 
 
 def _emit_queue_event(cmd_name: str, running_ref: str, queue: list) -> None:
@@ -1011,17 +1065,13 @@ def check_runner_exits(procs: list[ManagedProcess]) -> list[ManagedProcess]:
     return exited
 
 
-async def handle_runner_exits(
-    procs: list[ManagedProcess],
-    alert_mgr: AlertManager,
-) -> None:
+async def handle_runner_exits(procs: list[ManagedProcess]) -> None:
     """Check for and handle exited processes with restart policy."""
     exited = check_runner_exits(procs)
     if not exited:
         return
 
     exited_names = [managed.name for managed in exited]
-    exit_key = ("runner_exit", tuple(sorted(exited_names)))
 
     # Check if all exits are tempfail (session not ready)
     all_tempfail = all(m.process.returncode == EXIT_TEMPFAIL for m in exited)
@@ -1031,7 +1081,6 @@ async def handle_runner_exits(
     else:
         msg = f"Runner process exited: {', '.join(sorted(exited_names))}"
         logging.error(msg)
-        await alert_mgr.alert_if_ready(exit_key, msg)
 
     for managed in exited:
         # Clear any pending restart request for this service
@@ -1092,8 +1141,6 @@ async def handle_runner_exits(
 
             procs.append(new_proc)
             logging.info("Restarted %s after exit code %s", managed.name, returncode)
-            # Clear the notification now that process has restarted
-            await alert_mgr.clear(exit_key)
         else:
             logging.info("Not restarting %s", managed.name)
 
@@ -1377,7 +1424,6 @@ async def supervise(
     Monitors runner health, emits status, triggers daily processing,
     and checks scheduled agents.
     """
-    alert_mgr = AlertManager()
     last_status_emit = 0.0
 
     try:
@@ -1398,9 +1444,12 @@ async def supervise(
                         logging.error(f"Failed to kill {service}: {e}")
                     # Don't delete here - let handle_runner_exits clean up
 
+            if _task_queue:
+                _task_queue.enforce_deadlines(time.time())
+
             # Check for runner exits first (immediate alert)
             if procs:
-                await handle_runner_exits(procs, alert_mgr)
+                await handle_runner_exits(procs)
 
             # Emit status every 5 seconds
             now = time.time()
@@ -1432,7 +1481,7 @@ async def supervise(
 
 
 def parse_args() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Monitor journaling health")
+    parser = SupervisorArgumentParser(description="Monitor journaling health")
     parser.add_argument(
         "port",
         nargs="?",
@@ -1554,6 +1603,8 @@ def main() -> None:
     # Written here, not at _supervisor_start, to minimize drift from psutil create_time().
     start_time_path.write_text(str(time.time()))
     logging.info("Singleton lock acquired (PID %d)", os.getpid())
+    orphans = _find_reparented_sol_workers()
+    _reap_orphan_workers(orphans)
 
     # Set up signal handlers
     signal.signal(signal.SIGINT, handle_shutdown)
@@ -1579,6 +1630,7 @@ def main() -> None:
     try:
         ran, succeeded = run_pending_tasks(journal_path, emit_fn=None)
         if ran > 0:
+            print(f"  Ran {ran} maintenance task(s)", flush=True)
             if ran == succeeded:
                 logging.info("Completed %d/%d maintenance task(s)", succeeded, ran)
             else:
@@ -1590,8 +1642,18 @@ def main() -> None:
     except Exception:
         logging.exception("Maintenance runner raised; continuing startup")
 
+    try:
+        from think.importers.journal_archive import sweep_stale_extract_dirs
+
+        swept = sweep_stale_extract_dirs()
+        if swept > 0:
+            logging.info("Swept %d stale journal-archive extract dir(s)", swept)
+    except Exception:
+        logging.exception("Journal archive extract sweep raised; continuing startup")
+
     # Start Callosum in-process first - it's the message bus that other services depend on
     try:
+        print("  Starting Callosum bus...", flush=True)
         start_callosum_in_process()
     except RuntimeError as e:
         logging.error(f"Failed to start Callosum server: {e}")
@@ -1632,18 +1694,23 @@ def main() -> None:
         # Local mode: convey first, then sense for file processing
         os.environ["SOL_SUPERVISOR_SPAWNED"] = "1"
         if not args.no_convey:
+            print(f"  Starting convey on port {args.port}...", flush=True)
             proc, convey_port = start_convey_server(
                 verbose=args.verbose, debug=args.debug, port=args.port
             )
             procs.append(proc)
             wait_for_convey_ready(proc)
+            print("  Convey ready", flush=True)
         # Sense handles file processing
+        print("  Starting sense...", flush=True)
         procs.append(start_sense())
         # Cortex for agent execution
         if not args.no_cortex:
+            print("  Starting cortex...", flush=True)
             procs.append(start_cortex_server())
         # Link tunnel service (opt-out via --no-link)
         if not args.no_link:
+            print("  Starting link...", flush=True)
             procs.append(start_link_server())
 
     # Make procs accessible to restart handler
@@ -1657,6 +1724,15 @@ def main() -> None:
     if schedule_enabled and _supervisor_callosum:
         scheduler.init(_supervisor_callosum)
         scheduler.register_defaults()
+        if _task_queue:
+            for cmd, seconds in scheduler.collect_runtime_caps():
+                cmd_name = TaskQueue.get_command_name(cmd)
+                _task_queue.set_cap(cmd_name, seconds)
+                logging.info(
+                    "Registered max_runtime cap for %s: %ss",
+                    cmd_name,
+                    seconds,
+                )
         routines.init(_supervisor_callosum)
 
     if _task_queue:
@@ -1704,6 +1780,7 @@ def main() -> None:
                     )
 
     try:
+        print("  Supervisor ready", flush=True)
         asyncio.run(
             supervise(
                 daily=daily_enabled,
@@ -1719,26 +1796,17 @@ def main() -> None:
 
         def _stop_process(managed: ManagedProcess) -> None:
             name = managed.name
-            proc = managed.process
-            logging.info(f"Stopping {name}...")
+            logging.info("Stopping %s...", name)
             print(f"  Stopping {name}...", end="", flush=True)
             try:
-                proc.terminate()
-            except Exception:
-                pass
-            try:
                 timeout = getattr(managed, "shutdown_timeout", 15)
-                proc.wait(timeout=timeout)
+                managed.terminate(timeout=timeout)
                 print(" done", flush=True)
             except subprocess.TimeoutExpired:
-                logging.warning(f"{name} did not terminate gracefully, killing...")
+                logging.warning("%s did not terminate gracefully, killing...", name)
                 print(" timeout, forcing kill...", flush=True)
-                try:
-                    proc.kill()
-                    proc.wait(timeout=1)
-                except Exception:
-                    pass
-            managed.cleanup()
+            finally:
+                managed.cleanup()
 
         # Stop services in reverse order
         for managed in reversed(procs):
