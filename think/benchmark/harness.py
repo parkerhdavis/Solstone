@@ -289,8 +289,10 @@ def _bench_tok_s(result: BenchmarkResult) -> tuple[float, float]:
     native_out = result.get("native_output_tok_s")
     native_prompt = result.get("native_prompt_tok_s")
 
-    out_rate = native_out if native_out is not None else (
-        output_tokens / elapsed if elapsed > 0 else 0.0
+    out_rate = (
+        native_out
+        if native_out is not None
+        else (output_tokens / elapsed if elapsed > 0 else 0.0)
     )
     prompt_rate = native_prompt if native_prompt is not None else 0.0
     return out_rate, prompt_rate

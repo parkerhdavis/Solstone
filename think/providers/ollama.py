@@ -216,7 +216,9 @@ def _build_messages(
                 if _is_content_block_list(content):
                     msg.update(_translate_content_blocks(content))
                 else:
-                    msg["content"] = content if isinstance(content, str) else str(content)
+                    msg["content"] = (
+                        content if isinstance(content, str) else str(content)
+                    )
                 # Preserve any pre-set images key on the raw message
                 # (e.g. callers that already constructed the Ollama-native
                 # shape); content-block translation above wins if present.
@@ -716,9 +718,7 @@ def _native_tok_s(body: dict[str, Any]) -> tuple[float | None, float | None]:
     prompt_eval_count = body.get("prompt_eval_count") or 0
     prompt_eval_duration_ns = body.get("prompt_eval_duration") or 0
 
-    output_tok_s = (
-        (eval_count / (eval_duration_ns / 1e9)) if eval_duration_ns else None
-    )
+    output_tok_s = (eval_count / (eval_duration_ns / 1e9)) if eval_duration_ns else None
     prompt_tok_s = (
         (prompt_eval_count / (prompt_eval_duration_ns / 1e9))
         if prompt_eval_duration_ns
@@ -811,9 +811,7 @@ def bench_run_once(
     if image_b64 is not None:
         blocks.append({"type": "image", "data": image_b64, "mime": "image/jpeg"})
     if audio_b64 is not None:
-        blocks.append(
-            {"type": "audio", "data": audio_b64, "format": audio_format}
-        )
+        blocks.append({"type": "audio", "data": audio_b64, "format": audio_format})
     messages = _build_messages([{"role": "user", "content": blocks}])
 
     body = {
