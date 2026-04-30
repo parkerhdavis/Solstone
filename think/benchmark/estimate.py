@@ -715,10 +715,17 @@ def list_prevetted_models(
 
 
 def _task_applies_to_model(task_spec: dict[str, Any], capabilities: list[str]) -> bool:
-    """A vision task requires a vision capability; other tasks apply broadly."""
+    """Gate tasks by model capability.
+
+    Vision tasks require the ``vision`` capability; audio tasks require
+    the ``audio`` capability. Text tasks apply broadly to any model that
+    can generate text (``generate`` or ``cogitate``).
+    """
     mode = task_spec.get("mode", "text")
     if mode == "vision":
         return "vision" in capabilities
+    if mode == "audio":
+        return "audio" in capabilities
     # Text tasks: apply to any model that can generate text (generate or cogitate).
     return any(cap in ("generate", "cogitate") for cap in capabilities)
 

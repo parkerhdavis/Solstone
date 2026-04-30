@@ -101,6 +101,28 @@
       "tier_role": "vision",
       "ui_priority": 1
     },
+    "audio_transcribe": {
+      "label": "Audio transcribe",
+      "description": "Verbatim transcription of a 30s speech clip via a multimodal LLM. Comparable to Whisper/Parakeet ASR for speed; uniquely exercises the audio-input modality of vLLM-served omni models. Audio encoder ~380 tokens per 30s, text prompt adds ~25.",
+      "prompt_tokens": 406,
+      "output_tokens": 120,
+      "mode": "audio",
+      "audio_fixture": "audio_30s.wav",
+      "presence": "background",
+      "tier_role": "audio",
+      "ui_priority": 1
+    },
+    "audio_summarize": {
+      "label": "Audio summarize",
+      "description": "Summarize a 30s speech clip in one paragraph via a multimodal LLM. Beyond what Whisper alone can do — measures end-to-end audio comprehension, not just transcription. Same fixture as audio_transcribe; differs in the text prompt and expected output length.",
+      "prompt_tokens": 406,
+      "output_tokens": 150,
+      "mode": "audio",
+      "audio_fixture": "audio_30s.wav",
+      "presence": "background",
+      "tier_role": "audio",
+      "ui_priority": 2
+    },
     "segment_sense": {
       "label": "Segment sense",
       "description": "Lite per-segment classification: density, content_type, activity summary, entities, facets, speakers, emotional register. Runs once per segment (talent/sense.md).",

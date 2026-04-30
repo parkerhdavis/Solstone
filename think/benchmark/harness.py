@@ -83,6 +83,18 @@ _VISION_PROMPT = (
     "include headings, lists, or citations — a single paragraph of prose."
 )
 
+# Prompt used in synthetic audio mode alongside the canned audio fixture.
+_AUDIO_PROMPT = (
+    "Describe what you hear in this audio in a focused 200-word "
+    "paragraph. Cover the speaker (one or many), the content of any "
+    "speech, the tone and pace, and any non-speech sounds. Do not "
+    "include headings or lists — a single paragraph of prose."
+)
+
+# Default audio fixture for synthetic audio mode (when no --task is
+# specified). Resolved relative to _FIXTURES_DIR.
+_DEFAULT_AUDIO_FIXTURE = "audio_30s.wav"
+
 _MAX_OUTPUT_TOKENS = 256
 _WARMUP_RUNS = 1
 _MEASURE_RUNS = 3
@@ -151,10 +163,31 @@ def _resolve_provider(model: str) -> ModuleType:
     )
 
 
+def _load_audio_b64(audio_fixture: str | None) -> tuple[str, str]:
+    """Load an audio fixture from ``fixtures/`` and return (base64, format).
+
+    ``audio_fixture`` is a filename relative to ``_FIXTURES_DIR`` (e.g.
+    ``audio_30s.wav``). ``None`` means "use the default fixture." The
+    return ``format`` is the file extension lowercased without the dot,
+    matching what vLLM's ``input_audio.format`` field expects (``wav``,
+    ``flac``, ``mp3``, etc.).
+    """
+    name = audio_fixture or _DEFAULT_AUDIO_FIXTURE
+    path = _FIXTURES_DIR / name
+    if not path.exists():
+        raise SystemExit(
+            f"No audio fixture at {path}. Add one before running audio-mode harness."
+        )
+    suffix = path.suffix.lstrip(".").lower() or "wav"
+    return base64.b64encode(path.read_bytes()).decode("ascii"), suffix
+
+
 def run_once(
     model: str,
     *,
     vision: bool = False,
+    audio: bool = False,
+    audio_fixture: str | None = None,
     prompt_override: str | None = None,
     max_output_tokens: int = _MAX_OUTPUT_TOKENS,
 ) -> BenchmarkResult:
@@ -162,19 +195,36 @@ def run_once(
 
     When ``vision=True``, include a canned image in the user message so
     the prompt-eval count captures image-encoder cost. When
-    ``prompt_override`` is set, use that text instead of the default
-    benchmark prompt — used by task-mode runs that read a fixture.
+    ``audio=True``, include the audio fixture (default
+    ``_DEFAULT_AUDIO_FIXTURE``, or whichever ``audio_fixture`` names) so
+    prompt-eval captures audio-encoder cost. ``vision`` and ``audio`` may
+    be combined for omni models. When ``prompt_override`` is set, use
+    that text instead of the default mode-specific prompt — used by
+    task-mode runs that read a fixture.
 
     Returns a normalized BenchmarkResult; provider-specific transport,
     response shape, and tok/s computation live in the provider module.
     """
     provider = _resolve_provider(model)
-    prompt_text = prompt_override or (_VISION_PROMPT if vision else _TEXT_PROMPT)
+    if prompt_override is not None:
+        prompt_text = prompt_override
+    elif audio:
+        prompt_text = _AUDIO_PROMPT
+    elif vision:
+        prompt_text = _VISION_PROMPT
+    else:
+        prompt_text = _TEXT_PROMPT
     image_b64 = _build_canned_image_b64() if vision else None
+    audio_b64: str | None = None
+    audio_format = "wav"
+    if audio:
+        audio_b64, audio_format = _load_audio_b64(audio_fixture)
     return provider.bench_run_once(
         model,
         prompt=prompt_text,
         image_b64=image_b64,
+        audio_b64=audio_b64,
+        audio_format=audio_format,
         max_output_tokens=max_output_tokens,
     )
 
@@ -231,6 +281,17 @@ def main() -> int:
             "Vision mode: include a canned image in the prompt. Use for VLMs "
             "so prompt-eval captures image-encoder cost. Auto-enabled when "
             "--task specifies a vision-mode task."
+        ),
+    )
+    parser.add_argument(
+        "--audio",
+        action="store_true",
+        help=(
+            "Audio mode: include the default audio fixture (audio_30s.wav, a "
+            "30s LibriVox PD speech clip) in the prompt. Use for omni models "
+            "so prompt-eval captures audio-encoder cost. Auto-enabled when "
+            "--task specifies an audio-mode task. Provider must support "
+            "audio (currently vLLM-served omni models)."
         ),
     )
     parser.add_argument(
@@ -300,7 +361,12 @@ def _bench_tok_s(result: BenchmarkResult) -> tuple[float, float]:
 
 def _run_tok_s_mode(args: argparse.Namespace) -> int:
     """Synthetic-prompt tok/s benchmark."""
-    mode = "vision" if args.vision else "text_only"
+    if args.audio:
+        mode = "audio"
+    elif args.vision:
+        mode = "vision"
+    else:
+        mode = "text_only"
     print(
         f"Benchmarking {args.model} on class '{args.hw_class}' in {mode} mode "
         f"({_WARMUP_RUNS} warmup + {_MEASURE_RUNS} measured runs)…",
@@ -309,13 +375,13 @@ def _run_tok_s_mode(args: argparse.Namespace) -> int:
 
     for i in range(_WARMUP_RUNS):
         print(f"  warmup {i + 1}/{_WARMUP_RUNS}…", file=sys.stderr)
-        run_once(args.model, vision=args.vision)
+        run_once(args.model, vision=args.vision, audio=args.audio)
 
     output_rates: list[float] = []
     prompt_rates: list[float] = []
     for i in range(_MEASURE_RUNS):
         print(f"  run {i + 1}/{_MEASURE_RUNS}…", file=sys.stderr)
-        result = run_once(args.model, vision=args.vision)
+        result = run_once(args.model, vision=args.vision, audio=args.audio)
         out_rate, prompt_rate = _bench_tok_s(result)
         output_rates.append(out_rate)
         prompt_rates.append(prompt_rate)
@@ -348,12 +414,15 @@ def _run_task_mode(args: argparse.Namespace) -> int:
     """End-to-end task-fixture benchmark; records wall-clock seconds."""
     task_spec = _load_task(args.task)
     fixture = _load_fixture(args.task)
-    vision = task_spec.get("mode") == "vision" or args.vision
+    task_mode = task_spec.get("mode")
+    vision = task_mode == "vision" or args.vision
+    audio = task_mode == "audio" or args.audio
+    audio_fixture = task_spec.get("audio_fixture") if task_mode == "audio" else None
     expected_output_tokens = int(task_spec.get("output_tokens") or 400)
 
     print(
         f"Benchmarking task '{args.task}' with {args.model} on class "
-        f"'{args.hw_class}' (mode={task_spec.get('mode')}, presence="
+        f"'{args.hw_class}' (mode={task_mode}, presence="
         f"{task_spec.get('presence')}); {_WARMUP_RUNS} warmup + "
         f"{_MEASURE_RUNS} measured runs…",
         file=sys.stderr,
@@ -364,6 +433,8 @@ def _run_task_mode(args: argparse.Namespace) -> int:
         run_once(
             args.model,
             vision=vision,
+            audio=audio,
+            audio_fixture=audio_fixture,
             prompt_override=fixture,
             max_output_tokens=expected_output_tokens,
         )
@@ -376,6 +447,8 @@ def _run_task_mode(args: argparse.Namespace) -> int:
         result = run_once(
             args.model,
             vision=vision,
+            audio=audio,
+            audio_fixture=audio_fixture,
             prompt_override=fixture,
             max_output_tokens=expected_output_tokens,
         )
