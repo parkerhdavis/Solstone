@@ -1,0 +1,1 @@
+Transcribe the audio verbatim. Return only the transcript text — no preamble, no commentary, no quotation marks, no labels. Preserve sentence punctuation but keep the output as a single paragraph.
