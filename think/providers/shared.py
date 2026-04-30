@@ -313,8 +313,53 @@ def safe_raw(
     return trimmed
 
 
+# ---------------------------------------------------------------------------
+# Benchmark interface
+# ---------------------------------------------------------------------------
+#
+# Providers that participate in `think.benchmark.harness` expose two
+# functions:
+#
+#   bench_ensure_installed(model, *, allow_pull) -> None
+#       Verify the model is locally available; optionally trigger a pull.
+#       Raise SystemExit on failure with a clear remediation message.
+#
+#   bench_run_once(model, *, prompt, image_b64=None, audio_b64=None,
+#                  audio_format="wav", max_output_tokens) -> BenchmarkResult
+#       Send one synchronous benchmark request and return a normalized
+#       BenchmarkResult. The provider is responsible for any provider-
+#       specific request shaping (Ollama caps num_ctx; vLLM relies on
+#       max_model_len set at serve time; etc.).
+#
+# The harness owns the *policy* (which prompts, which media, when to run)
+# and the providers own the *transport* (how to reach the model and
+# extract timing). This keeps harness code provider-agnostic and lets new
+# providers slot in without harness changes.
+
+
+class BenchmarkResult(TypedDict, total=False):
+    """One benchmark request's outcome, normalized across providers.
+
+    ``elapsed_s`` is wall-clock around the provider's HTTP round-trip.
+    ``native_output_tok_s`` / ``native_prompt_tok_s`` are the provider's
+    own server-side counters when available (Ollama reports nanosecond
+    eval durations; vLLM does not). Harness reporting prefers native when
+    present and falls back to ``output_tokens / elapsed_s`` otherwise.
+    """
+
+    elapsed_s: Required[float]
+    prompt_tokens: Required[int]
+    output_tokens: Required[int]
+    native_output_tok_s: Optional[float]
+    native_prompt_tok_s: Optional[float]
+    finish_reason: Optional[str]
+    text: Required[str]
+    raw: Required[dict[str, Any]]
+
+
 __all__ = [
     "AudioBlock",
+    "BenchmarkResult",
     "ContentBlock",
     "Event",
     "GenerateResult",

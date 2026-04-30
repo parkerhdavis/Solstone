@@ -49,6 +49,8 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
+import time
 import traceback
 from pathlib import Path
 from typing import Any, Callable
@@ -59,7 +61,13 @@ from think.models import OLLAMA_FLASH
 from think.utils import now_ms
 
 from .cli import CLIRunner, ThinkingAggregator, assemble_prompt
-from .shared import GenerateResult, JSONEventCallback, _is_content_block_list, safe_raw
+from .shared import (
+    BenchmarkResult,
+    GenerateResult,
+    JSONEventCallback,
+    _is_content_block_list,
+    safe_raw,
+)
 
 LOG = logging.getLogger("think.providers.ollama")
 
@@ -680,10 +688,171 @@ def validate_key(api_key: str) -> dict:
         return {"valid": False, "error": str(e)}
 
 
+# ---------------------------------------------------------------------------
+# Benchmark interface (think.benchmark.harness uses these)
+# ---------------------------------------------------------------------------
+#
+# The harness owns the benchmark policy (prompts, media, when to run) and
+# delegates transport to providers. See think/providers/shared.py for the
+# BenchmarkResult contract these functions return.
+
+# Cap context window during benchmarking to keep the compute graph
+# tractable on unified-memory hosts. Ollama's default is very large
+# (256K for recent Qwen builds), which inflates the KV cache + compute
+# graph enough to OOM big models on the Spark. 8K is plenty for the fixed
+# benchmark prompt + image tokens + 256-token completion.
+_BENCHMARK_NUM_CTX = 8192
+
+
+def _native_tok_s(body: dict[str, Any]) -> tuple[float | None, float | None]:
+    """Compute (output_tok_s, prompt_tok_s) from Ollama's native counters.
+
+    Ollama reports eval and prompt-eval durations in nanoseconds. Returns
+    (None, None) for missing fields so callers can fall back to wall-clock
+    cleanly.
+    """
+    eval_count = body.get("eval_count") or 0
+    eval_duration_ns = body.get("eval_duration") or 0
+    prompt_eval_count = body.get("prompt_eval_count") or 0
+    prompt_eval_duration_ns = body.get("prompt_eval_duration") or 0
+
+    output_tok_s = (
+        (eval_count / (eval_duration_ns / 1e9)) if eval_duration_ns else None
+    )
+    prompt_tok_s = (
+        (prompt_eval_count / (prompt_eval_duration_ns / 1e9))
+        if prompt_eval_duration_ns
+        else None
+    )
+    return output_tok_s, prompt_tok_s
+
+
+def bench_ensure_installed(model: str, *, allow_pull: bool) -> None:
+    """Verify the Ollama model is installed locally; optionally pull it.
+
+    Raises SystemExit with a clear remediation message when the model is
+    missing and pulling is not allowed.
+    """
+    bare_model = _strip_model_prefix(model)
+    client = _get_client()
+    response = client.get("/api/tags", timeout=10.0)
+    response.raise_for_status()
+    installed = {m.get("name") for m in response.json().get("models", [])}
+
+    if bare_model in installed:
+        return
+
+    if not allow_pull:
+        raise SystemExit(
+            f"Model '{bare_model}' not installed. Run `ollama pull {bare_model}` "
+            f"first, or pass --pull."
+        )
+
+    print(f"Pulling {bare_model}…", file=sys.stderr)
+    with client.stream(
+        "POST",
+        "/api/pull",
+        json={"name": bare_model},
+        timeout=None,
+    ) as stream:
+        stream.raise_for_status()
+        for line in stream.iter_lines():
+            if line:
+                print(line, file=sys.stderr)
+
+
+def bench_run_once(
+    model: str,
+    *,
+    prompt: str,
+    image_b64: str | None = None,
+    audio_b64: str | None = None,
+    audio_format: str = "wav",
+    max_output_tokens: int = 256,
+) -> BenchmarkResult:
+    """Send one benchmark request and return a normalized BenchmarkResult.
+
+    Parameters
+    ----------
+    model
+        Model id with the ``ollama-local/`` prefix (e.g.
+        ``ollama-local/qwen3.5:9b``).
+    prompt
+        The user-message text. The harness assembles this from a fixture
+        or synthetic prompt.
+    image_b64
+        Optional base64-encoded image bytes. When supplied, attached as
+        an ImageBlock so prompt-eval token accounting includes image
+        encoding cost.
+    audio_b64
+        Optional base64-encoded audio bytes. Ollama does not support
+        audio input — supplying this raises NotImplementedError via
+        :func:`_translate_content_blocks`.
+    audio_format
+        Audio container (``wav``, ``flac``, etc.). Only used when
+        audio_b64 is supplied.
+    max_output_tokens
+        ``num_predict`` ceiling for the response.
+
+    Returns
+    -------
+    BenchmarkResult
+        Normalized result. ``native_output_tok_s`` and
+        ``native_prompt_tok_s`` are populated from Ollama's nanosecond
+        counters when present.
+    """
+    bare_model = _strip_model_prefix(model)
+    client = _get_client()
+
+    # Build a single user message via _build_messages so the multimodal
+    # translation path (image -> images: [...]) is exercised consistently
+    # with run_generate.
+    blocks: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    if image_b64 is not None:
+        blocks.append({"type": "image", "data": image_b64, "mime": "image/jpeg"})
+    if audio_b64 is not None:
+        blocks.append(
+            {"type": "audio", "data": audio_b64, "format": audio_format}
+        )
+    messages = _build_messages([{"role": "user", "content": blocks}])
+
+    body = {
+        "model": bare_model,
+        "messages": messages,
+        "stream": False,
+        "think": False,
+        "options": {
+            "temperature": 0.2,
+            "num_predict": max_output_tokens,
+            "num_ctx": _BENCHMARK_NUM_CTX,
+        },
+    }
+
+    start = time.perf_counter()
+    response = client.post("/api/chat", json=body, timeout=600.0)
+    elapsed = time.perf_counter() - start
+    response.raise_for_status()
+    raw = response.json()
+
+    output_tok_s, prompt_tok_s = _native_tok_s(raw)
+    return BenchmarkResult(
+        elapsed_s=elapsed,
+        prompt_tokens=int(raw.get("prompt_eval_count") or 0),
+        output_tokens=int(raw.get("eval_count") or 0),
+        native_output_tok_s=output_tok_s,
+        native_prompt_tok_s=prompt_tok_s,
+        finish_reason=_normalize_finish_reason(raw),
+        text=(raw.get("message") or {}).get("content", ""),
+        raw=raw,
+    )
+
+
 __all__ = [
-    "run_generate",
+    "bench_ensure_installed",
+    "bench_run_once",
+    "list_models",
     "run_agenerate",
     "run_cogitate",
-    "list_models",
+    "run_generate",
     "validate_key",
 ]
