@@ -6,8 +6,25 @@
 This module contains:
 - Event TypedDicts emitted by providers during talent execution
 - GenerateResult TypedDict returned by run_generate/run_agenerate
+- ContentBlock types for multimodal messages (text, image, audio)
 - JSONEventCallback for event emission
 - Utility functions for common provider operations
+
+Multimodal message shape
+------------------------
+A user message's ``content`` field can be either:
+
+1. A plain string (legacy, text-only).
+2. A list of ContentBlock dicts: ``TextBlock``, ``ImageBlock``, or
+   ``AudioBlock``.
+
+Provider modules translate the second form into their wire format. Ollama
+extracts ``ImageBlock`` data into the per-message ``images`` array and
+concatenates ``TextBlock`` text; ``AudioBlock`` is unsupported. vLLM (and
+other OpenAI-compatible endpoints) pass the blocks through as
+``image_url`` / ``input_audio`` content blocks. Providers that cannot
+serve a given modality must raise ``NotImplementedError`` with a clear
+message.
 """
 
 from __future__ import annotations
@@ -133,6 +150,66 @@ Event = Union[
 
 
 # ---------------------------------------------------------------------------
+# Multimodal Content Blocks
+# ---------------------------------------------------------------------------
+#
+# A message's content is either a plain string (legacy text-only) or a list
+# of ContentBlock dicts. Providers translate to their wire format.
+
+
+class TextBlock(TypedDict):
+    """Text content block."""
+
+    type: Literal["text"]
+    text: str
+
+
+class ImageBlock(TypedDict, total=False):
+    """Image content block.
+
+    ``data`` is base64-encoded image bytes. ``mime`` is the IANA media type
+    (e.g. ``image/jpeg``, ``image/png``); providers that don't carry mime
+    in their wire format may default to JPEG.
+    """
+
+    type: Required[Literal["image"]]
+    data: Required[str]
+    mime: str
+
+
+class AudioBlock(TypedDict, total=False):
+    """Audio content block.
+
+    ``data`` is base64-encoded audio bytes. ``format`` is the container
+    (``wav``, ``flac``, ``mp3``, ``ogg``). ``sample_rate`` is optional and
+    only meaningful for raw-PCM-in-WAV; most providers infer it from the
+    container.
+    """
+
+    type: Required[Literal["audio"]]
+    data: Required[str]
+    format: Required[str]
+    sample_rate: int
+
+
+ContentBlock = Union[TextBlock, ImageBlock, AudioBlock]
+
+
+def _is_content_block_list(content: Any) -> bool:
+    """Return True if *content* is a list of ContentBlock dicts.
+
+    Used by providers to detect the multimodal form vs. the legacy string
+    form. A list of strings (the older ``[str, str, ...]`` shorthand) is
+    *not* a content-block list and should be joined to a string by the
+    caller before this returns True.
+    """
+    if not isinstance(content, list) or not content:
+        return False
+    first = content[0]
+    return isinstance(first, dict) and first.get("type") in {"text", "image", "audio"}
+
+
+# ---------------------------------------------------------------------------
 # Usage Schema
 # ---------------------------------------------------------------------------
 
@@ -236,11 +313,61 @@ def safe_raw(
     return trimmed
 
 
+# ---------------------------------------------------------------------------
+# Benchmark interface
+# ---------------------------------------------------------------------------
+#
+# Providers that participate in `think.benchmark.harness` expose two
+# functions:
+#
+#   bench_ensure_installed(model, *, allow_pull) -> None
+#       Verify the model is locally available; optionally trigger a pull.
+#       Raise SystemExit on failure with a clear remediation message.
+#
+#   bench_run_once(model, *, prompt, image_b64=None, audio_b64=None,
+#                  audio_format="wav", max_output_tokens) -> BenchmarkResult
+#       Send one synchronous benchmark request and return a normalized
+#       BenchmarkResult. The provider is responsible for any provider-
+#       specific request shaping (Ollama caps num_ctx; vLLM relies on
+#       max_model_len set at serve time; etc.).
+#
+# The harness owns the *policy* (which prompts, which media, when to run)
+# and the providers own the *transport* (how to reach the model and
+# extract timing). This keeps harness code provider-agnostic and lets new
+# providers slot in without harness changes.
+
+
+class BenchmarkResult(TypedDict, total=False):
+    """One benchmark request's outcome, normalized across providers.
+
+    ``elapsed_s`` is wall-clock around the provider's HTTP round-trip.
+    ``native_output_tok_s`` / ``native_prompt_tok_s`` are the provider's
+    own server-side counters when available (Ollama reports nanosecond
+    eval durations; vLLM does not). Harness reporting prefers native when
+    present and falls back to ``output_tokens / elapsed_s`` otherwise.
+    """
+
+    elapsed_s: Required[float]
+    prompt_tokens: Required[int]
+    output_tokens: Required[int]
+    native_output_tok_s: Optional[float]
+    native_prompt_tok_s: Optional[float]
+    finish_reason: Optional[str]
+    text: Required[str]
+    raw: Required[dict[str, Any]]
+
+
 __all__ = [
+    "AudioBlock",
+    "BenchmarkResult",
+    "ContentBlock",
     "Event",
     "GenerateResult",
+    "ImageBlock",
     "JSONEventCallback",
+    "TextBlock",
     "ThinkingEvent",
     "USAGE_KEYS",
+    "_is_content_block_list",
     "safe_raw",
 ]

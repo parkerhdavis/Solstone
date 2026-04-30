@@ -50,13 +50,17 @@ from __future__ import annotations
 
 import argparse
 import base64
+import importlib
 import io
 import json
 import sys
 import time
 from datetime import date
 from pathlib import Path
+from types import ModuleType
 from typing import Any
+
+from think.providers.shared import BenchmarkResult
 
 _FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -82,13 +86,6 @@ _VISION_PROMPT = (
 _MAX_OUTPUT_TOKENS = 256
 _WARMUP_RUNS = 1
 _MEASURE_RUNS = 3
-
-# Cap context window to keep the compute graph tractable. Ollama otherwise
-# defaults to a very large context (256K for recent Qwen builds), which
-# inflates the KV cache + compute graph enough to OOM big models on
-# unified-memory systems. 8K is plenty for the fixed benchmark prompt +
-# image tokens + 256-token completion.
-_BENCHMARK_NUM_CTX = 8192
 
 
 def _build_canned_image_b64() -> str:
@@ -134,54 +131,52 @@ def _build_canned_image_b64() -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+def _resolve_provider(model: str) -> ModuleType:
+    """Resolve the provider module for a given model id.
+
+    Routes by prefix:
+        ``ollama-local/...`` -> ``think.providers.ollama``
+        ``vllm-local/...``   -> ``think.providers.vllm`` (Phase 2)
+
+    Raises SystemExit with a clear message for unknown prefixes so the
+    harness fails fast rather than reaching some half-implemented path.
+    """
+    if model.startswith("ollama-local/"):
+        return importlib.import_module("think.providers.ollama")
+    if model.startswith("vllm-local/"):
+        return importlib.import_module("think.providers.vllm")
+    raise SystemExit(
+        f"Cannot resolve benchmark provider for model id: {model!r}. "
+        f"Expected an 'ollama-local/' or 'vllm-local/' prefix."
+    )
+
+
 def run_once(
     model: str,
     *,
     vision: bool = False,
     prompt_override: str | None = None,
     max_output_tokens: int = _MAX_OUTPUT_TOKENS,
-) -> tuple[dict[str, Any], float]:
-    """Send one completion request; return ``(response_body, wall_clock_s)``.
+) -> BenchmarkResult:
+    """Send one benchmark request via the model's provider.
 
     When ``vision=True``, include a canned image in the user message so
     the prompt-eval count captures image-encoder cost. When
     ``prompt_override`` is set, use that text instead of the default
     benchmark prompt — used by task-mode runs that read a fixture.
+
+    Returns a normalized BenchmarkResult; provider-specific transport,
+    response shape, and tok/s computation live in the provider module.
     """
-    from think.providers.ollama import _get_client, _strip_model_prefix
-
-    bare_model = _strip_model_prefix(model)
-    client = _get_client()
-
+    provider = _resolve_provider(model)
     prompt_text = prompt_override or (_VISION_PROMPT if vision else _TEXT_PROMPT)
-    if vision:
-        message: dict[str, Any] = {
-            "role": "user",
-            "content": prompt_text,
-            "images": [_build_canned_image_b64()],
-        }
-    else:
-        message = {"role": "user", "content": prompt_text}
-
-    start = time.perf_counter()
-    response = client.post(
-        "/api/chat",
-        json={
-            "model": bare_model,
-            "messages": [message],
-            "stream": False,
-            "think": False,
-            "options": {
-                "temperature": 0.2,
-                "num_predict": max_output_tokens,
-                "num_ctx": _BENCHMARK_NUM_CTX,
-            },
-        },
-        timeout=600.0,
+    image_b64 = _build_canned_image_b64() if vision else None
+    return provider.bench_run_once(
+        model,
+        prompt=prompt_text,
+        image_b64=image_b64,
+        max_output_tokens=max_output_tokens,
     )
-    elapsed = time.perf_counter() - start
-    response.raise_for_status()
-    return response.json(), elapsed
 
 
 def _load_task(task_id: str) -> dict[str, Any]:
@@ -209,53 +204,7 @@ def _load_fixture(task_id: str) -> str:
 
 def ensure_installed(model: str, *, allow_pull: bool) -> None:
     """Verify the model is installed locally; optionally trigger a pull."""
-    from think.providers.ollama import _get_client, _strip_model_prefix
-
-    bare_model = _strip_model_prefix(model)
-    client = _get_client()
-    response = client.get("/api/tags", timeout=10.0)
-    response.raise_for_status()
-    installed = {m.get("name") for m in response.json().get("models", [])}
-
-    if bare_model in installed:
-        return
-
-    if not allow_pull:
-        raise SystemExit(
-            f"Model '{bare_model}' not installed. Run `ollama pull {bare_model}` "
-            f"first, or pass --pull."
-        )
-
-    print(f"Pulling {bare_model}…", file=sys.stderr)
-    with client.stream(
-        "POST",
-        "/api/pull",
-        json={"name": bare_model},
-        timeout=None,
-    ) as stream:
-        stream.raise_for_status()
-        for line in stream.iter_lines():
-            if line:
-                print(line, file=sys.stderr)
-
-
-def tok_s_from_response(body: dict[str, Any]) -> tuple[float, float]:
-    """Compute (output_tok_s, prompt_tok_s) from a single Ollama response.
-
-    Ollama reports durations in nanoseconds.
-    """
-    eval_count = body.get("eval_count") or 0
-    eval_duration_ns = body.get("eval_duration") or 0
-    prompt_eval_count = body.get("prompt_eval_count") or 0
-    prompt_eval_duration_ns = body.get("prompt_eval_duration") or 0
-
-    output_tok_s = (eval_count / (eval_duration_ns / 1e9)) if eval_duration_ns else 0.0
-    prompt_tok_s = (
-        (prompt_eval_count / (prompt_eval_duration_ns / 1e9))
-        if prompt_eval_duration_ns
-        else 0.0
-    )
-    return output_tok_s, prompt_tok_s
+    _resolve_provider(model).bench_ensure_installed(model, allow_pull=allow_pull)
 
 
 def main() -> int:
@@ -324,6 +273,31 @@ def main() -> int:
     return _run_tok_s_mode(args)
 
 
+def _bench_tok_s(result: BenchmarkResult) -> tuple[float, float]:
+    """Extract (output_tok_s, prompt_tok_s) from a BenchmarkResult.
+
+    Prefers the provider's native server-side counters when available
+    (Ollama reports nanosecond eval durations). Falls back to wall-clock
+    output rate (output_tokens / elapsed_s) when native is missing — and
+    leaves prompt_tok_s at 0.0 in that case, since wall-clock prompt-eval
+    rate would conflate prefill with decode and report a misleading
+    number. Providers that lack native prompt-eval timing (e.g. vLLM)
+    will need a separate measurement pass for prompt rate.
+    """
+    elapsed = result.get("elapsed_s") or 0.0
+    output_tokens = result.get("output_tokens") or 0
+    native_out = result.get("native_output_tok_s")
+    native_prompt = result.get("native_prompt_tok_s")
+
+    out_rate = (
+        native_out
+        if native_out is not None
+        else (output_tokens / elapsed if elapsed > 0 else 0.0)
+    )
+    prompt_rate = native_prompt if native_prompt is not None else 0.0
+    return out_rate, prompt_rate
+
+
 def _run_tok_s_mode(args: argparse.Namespace) -> int:
     """Synthetic-prompt tok/s benchmark."""
     mode = "vision" if args.vision else "text_only"
@@ -341,8 +315,8 @@ def _run_tok_s_mode(args: argparse.Namespace) -> int:
     prompt_rates: list[float] = []
     for i in range(_MEASURE_RUNS):
         print(f"  run {i + 1}/{_MEASURE_RUNS}…", file=sys.stderr)
-        body, _elapsed = run_once(args.model, vision=args.vision)
-        out_rate, prompt_rate = tok_s_from_response(body)
+        result = run_once(args.model, vision=args.vision)
+        out_rate, prompt_rate = _bench_tok_s(result)
         output_rates.append(out_rate)
         prompt_rates.append(prompt_rate)
         print(
@@ -399,14 +373,15 @@ def _run_task_mode(args: argparse.Namespace) -> int:
     output_token_samples: list[int] = []
     for i in range(_MEASURE_RUNS):
         print(f"  run {i + 1}/{_MEASURE_RUNS}…", file=sys.stderr)
-        body, elapsed = run_once(
+        result = run_once(
             args.model,
             vision=vision,
             prompt_override=fixture,
             max_output_tokens=expected_output_tokens,
         )
-        prompt_tokens = int(body.get("prompt_eval_count") or 0)
-        output_tokens = int(body.get("eval_count") or 0)
+        elapsed = result["elapsed_s"]
+        prompt_tokens = int(result.get("prompt_tokens") or 0)
+        output_tokens = int(result.get("output_tokens") or 0)
         elapsed_samples.append(elapsed)
         prompt_token_samples.append(prompt_tokens)
         output_token_samples.append(output_tokens)
