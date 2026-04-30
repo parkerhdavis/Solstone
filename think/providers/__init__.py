@@ -18,6 +18,7 @@ Available providers:
 - openai: OpenAI GPT models
 - anthropic: Anthropic Claude models
 - ollama: Ollama local models
+- vllm: vLLM local server (multimodal: text + image + audio)
 """
 
 import os
@@ -41,6 +42,7 @@ PROVIDER_REGISTRY: Dict[str, str] = {
     "openai": "think.providers.openai",
     "anthropic": "think.providers.anthropic",
     "ollama": "think.providers.ollama",
+    "vllm": "think.providers.vllm",
 }
 
 # ---------------------------------------------------------------------------
@@ -75,6 +77,14 @@ PROVIDER_METADATA: Dict[str, Dict[str, Any]] = {
         "label": "Ollama (Local)",
         "env_key": "",
         "cogitate_cli": "opencode",
+    },
+    "vllm": {
+        "label": "vLLM (Local)",
+        "env_key": "",
+        # cogitate via vLLM is deferred; OpenCode could in principle drive
+        # the OpenAI-compat endpoint but is unverified. Setting empty here
+        # leaves cogitate_ready=False until the cogitate path is wired up.
+        "cogitate_cli": "",
     },
 }
 
@@ -172,6 +182,22 @@ def build_provider_status(
                     "OLLAMA_BASE_URL", "http://localhost:11434"
                 ).rstrip("/")
                 issues.append(f"Ollama not reachable at {base_url}")
+        elif name == "vllm":
+            try:
+                import httpx
+
+                base_url = os.getenv("VLLM_BASE_URL", "http://localhost:8000").rstrip(
+                    "/"
+                )
+                resp = httpx.get(f"{base_url}/v1/models", timeout=2)
+                resp.raise_for_status()
+                configured = True
+            except Exception:
+                configured = False
+                base_url = os.getenv("VLLM_BASE_URL", "http://localhost:8000").rstrip(
+                    "/"
+                )
+                issues.append(f"vLLM not reachable at {base_url}")
         elif name == "google":
             has_key = bool(os.getenv(env_key))
             configured = has_key or vertex_creds_configured
