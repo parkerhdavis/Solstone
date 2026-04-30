@@ -59,7 +59,7 @@ from think.models import OLLAMA_FLASH
 from think.utils import now_ms
 
 from .cli import CLIRunner, ThinkingAggregator, assemble_prompt
-from .shared import GenerateResult, JSONEventCallback, safe_raw
+from .shared import GenerateResult, JSONEventCallback, _is_content_block_list, safe_raw
 
 LOG = logging.getLogger("think.providers.ollama")
 
@@ -118,25 +118,82 @@ def _strip_model_prefix(model: str) -> str:
     return model
 
 
+def _translate_content_blocks(content: list[dict[str, Any]]) -> dict[str, Any]:
+    """Translate a list of ContentBlock dicts to Ollama's per-message format.
+
+    Ollama's /api/chat expects each message to have a string ``content``
+    field plus an optional ``images: [<base64>, ...]`` array. Audio is not
+    supported.
+
+    Parameters
+    ----------
+    content
+        A list of ContentBlock dicts (TextBlock / ImageBlock / AudioBlock).
+
+    Returns
+    -------
+    dict
+        ``{"content": "<concatenated text>", "images": [...]}`` (images key
+        only present when at least one ImageBlock was supplied).
+
+    Raises
+    ------
+    NotImplementedError
+        If any AudioBlock is present — Ollama does not accept audio input.
+    """
+    text_parts: list[str] = []
+    images: list[str] = []
+    for block in content:
+        btype = block.get("type")
+        if btype == "text":
+            text_parts.append(block.get("text", ""))
+        elif btype == "image":
+            data = block.get("data")
+            if not data:
+                raise ValueError("ImageBlock missing 'data' (base64-encoded bytes)")
+            images.append(data)
+        elif btype == "audio":
+            raise NotImplementedError(
+                "Ollama does not support audio input. Use a vLLM-served "
+                "multimodal model (e.g. nemotron3:33b via vllm-local/) for "
+                "audio benchmarking."
+            )
+        else:
+            raise ValueError(f"Unknown content-block type: {btype!r}")
+
+    out: dict[str, Any] = {"content": "\n".join(text_parts)}
+    if images:
+        out["images"] = images
+    return out
+
+
 def _build_messages(
     contents: Any,
     system_instruction: str | None = None,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Convert contents and system instruction to chat messages.
 
     Parameters
     ----------
     contents
-        String, list of strings, or list of message dicts with ``role`` keys.
+        One of:
+
+        - A plain string (legacy, text-only user message).
+        - A list of strings (joined with newlines into a single user message).
+        - A list of message dicts with a ``role`` key. Each message's
+          ``content`` may itself be a string OR a list of ContentBlock
+          dicts (text/image/audio).
     system_instruction
         Optional system prompt, prepended as a system message.
 
     Returns
     -------
-    list[dict[str, str]]
-        Messages in ``[{role, content}, ...]`` format.
+    list[dict[str, Any]]
+        Messages in ``[{role, content, [images]}, ...]`` format ready for
+        Ollama's ``/api/chat``. The ``images`` field is added per-message
+        when ImageBlocks were translated.
     """
-    messages: list[dict[str, str]] = []
+    messages: list[dict[str, Any]] = []
 
     if system_instruction:
         messages.append({"role": "system", "content": system_instruction})
@@ -145,7 +202,19 @@ def _build_messages(
         messages.append({"role": "user", "content": contents})
     elif isinstance(contents, list):
         if contents and isinstance(contents[0], dict) and "role" in contents[0]:
-            messages.extend(contents)
+            for raw_msg in contents:
+                msg: dict[str, Any] = {"role": raw_msg["role"]}
+                content = raw_msg.get("content")
+                if _is_content_block_list(content):
+                    msg.update(_translate_content_blocks(content))
+                else:
+                    msg["content"] = content if isinstance(content, str) else str(content)
+                # Preserve any pre-set images key on the raw message
+                # (e.g. callers that already constructed the Ollama-native
+                # shape); content-block translation above wins if present.
+                if "images" in raw_msg and "images" not in msg:
+                    msg["images"] = raw_msg["images"]
+                messages.append(msg)
         else:
             messages.append(
                 {"role": "user", "content": "\n".join(str(c) for c in contents)}

@@ -6,8 +6,25 @@
 This module contains:
 - Event TypedDicts emitted by providers during talent execution
 - GenerateResult TypedDict returned by run_generate/run_agenerate
+- ContentBlock types for multimodal messages (text, image, audio)
 - JSONEventCallback for event emission
 - Utility functions for common provider operations
+
+Multimodal message shape
+------------------------
+A user message's ``content`` field can be either:
+
+1. A plain string (legacy, text-only).
+2. A list of ContentBlock dicts: ``TextBlock``, ``ImageBlock``, or
+   ``AudioBlock``.
+
+Provider modules translate the second form into their wire format. Ollama
+extracts ``ImageBlock`` data into the per-message ``images`` array and
+concatenates ``TextBlock`` text; ``AudioBlock`` is unsupported. vLLM (and
+other OpenAI-compatible endpoints) pass the blocks through as
+``image_url`` / ``input_audio`` content blocks. Providers that cannot
+serve a given modality must raise ``NotImplementedError`` with a clear
+message.
 """
 
 from __future__ import annotations
@@ -133,6 +150,66 @@ Event = Union[
 
 
 # ---------------------------------------------------------------------------
+# Multimodal Content Blocks
+# ---------------------------------------------------------------------------
+#
+# A message's content is either a plain string (legacy text-only) or a list
+# of ContentBlock dicts. Providers translate to their wire format.
+
+
+class TextBlock(TypedDict):
+    """Text content block."""
+
+    type: Literal["text"]
+    text: str
+
+
+class ImageBlock(TypedDict, total=False):
+    """Image content block.
+
+    ``data`` is base64-encoded image bytes. ``mime`` is the IANA media type
+    (e.g. ``image/jpeg``, ``image/png``); providers that don't carry mime
+    in their wire format may default to JPEG.
+    """
+
+    type: Required[Literal["image"]]
+    data: Required[str]
+    mime: str
+
+
+class AudioBlock(TypedDict, total=False):
+    """Audio content block.
+
+    ``data`` is base64-encoded audio bytes. ``format`` is the container
+    (``wav``, ``flac``, ``mp3``, ``ogg``). ``sample_rate`` is optional and
+    only meaningful for raw-PCM-in-WAV; most providers infer it from the
+    container.
+    """
+
+    type: Required[Literal["audio"]]
+    data: Required[str]
+    format: Required[str]
+    sample_rate: int
+
+
+ContentBlock = Union[TextBlock, ImageBlock, AudioBlock]
+
+
+def _is_content_block_list(content: Any) -> bool:
+    """Return True if *content* is a list of ContentBlock dicts.
+
+    Used by providers to detect the multimodal form vs. the legacy string
+    form. A list of strings (the older ``[str, str, ...]`` shorthand) is
+    *not* a content-block list and should be joined to a string by the
+    caller before this returns True.
+    """
+    if not isinstance(content, list) or not content:
+        return False
+    first = content[0]
+    return isinstance(first, dict) and first.get("type") in {"text", "image", "audio"}
+
+
+# ---------------------------------------------------------------------------
 # Usage Schema
 # ---------------------------------------------------------------------------
 
@@ -237,10 +314,15 @@ def safe_raw(
 
 
 __all__ = [
+    "AudioBlock",
+    "ContentBlock",
     "Event",
     "GenerateResult",
+    "ImageBlock",
     "JSONEventCallback",
+    "TextBlock",
     "ThinkingEvent",
     "USAGE_KEYS",
+    "_is_content_block_list",
     "safe_raw",
 ]
