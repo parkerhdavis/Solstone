@@ -1,5 +1,5 @@
 {
-  "_comment": "Pre-vetted Ollama models for Solstone. Benchmarks are measured tok/s per canonical hardware class (see reference.json) and are populated via think.benchmark.harness on real hardware. An empty benchmarks dict means no measurement is available yet \u2014 the estimator falls back to confidence=unknown.",
+  "_comment": "Pre-vetted local models for Solstone, served via Ollama (ollama-local/) or vLLM (vllm-local/). Benchmarks are measured tok/s per canonical hardware class (see reference.json) and are populated via think.benchmark.harness on real hardware. An empty benchmarks dict means no measurement is available yet \u2014 the estimator falls back to confidence=unknown. Multimodal-omni entries (text+image+audio) report a single output_tok_s tied to text generation plus optional vision_output_tok_s / audio_output_tok_s supplementary fields when measured separately; per-task timings under tasks.<task_id> capture each modality individually.",
   "models": {
     "ollama-local/qwen3.5:35b-a3b-bf16": {
       "label": "Qwen 3.5 35B (A3B, bf16) \u2014 MoE",
@@ -298,6 +298,132 @@
               "prompt_tokens": 442,
               "output_tokens": 79,
               "measured_at": "2026-04-20"
+            }
+          }
+        }
+      }
+    },
+    "vllm-local/nemotron-omni": {
+      "label": "NVIDIA Nemotron 3 Nano Omni 30B-A3B (NVFP4) \u2014 omni (text+image+audio+video)",
+      "tier_hint": 2,
+      "size_gb": 21.0,
+      "capabilities": [
+        "generate",
+        "vision",
+        "audio"
+      ],
+      "vram_required_gb": 24,
+      "notes": "Served via vLLM 0.20.0 (upstream vllm/vllm-openai container) on Spark; HF: nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4. First multimodal-omni entry in the registry \u2014 unifies what previously took qwen3.5 (text/cogitate) + qwen2.5vl (vision) + Whisper/Parakeet (audio) into one model. Capabilities list intentionally omits 'cogitate' (vLLM-via-OpenCode unverified, deferred) and 'video' (Solstone's video pipeline still does frame-extraction \u2014 unified video is a separate design pass).",
+      "benchmarks": {
+        "dgx-spark": {
+          "output_tok_s": 57.4,
+          "prompt_tok_s": 0.0,
+          "measured_at": "2026-04-30",
+          "mode": "text_only",
+          "vision_output_tok_s": 57.0,
+          "audio_output_tok_s": 56.1,
+          "tasks": {
+            "audio_transcribe": {
+              "seconds": 1.71,
+              "prompt_tokens": 434,
+              "output_tokens": 90,
+              "measured_at": "2026-04-30"
+            },
+            "audio_summarize": {
+              "seconds": 2.74,
+              "prompt_tokens": 458,
+              "output_tokens": 150,
+              "measured_at": "2026-04-30"
+            },
+            "chat_reply": {
+              "seconds": 1.48,
+              "prompt_tokens": 266,
+              "output_tokens": 80,
+              "measured_at": "2026-04-30"
+            },
+            "entity_extraction": {
+              "seconds": 10.08,
+              "prompt_tokens": 771,
+              "output_tokens": 578,
+              "measured_at": "2026-04-30"
+            },
+            "voice_brain_turn": {
+              "seconds": 0.72,
+              "prompt_tokens": 186,
+              "output_tokens": 36,
+              "measured_at": "2026-04-30"
+            },
+            "todo_extraction": {
+              "seconds": 5.66,
+              "prompt_tokens": 802,
+              "output_tokens": 320,
+              "measured_at": "2026-04-30"
+            },
+            "search_query": {
+              "seconds": 1.52,
+              "prompt_tokens": 146,
+              "output_tokens": 83,
+              "measured_at": "2026-04-30"
+            },
+            "meeting_summary": {
+              "seconds": 6.14,
+              "prompt_tokens": 1196,
+              "output_tokens": 346,
+              "measured_at": "2026-04-30"
+            },
+            "agent_turn": {
+              "seconds": 7.01,
+              "prompt_tokens": 710,
+              "output_tokens": 400,
+              "measured_at": "2026-04-30"
+            },
+            "activity_clustering": {
+              "seconds": 13.2,
+              "prompt_tokens": 895,
+              "output_tokens": 750,
+              "measured_at": "2026-04-30"
+            },
+            "daily_insight": {
+              "seconds": 6.67,
+              "prompt_tokens": 1087,
+              "output_tokens": 376,
+              "measured_at": "2026-04-30"
+            },
+            "segment_sense": {
+              "seconds": 7.12,
+              "prompt_tokens": 1314,
+              "output_tokens": 400,
+              "measured_at": "2026-04-30"
+            },
+            "speaker_attribution_llm": {
+              "seconds": 6.21,
+              "prompt_tokens": 875,
+              "output_tokens": 350,
+              "measured_at": "2026-04-30"
+            },
+            "screen_record": {
+              "seconds": 21.23,
+              "prompt_tokens": 1293,
+              "output_tokens": 1213,
+              "measured_at": "2026-04-30"
+            },
+            "awareness_tender": {
+              "seconds": 5.54,
+              "prompt_tokens": 669,
+              "output_tokens": 312,
+              "measured_at": "2026-04-30"
+            },
+            "pulse": {
+              "seconds": 6.7,
+              "prompt_tokens": 888,
+              "output_tokens": 378,
+              "measured_at": "2026-04-30"
+            },
+            "screen_frame": {
+              "seconds": 1.41,
+              "prompt_tokens": 375,
+              "output_tokens": 75,
+              "measured_at": "2026-04-30"
             }
           }
         }
