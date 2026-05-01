@@ -66,6 +66,16 @@ OLLAMA_PRO = "ollama-local/qwen3.5:35b-a3b-bf16"
 OLLAMA_FLASH = "ollama-local/qwen3.5:9b"
 OLLAMA_LITE = "ollama-local/qwen3.5:2b"
 
+# vLLM tier defaults — same Qwen 3.5 family as Ollama, picked for apples-to-apples
+# quant parity (bf16 for the MoE, AWQ-Int4 from cyankiwi for the dense models).
+# Not the system-default provider; opt in via journal config:
+#   "providers": {"cogitate": {"provider": "vllm", "tier": 1}}
+# See ~/Obsidian/.../20-29 Tech/Local Models & Benchmarking for the full story
+# and 90-99 Agents/Transient/vLLM vs Ollama Comparison.md for the rationale.
+VLLM_PRO = "vllm-local/qwen3.5:35b-a3b"
+VLLM_FLASH = "vllm-local/qwen3.5:9b-awq"
+VLLM_LITE = "vllm-local/qwen3.5:2b-awq"
+
 # ---------------------------------------------------------------------------
 # System defaults: provider -> tier -> model
 # ---------------------------------------------------------------------------
@@ -90,6 +100,11 @@ PROVIDER_DEFAULTS: Dict[str, Dict[int, str]] = {
         TIER_PRO: OLLAMA_PRO,
         TIER_FLASH: OLLAMA_FLASH,
         TIER_LITE: OLLAMA_LITE,
+    },
+    "vllm": {
+        TIER_PRO: VLLM_PRO,
+        TIER_FLASH: VLLM_FLASH,
+        TIER_LITE: VLLM_LITE,
     },
 }
 
