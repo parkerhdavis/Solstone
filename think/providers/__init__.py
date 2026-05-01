@@ -183,21 +183,24 @@ def build_provider_status(
                 ).rstrip("/")
                 issues.append(f"Ollama not reachable at {base_url}")
         elif name == "vllm":
-            try:
-                import httpx
+            # Multi-server aware: ping every configured server (or the env-var
+            # fallback when no providers.vllm.servers config exists). Configured
+            # = at least one reachable; issues lists each unreachable URL so the
+            # operator can see which container needs attention.
+            import httpx
 
-                base_url = os.getenv("VLLM_BASE_URL", "http://localhost:8000").rstrip(
-                    "/"
-                )
-                resp = httpx.get(f"{base_url}/v1/models", timeout=2)
-                resp.raise_for_status()
-                configured = True
-            except Exception:
-                configured = False
-                base_url = os.getenv("VLLM_BASE_URL", "http://localhost:8000").rstrip(
-                    "/"
-                )
-                issues.append(f"vLLM not reachable at {base_url}")
+            from think.providers.vllm import _all_configured_base_urls
+
+            urls = _all_configured_base_urls()
+            reachable: list[str] = []
+            for url in urls:
+                try:
+                    resp = httpx.get(f"{url}/v1/models", timeout=2)
+                    resp.raise_for_status()
+                    reachable.append(url)
+                except Exception:
+                    issues.append(f"vLLM not reachable at {url}")
+            configured = bool(reachable)
         elif name == "google":
             has_key = bool(os.getenv(env_key))
             configured = has_key or vertex_creds_configured
