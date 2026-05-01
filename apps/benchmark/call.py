@@ -549,68 +549,14 @@ def _resolved_class(hardware: dict[str, Any]) -> str:
 def _list_installed_models() -> set[str]:
     """Return the set of model IDs currently usable across local providers.
 
-    Queries both Ollama (``/api/tags``) and vLLM (``/v1/models``). A model
-    id appears in the returned set only when its provider is reachable
-    *and* the model is currently available from that provider.
-
-    Provider semantics differ in what "available" means:
-
-    - **Ollama**: model is in the local pull cache (``/api/tags``).
-      Models not in the cache can still be reached by the user via
-      ``ollama pull <name>`` — no server restart needed.
-    - **vLLM**: model is currently being served by the running vLLM
-      instance (``/v1/models``). vLLM has no pull-on-demand; the model
-      is fixed to whatever ``--served-model-name`` was passed at server
-      startup. A model not in this list requires a server restart, not
-      a pull.
-
-    Both providers contribute silently when reachable; unreachable
-    providers are debug-logged but not raised. The CLI must still work
-    when neither provider is up.
+    Thin wrapper that delegates to the shared
+    ``think.providers.list_installed_local_models()``. Kept as a
+    module-private name so existing test patches on
+    ``apps.benchmark.call._list_installed_models`` continue to work.
     """
-    installed: set[str] = set()
+    from think.providers import list_installed_local_models
 
-    # Ollama
-    try:
-        from think.providers.ollama import _OLLAMA_LOCAL_PREFIX, _get_client
-
-        try:
-            client = _get_client()
-            response = client.get("/api/tags", timeout=5.0)
-            response.raise_for_status()
-            for entry in response.json().get("models", []) or []:
-                name = entry.get("name")
-                if name:
-                    installed.add(f"{_OLLAMA_LOCAL_PREFIX}{name}")
-        except Exception as exc:
-            logger.debug("Ollama /api/tags unreachable: %s", exc)
-    except ImportError:
-        logger.debug("ollama provider module unavailable")
-
-    # vLLM
-    try:
-        from think.providers.vllm import _VLLM_LOCAL_PREFIX
-        from think.providers.vllm import _get_client as _vllm_client
-
-        try:
-            client = _vllm_client()
-            response = client.get("/v1/models", timeout=5.0)
-            response.raise_for_status()
-            for entry in response.json().get("data", []) or []:
-                served_id = entry.get("id")
-                if not isinstance(served_id, str):
-                    continue
-                # vLLM list_models prefixes ids on read; the raw /v1/models
-                # response carries unprefixed ids, so add the prefix here.
-                if not served_id.startswith(_VLLM_LOCAL_PREFIX):
-                    served_id = f"{_VLLM_LOCAL_PREFIX}{served_id}"
-                installed.add(served_id)
-        except Exception as exc:
-            logger.debug("vLLM /v1/models unreachable: %s", exc)
-    except ImportError:
-        logger.debug("vllm provider module unavailable")
-
-    return installed
+    return list_installed_local_models()
 
 
 def _truncate(text: str, width: int) -> str:
