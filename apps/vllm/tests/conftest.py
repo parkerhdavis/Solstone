@@ -16,6 +16,6 @@ def _skip_supervisor_check(monkeypatch):
 
 @pytest.fixture
 def journal_override(tmp_path, monkeypatch):
-    """Point _SOLSTONE_JOURNAL_OVERRIDE at a tmp directory for this test."""
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+    """Point SOLSTONE_JOURNAL at a tmp directory for this test."""
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
     return tmp_path

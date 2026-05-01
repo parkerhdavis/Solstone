@@ -17,7 +17,7 @@ from think import hardware
 
 @pytest.fixture
 def journal_override(tmp_path, monkeypatch):
-    monkeypatch.setenv("_SOLSTONE_JOURNAL_OVERRIDE", str(tmp_path))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
     return tmp_path
 
 
