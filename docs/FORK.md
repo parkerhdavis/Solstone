@@ -2,6 +2,43 @@
 
 This document tracks significant changes made on this fork of Solstone.
 
+## 🪡 vLLM (Local) Provider — Multimodal Local Inference
+
+**Files:** `think/providers/vllm.py`, `apps/vllm/` (CLI app + tests), `think/providers/__init__.py`, `think/providers/ollama.py` (content-block intake), `think/providers/shared.py`, `think/benchmark/harness.py`, `think/benchmark/models.json` (vllm-local entries), `think/models.py` (`VLLM_PRO/FLASH/LITE`), `think/supervisor.py` (`start_vllm_servers`), `scripts/doctor.py` (vLLM advisory checks), `apps/benchmark/call.py` (provider-aware `_list_installed_models`), `apps/settings/workspace.html` + `apps/settings/routes.py` (UI parity)
+
+Added vLLM as a peer local provider alongside Ollama, scoped to the multimodal-omni capabilities Ollama can't serve at all — most importantly, audio input. Ollama's GGUF-only stack doesn't accept audio content blocks; vLLM's HuggingFace path does. The integration was sequenced as Phases 0-4 (spike → provider → benchmark → tier promotion → server lifecycle) and is now operationally durable on the DGX Spark.
+
+**Provider module (`think/providers/vllm.py`).** OpenAI-compatible client speaking to a local vLLM server over `/v1/chat/completions`. Consumes text + image + audio content blocks. Multi-server config schema in `journal.json → providers.vllm.servers` lets a single Solstone instance route to multiple vLLM processes — necessary because vLLM pins one model per process and has no hot-swap. `run_generate`, `run_agenerate`, `bench_run_once`, `bench_ensure_installed`, `validate_key`, `list_models` are implemented; `run_cogitate` is deferred to Phase 5.
+
+**Tier promotion (`think/models.py`).** `VLLM_PRO` (qwen3.5:35b-a3b bf16), `VLLM_FLASH` (qwen3.5:9b AWQ-Int4), `VLLM_LITE` (qwen3.5:2b AWQ-Int4) constants alongside the Ollama tier defaults. Journal context can now route any tier to vLLM-served models by config without the harness needing per-tier wiring.
+
+**`sol call vllm` CLI (`apps/vllm/`).** Wraps the `docker run` invocation we'd otherwise hand-launch from a spike workspace. `serve` spawns `docker run --rm` with the right flags (`--gpus all`, `--ipc=host`, `/root/.cache/huggingface` mount for the model cache, `/root/.cache/vllm` mount so torch.compile artifacts persist across restarts) and translates SIGINT/SIGTERM into `docker stop` with a 30s grace window. `list` and `status` enumerate configured servers and ping each `/v1/models`. Server-per-model; `--name <name>` selects which entry to operate on.
+
+**Supervisor integration (`think/supervisor.py`).** `start_vllm_servers()` reads `providers.vllm.servers` from journal config and registers one `vllm-<name>` managed process per entry, each running `sol call vllm serve --name <name> -v` under the standard restart policy. No-op when no servers are configured. Opt-out via `--no-vllm`. vLLM containers now get the same lifecycle treatment as cortex/link/sense/convey — restart-on-crash, callosum events, unified logs.
+
+**Doctor advisory checks (`scripts/doctor.py`).** Three new linux-only advisory checks: `vllm_docker_available`, `vllm_nvidia_smi`, `vllm_servers_reachable`. All stdlib-only (urllib for HTTP) so doctor stays runnable on a fresh clone before `uv sync`. Skips cleanly when there's no journal config or no `providers.vllm.servers` section.
+
+**Benchmark integration.** vLLM models registered in `think/benchmark/models.json` under the `vllm-local/` prefix with measured numbers on `dgx-spark` (Nemotron-3-Nano-Omni, Qwen3.5 35B/9B/2B, Qwen2.5-VL 7B). Harness genericized via `_resolve_provider(model)` so dispatch goes through the provider's `bench_run_once` interface — vLLM and Ollama use the same harness path. The shared `think.providers.list_installed_local_models()` queries both Ollama (`/api/tags`) and vLLM (`/v1/models`); the settings + benchmark CLI both call it.
+
+**Settings UI parity.** The providers tab's per-tier benchmark details panel renders for vllm selection the same way it does for ollama — same tier-anchor lookup, same per-task seconds, same fits-in-vram check. Rows filtered by `model_id` prefix; the recommended-models list correctly skips vLLM rows (vLLM "install" means editing journal config, not `ollama pull`).
+
+**Operational docs (Obsidian, not in repo).** `Spark vLLM Host Prerequisites` and `Spark Memory Budget for vLLM Coexistence` capture the host-setup steps and the unified-memory budget math respectively. Headline finding from the budget exercise: vLLM's footprint is dominated by `--gpu-memory-utilization` × 121.7 GiB unified memory, not weight size, so two-vLLM coexistence requires dropping `gpu-mem-util` to ~0.4 from the default 0.8.
+
+
+## 🧩 Multimodal Content-Block Message Shape
+
+**Files:** `think/providers/shared.py`, `think/providers/ollama.py`, `think/providers/vllm.py`, `think/benchmark/harness.py`, `think/benchmark/tasks.json`, `think/benchmark/fixtures/audio_30s.wav`, `think/benchmark/fixtures/README.md`, `think/benchmark/estimate.py`
+
+Replaced the harness's string-only `messages` payload with content-block lists (`TextBlock`, `ImageBlock`, `AudioBlock` TypedDicts in `think/providers/shared.py`). Providers consume the blocks in their native shapes — Ollama maps `ImageBlock` to its `images: [...]` field and raises `NotImplementedError` on `AudioBlock`; vLLM emits OpenAI-style `image_url` and `input_audio` blocks. The harness auto-detects audio mode from the task spec and base64-encodes audio fixtures via `_load_audio_b64`. `audio_transcribe` and `audio_summarize` task entries reference `think/benchmark/fixtures/audio_30s.wav` — the first audio benchmark fixture, a public-domain LibriVox clip (Tom Sawyer chapter 1) with provenance documented in `fixtures/README.md`. The estimator's `_task_applies_to_model` now gates audio tasks on the model's `audio` capability.
+
+
+## 📊 Provider Matrix Reference
+
+**File:** `docs/PROVIDER_MATRIX.md`
+
+New top-level reference doc capturing the per-provider × per-capability routing matrix as the local-provider count went from one (Ollama) to two (Ollama + vLLM). Two tables: (1) per-layer/task → which provider can serve it, (2) per-provider → which roles it covers. Documents the multi-server `providers.vllm.servers` config schema, the cyankiwi AWQ trust profile for FLASH/LITE quants, and the tool-call parser per model family (`qwen3_xml` for Qwen3.5, `hermes` for Nemotron-3-Nano-Omni). Useful when reasoning about which provider serves which surface, especially as cogitate / generate / vision / audio start routing through different providers per journal context.
+
+
 ## ⏱️ Local Model Benchmarking
 
 ![AI Providers settings tab with a benchmark card for Qwen 3.5 2B showing 87 tok/s and per-task time estimates split into foreground (Chat reply, Voice reply, Search query, Agent turn) and background (Entity extraction, Todo extraction, Meeting summary, Activity clustering, Daily insights, Segment sense, Speaker attribution, Screen record, Awareness tender, Pulse) sections.](../.github/model-benchmark-2026-04-25.png)
@@ -10,7 +47,9 @@ This document tracks significant changes made on this fork of Solstone.
 
 Added a `benchmark` app and supporting `think/benchmark/` module that estimates expected output tok/s for pre-vetted Ollama models on the user's hardware without requiring the models to be pulled. A reference table of measured tok/s per canonical hardware class (see `think/benchmark/reference.json`) is interpolated by FP16 throughput × memory bandwidth when the exact hardware isn't listed. The registry (`models.json`) covers text and vision models across tiers, with direct wall-clock measurements taken on DGX Spark used to ground the task-time heuristics.
 
-The `sol call benchmark` CLI exposes `profile` (probe + cache host hardware), `list-models` (pre-vetted + installed models with tok/s and task-time estimates), `estimate <model-id>` (single-model estimate, optionally `--task <task_id>` for a wall-clock estimate against a reference workload), and `tasks` (show the reference-task catalog). A harness (`think/benchmark/harness.py`) runs the fixture-backed reference tasks (`fixtures/*.txt`) to produce new measurements that feed back into the registry. The settings UI surfaces per-model tok/s alongside the cogitate details panel, with generic tier labels and a recommended-models section for quick orientation.
+The `sol call benchmark` CLI exposes `profile` (probe + cache host hardware), `list-models` (pre-vetted + installed models with tok/s and task-time estimates), `estimate <model-id>` (single-model estimate, optionally `--task <task_id>` for a wall-clock estimate against a reference workload), and `tasks` (show the reference-task catalog). A harness (`think/benchmark/harness.py`) runs the fixture-backed reference tasks (`fixtures/*.txt`) to produce new measurements that feed back into the registry. The settings UI surfaces per-model tok/s alongside the cogitate details panel, with generic tier labels and a recommended-models section for quick orientation. The same details panel renders for both Ollama and vLLM provider selections (see vLLM section above).
+
+The settings benchmark API endpoints always re-probe the host's hardware on each request rather than trusting the cached probe at `journal/health/hardware.json`. This self-heals the case where the cache was poisoned by a transient `nvidia-smi` failure (driver warmup at boot, container-startup contention) — without it, a single bad probe could leave the providers UI showing "tok/s unknown" and "may not fit" indefinitely.
 
 
 ## ⌛ Segment-Time Background Processing Benchmarks
