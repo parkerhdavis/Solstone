@@ -14,42 +14,10 @@ The matrix reflects the system as of the vLLM peer-provider promotion (2026-04-3
 
 The same provider information answers two different questions, and they want different shapes:
 
-- *"For this task, which providers can serve it?"* — the **routing** view. Useful when adding a new talent or wiring a journal config: you want to see all the candidates for a given role and pick one.
 - *"For this provider/model, what can I use it for?"* — the **capability** view. Useful when evaluating a new model, debugging a routing decision, or understanding why some features can't fall back gracefully when a particular provider is unavailable.
+- *"For this task, which providers can serve it?"* — the **routing** view. Useful when adding a new talent or wiring a journal config: you want to see all the candidates for a given role and pick one.
 
 Each table omits information the other surfaces. Read both for the full picture.
-
-
-# Routing matrix: per layer/task → provider
-
-For each layer or task in Solstone's pipelines, this shows the providers wired today, the routing pattern (specialist vs tier-routed vs vLLM-only), and the graceful-degradation behavior if vLLM specifically is unavailable.
-
-**Patterns:**
-
-- **Specialist** — one provider, by design; not pluggable per-call (e.g., `wespeaker` is the speaker-embedding implementation, period).
-- **Journal-pluggable** — journal config picks the provider per surface or per context; tier system handles fallback. Default routing in `think/models.py::TYPE_DEFAULTS` and `PROVIDER_DEFAULTS`.
-- **vLLM-only** — feature requires vLLM; absence of vLLM means the feature is unavailable (degrades gracefully — feature missing, rest of system intact).
-
-| Layer / Task | Provider(s) | Pattern | If vLLM down? |
-|--------------|-------------|---------|---------------|
-| Audio transcription (live capture) | `faster-whisper` (in-process) | specialist | unaffected |
-| Audio transcription (import: Plaud / Rev.ai) | configured per journal | specialist | unaffected |
-| Speaker embedding | `wespeaker` (in-process) | specialist | unaffected |
-| Speaker attribution L1–L3 (acoustic) | in-process pipeline | specialist | unaffected |
-| Speaker attribution L4 (LLM fallback) | Generate (tier-routed) | journal-pluggable | unaffected — uses configured Generate provider |
-| Screen frame categorize | Generate w/ vision (tier-routed) | journal-pluggable | unaffected |
-| Screen frame extract (selected frames only) | Generate w/ vision (tier-routed) | journal-pluggable | unaffected |
-| Segment synthesis (sense, entities, todos, summary) | Generate (tier-routed) | journal-pluggable | unaffected |
-| Daily insights, muse generators | Generate (tier-routed) | journal-pluggable | unaffected |
-| Voice-brain (text response) | Generate (tier-routed) | journal-pluggable | unaffected |
-| Cogitate (chat agent, daily briefing, agent talents) | Cogitate (tier-routed via OpenCode); Ollama default | journal-pluggable | unaffected — Ollama keeps serving; vLLM via OpenCode is mechanically verified but not yet wired into `vllm.py::run_cogitate` |
-| OCR / PDF text extraction | Tesseract / pypdf / PaddleOCR (in-process) | specialist | unaffected |
-| Embeddings (search & similarity) | provider-specific or `nomic-embed-text` | specialist or journal-pluggable | unaffected |
-| Multimodal-augmented meeting summary (planned B/C feature) | `nemotron-omni` via vLLM | vLLM-only | feature unavailable; existing segment record intact |
-| Voice-brain audio-tone interpretation (planned B/C) | `nemotron-omni` via vLLM | vLLM-only (opt-in) | feature unavailable; voice-brain falls back to text-only |
-| Cross-modal search (planned B/C) | `nemotron-omni` via vLLM | vLLM-only (opt-in) | feature unavailable; standard FTS search keeps working |
-
-**Read:** Everything currently load-bearing is journal-pluggable or specialist. vLLM only appears as a critical path for new additive capabilities that didn't exist before. If vLLM is down, Solstone degrades feature-by-feature, never wholesale.
 
 
 # Capability matrix: per provider/model → roles
@@ -100,6 +68,38 @@ For each registered provider and model, what can it be used for. Marker key:
 | pyannote-audio | VAD / diarization | Sentence-boundary segmentation. |
 | Tesseract / PaddleOCR / pypdf / pdf2image | OCR + PDF text extraction | Document pipeline. nemotron-omni claims OCR capability but specialist tools are faster on the document workload. |
 | OpenCV (`cv2`) | Video frame extraction | Preprocessing for the screen describe pipeline. Not AI. |
+
+
+# Routing matrix: per layer/task → provider
+
+For each layer or task in Solstone's pipelines, this shows the providers wired today, the routing pattern (specialist vs tier-routed vs vLLM-only), and the graceful-degradation behavior if vLLM specifically is unavailable.
+
+**Patterns:**
+
+- **Specialist** — one provider, by design; not pluggable per-call (e.g., `wespeaker` is the speaker-embedding implementation, period).
+- **Journal-pluggable** — journal config picks the provider per surface or per context; tier system handles fallback. Default routing in `think/models.py::TYPE_DEFAULTS` and `PROVIDER_DEFAULTS`.
+- **vLLM-only** — feature requires vLLM; absence of vLLM means the feature is unavailable (degrades gracefully — feature missing, rest of system intact).
+
+| Layer / Task | Provider(s) | Pattern | If vLLM down? |
+|--------------|-------------|---------|---------------|
+| Audio transcription (live capture) | `faster-whisper` (in-process) | specialist | unaffected |
+| Audio transcription (import: Plaud / Rev.ai) | configured per journal | specialist | unaffected |
+| Speaker embedding | `wespeaker` (in-process) | specialist | unaffected |
+| Speaker attribution L1–L3 (acoustic) | in-process pipeline | specialist | unaffected |
+| Speaker attribution L4 (LLM fallback) | Generate (tier-routed) | journal-pluggable | unaffected — uses configured Generate provider |
+| Screen frame categorize | Generate w/ vision (tier-routed) | journal-pluggable | unaffected |
+| Screen frame extract (selected frames only) | Generate w/ vision (tier-routed) | journal-pluggable | unaffected |
+| Segment synthesis (sense, entities, todos, summary) | Generate (tier-routed) | journal-pluggable | unaffected |
+| Daily insights, muse generators | Generate (tier-routed) | journal-pluggable | unaffected |
+| Voice-brain (text response) | Generate (tier-routed) | journal-pluggable | unaffected |
+| Cogitate (chat agent, daily briefing, agent talents) | Cogitate (tier-routed via OpenCode); Ollama default | journal-pluggable | unaffected — Ollama keeps serving; vLLM via OpenCode is mechanically verified but not yet wired into `vllm.py::run_cogitate` |
+| OCR / PDF text extraction | Tesseract / pypdf / PaddleOCR (in-process) | specialist | unaffected |
+| Embeddings (search & similarity) | provider-specific or `nomic-embed-text` | specialist or journal-pluggable | unaffected |
+| Multimodal-augmented meeting summary (planned B/C feature) | `nemotron-omni` via vLLM | vLLM-only | feature unavailable; existing segment record intact |
+| Voice-brain audio-tone interpretation (planned B/C) | `nemotron-omni` via vLLM | vLLM-only (opt-in) | feature unavailable; voice-brain falls back to text-only |
+| Cross-modal search (planned B/C) | `nemotron-omni` via vLLM | vLLM-only (opt-in) | feature unavailable; standard FTS search keeps working |
+
+**Read:** Everything currently load-bearing is journal-pluggable or specialist. vLLM only appears as a critical path for new additive capabilities that didn't exist before. If vLLM is down, Solstone degrades feature-by-feature, never wholesale.
 
 
 # vLLM multi-server config
