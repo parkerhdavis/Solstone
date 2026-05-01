@@ -303,6 +303,136 @@
         }
       }
     },
+    "vllm-local/qwen3.5:35b-a3b": {
+      "label": "Qwen 3.5 35B (A3B, bf16) \u2014 vLLM-served (comparison entry)",
+      "tier_hint": 1,
+      "size_gb": 70.0,
+      "capabilities": [
+        "generate"
+      ],
+      "vram_required_gb": 72,
+      "notes": "vLLM-served counterpart of ollama-local/qwen3.5:35b-a3b-bf16 for direct comparison. Same bf16 quant; the HF base repo is multimodal but only the text path is exercised. capabilities=['generate'] (vision/cogitate untested in this round). See Transient/vLLM vs Ollama Comparison.md.",
+      "benchmarks": {
+        "dgx-spark": {
+          "output_tok_s": 30.9,
+          "prompt_tok_s": 0.0,
+          "measured_at": "2026-04-30",
+          "mode": "text_only",
+          "tasks": {
+            "chat_reply": {
+              "seconds": 2.87,
+              "prompt_tokens": 262,
+              "output_tokens": 82,
+              "measured_at": "2026-04-30"
+            },
+            "voice_brain_turn": {
+              "seconds": 1.84,
+              "prompt_tokens": 183,
+              "output_tokens": 51,
+              "measured_at": "2026-04-30"
+            },
+            "search_query": {
+              "seconds": 3.18,
+              "prompt_tokens": 144,
+              "output_tokens": 94,
+              "measured_at": "2026-04-30"
+            },
+            "agent_turn": {
+              "seconds": 13.08,
+              "prompt_tokens": 713,
+              "output_tokens": 400,
+              "measured_at": "2026-04-30"
+            },
+            "entity_extraction": {
+              "seconds": 22.73,
+              "prompt_tokens": 779,
+              "output_tokens": 700,
+              "measured_at": "2026-04-30"
+            },
+            "todo_extraction": {
+              "seconds": 10.58,
+              "prompt_tokens": 814,
+              "output_tokens": 320,
+              "measured_at": "2026-04-30"
+            },
+            "meeting_summary": {
+              "seconds": 11.4,
+              "prompt_tokens": 1209,
+              "output_tokens": 342,
+              "measured_at": "2026-04-30"
+            },
+            "activity_clustering": {
+              "seconds": 23.51,
+              "prompt_tokens": 921,
+              "output_tokens": 721,
+              "measured_at": "2026-04-30"
+            },
+            "daily_insight": {
+              "seconds": 12.91,
+              "prompt_tokens": 1115,
+              "output_tokens": 389,
+              "measured_at": "2026-04-30"
+            },
+            "segment_sense": {
+              "seconds": 13.33,
+              "prompt_tokens": 1312,
+              "output_tokens": 400,
+              "measured_at": "2026-04-30"
+            },
+            "speaker_attribution_llm": {
+              "seconds": 11.64,
+              "prompt_tokens": 888,
+              "output_tokens": 350,
+              "measured_at": "2026-04-30"
+            },
+            "screen_record": {
+              "seconds": 32.32,
+              "prompt_tokens": 1300,
+              "output_tokens": 985,
+              "measured_at": "2026-04-30"
+            },
+            "awareness_tender": {
+              "seconds": 11.19,
+              "prompt_tokens": 670,
+              "output_tokens": 337,
+              "measured_at": "2026-04-30"
+            },
+            "pulse": {
+              "seconds": 12.51,
+              "prompt_tokens": 904,
+              "output_tokens": 376,
+              "measured_at": "2026-04-30"
+            }
+          }
+        }
+      }
+    },
+    "vllm-local/qwen2.5vl:7b-awq": {
+      "label": "Qwen 2.5 VL 7B (AWQ-Int4) \u2014 vLLM-served (comparison entry)",
+      "tier_hint": 3,
+      "size_gb": 6.0,
+      "capabilities": [
+        "vision"
+      ],
+      "vram_required_gb": 7,
+      "notes": "vLLM-served counterpart of ollama-local/qwen2.5vl:7b for direct comparison. Uses AWQ-Int4 (closest to Ollama default Q4_K_M); the bf16 variant of this model on vLLM is ~3x slower on Spark due to memory bandwidth, so AWQ is the production-realistic comparison. See Transient/vLLM vs Ollama Comparison.md.",
+      "benchmarks": {
+        "dgx-spark": {
+          "output_tok_s": 45.4,
+          "prompt_tok_s": 0.0,
+          "measured_at": "2026-04-30",
+          "mode": "vision",
+          "tasks": {
+            "screen_frame": {
+              "seconds": 1.31,
+              "prompt_tokens": 442,
+              "output_tokens": 59,
+              "measured_at": "2026-04-30"
+            }
+          }
+        }
+      }
+    },
     "vllm-local/nemotron-omni": {
       "label": "NVIDIA Nemotron 3 Nano Omni 30B-A3B (NVFP4) \u2014 omni (text+image+audio+video)",
       "tier_hint": 2,
