@@ -4,7 +4,7 @@ This document tracks significant changes made on this fork of Solstone.
 
 ## 🪡 vLLM (Local) Provider — Multimodal Local Inference
 
-![AI Providers settings tab showing Generate routed to vLLM (Local) at the Fast/Lightweight tier with Ollama as backup. Benchmark card reads "Qwen 3.5 2B (AWQ-Int4) — vLLM-served (LITE-tier promotable)" with a "not installed" badge and "98 tok/s measured" — the same per-tier details panel that was previously Ollama-only.](../.github/vllm-provider-add.png)
+![AI Providers settings tab showing Generate routed to vLLM (Local) at the Fast/Lightweight tier with Ollama as backup. Benchmark card reads "Qwen 3.5 2B (AWQ-Int4) — vLLM-served (LITE-tier promotable)" with a "not installed" badge and "98 tok/s measured" — the same per-tier details panel that was previously Ollama-only.](../.github/vllm-provider-add-2026-04-30.png)
 
 **Files:** `think/providers/vllm.py`, `apps/vllm/` (CLI app + tests), `think/providers/__init__.py`, `think/providers/ollama.py` (content-block intake), `think/providers/shared.py`, `think/benchmark/harness.py`, `think/benchmark/models.json` (vllm-local entries), `think/models.py` (`VLLM_PRO/FLASH/LITE`), `think/supervisor.py` (`start_vllm_servers`), `scripts/doctor.py` (vLLM advisory checks), `apps/benchmark/call.py` (provider-aware `_list_installed_models`), `apps/settings/workspace.html` + `apps/settings/routes.py` (UI parity)
 
