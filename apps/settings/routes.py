@@ -661,8 +661,11 @@ def get_benchmark_models() -> Any:
 
     rows = list_prevetted_models(hardware)
 
-    # Attach installed flag from Ollama /api/tags. Unreachable -> all False.
-    installed_ids = _list_installed_ollama_models()
+    # Attach installed flag. Queries Ollama /api/tags and vLLM /v1/models;
+    # unreachable providers contribute nothing (their rows stay installed=False).
+    from think.providers import list_installed_local_models
+
+    installed_ids = list_installed_local_models()
     for row in rows:
         row["installed"] = row["model_id"] in installed_ids
 
@@ -803,28 +806,6 @@ def _configured_transcriber() -> str | None:
     if isinstance(backend, str) and backend:
         return backend
     return "parakeet"
-
-
-def _list_installed_ollama_models() -> set[str]:
-    """Query Ollama /api/tags; return ollama-local/<name> ids. Empty on failure."""
-    try:
-        from think.providers.ollama import _OLLAMA_LOCAL_PREFIX, _get_client
-    except ImportError:
-        return set()
-    try:
-        client = _get_client()
-        response = client.get("/api/tags", timeout=3.0)
-        response.raise_for_status()
-        data = response.json()
-    except Exception as exc:
-        logger.debug("Ollama /api/tags unreachable: %s", exc)
-        return set()
-    installed: set[str] = set()
-    for entry in data.get("models", []) or []:
-        name = entry.get("name")
-        if name:
-            installed.add(f"{_OLLAMA_LOCAL_PREFIX}{name}")
-    return installed
 
 
 @settings_bp.route("/api/validate-keys", methods=["POST"])
