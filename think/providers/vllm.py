@@ -68,9 +68,41 @@ timeout_s : float, optional
 Environment Variables
 ---------------------
 VLLM_BASE_URL : str
-    Base URL of the vLLM server (default ``http://localhost:8000``).
-    Multi-server routing via ``config/journal.json → providers.vllm.servers``
-    is a planned follow-up; for now this provider assumes a single server.
+    Base URL of the vLLM server, used as the fallback when no
+    ``journal.json → providers.vllm.servers`` entry is configured for a
+    given model id (default ``http://localhost:8000``).
+
+Multi-server routing
+--------------------
+For multiple vLLM servers (one per loaded model — vLLM can't hot-swap),
+configure ``journal.json → providers.vllm.servers`` as a map from
+*friendly name* (the part after ``vllm-local/`` in a model id) to a
+server descriptor:
+
+    "providers": {
+      "vllm": {
+        "servers": {
+          "nemotron-omni": {
+            "base_url": "http://localhost:8000",
+            "served_model_name": "nemotron-omni"
+          },
+          "qwen3.5:35b-a3b": {
+            "base_url": "http://localhost:8001",
+            "served_model_name": "qwen3.5:35b-a3b"
+          }
+        }
+      }
+    }
+
+When a model id is resolved (e.g. ``vllm-local/nemotron-omni``), the
+provider strips the ``vllm-local/`` prefix to produce the friendly name,
+looks it up in ``servers`` to get the ``base_url`` + ``served_model_name``,
+and uses that for the chat-completions call. ``served_model_name``
+defaults to the friendly name when omitted.
+
+When no ``servers`` config exists, the env-var fallback applies and the
+served name is the friendly name itself — the legacy single-server
+behavior is preserved exactly.
 """
 
 from __future__ import annotations
@@ -98,35 +130,100 @@ _DEFAULT_TIMEOUT = 300.0  # vLLM cold-first-request can be ~20s; leave headroom
 # Client management
 # ---------------------------------------------------------------------------
 
-_sync_client: httpx.Client | None = None
-_async_client: httpx.AsyncClient | None = None
+# Per-base_url client caches. Each configured vLLM server gets its own
+# httpx client to keep connection pools independent. Env-var fallback uses
+# the same cache keyed by the resolved env URL.
+_sync_clients: dict[str, httpx.Client] = {}
+_async_clients: dict[str, httpx.AsyncClient] = {}
 
 
-def _get_base_url() -> str:
-    """Return the configured vLLM base URL (env-var or default)."""
+def _get_env_base_url() -> str:
+    """Return the env-var fallback base URL (env-var or default)."""
     return os.getenv("VLLM_BASE_URL", _DEFAULT_BASE_URL).rstrip("/")
 
 
-def _get_client() -> httpx.Client:
-    """Get or create the cached sync httpx client."""
-    global _sync_client
-    if _sync_client is None:
-        _sync_client = httpx.Client(
-            base_url=_get_base_url(),
-            timeout=_DEFAULT_TIMEOUT,
-        )
-    return _sync_client
+def _get_servers_config() -> dict[str, dict[str, Any]]:
+    """Read ``providers.vllm.servers`` from the journal config.
+
+    Returns an empty dict when no config is present, which signals
+    callers to use the env-var single-server fallback.
+    """
+    # Lazy import to avoid circular: think.utils imports providers in places.
+    from think.utils import get_config
+
+    return get_config().get("providers", {}).get("vllm", {}).get("servers", {}) or {}
 
 
-def _get_async_client() -> httpx.AsyncClient:
-    """Get or create the cached async httpx client."""
-    global _async_client
-    if _async_client is None:
-        _async_client = httpx.AsyncClient(
-            base_url=_get_base_url(),
-            timeout=_DEFAULT_TIMEOUT,
-        )
-    return _async_client
+def _resolve_server(model: str) -> tuple[str, str]:
+    """Resolve a vllm-local/ model id to ``(base_url, served_model_name)``.
+
+    Lookup order:
+
+    1. Strip ``vllm-local/`` prefix → friendly name.
+    2. Look up ``providers.vllm.servers[<friendly>]`` in journal config.
+       If present, use its ``base_url`` + ``served_model_name`` (the
+       latter defaults to the friendly name when omitted).
+    3. Otherwise, fall back to env-var single-server: ``VLLM_BASE_URL``
+       (or default ``http://localhost:8000``) with the friendly name as
+       the served-model-name.
+
+    Raises no exceptions for missing config — the env-var path always
+    succeeds at producing a tuple. Whether that server actually responds
+    is checked at request time.
+    """
+    friendly = _strip_model_prefix(model)
+    servers = _get_servers_config()
+    entry = servers.get(friendly)
+    if entry:
+        base_url = str(entry.get("base_url") or _DEFAULT_BASE_URL).rstrip("/")
+        served = str(entry.get("served_model_name") or friendly)
+        return base_url, served
+    return _get_env_base_url(), friendly
+
+
+def _get_client(base_url: str | None = None) -> httpx.Client:
+    """Get or create a cached sync httpx client for the given base URL.
+
+    When ``base_url`` is omitted, the env-var fallback URL is used —
+    preserving the pre-multi-server call shape for callers that don't
+    have a model context (e.g. ``validate_key``).
+    """
+    url = (base_url or _get_env_base_url()).rstrip("/")
+    client = _sync_clients.get(url)
+    if client is None:
+        client = httpx.Client(base_url=url, timeout=_DEFAULT_TIMEOUT)
+        _sync_clients[url] = client
+    return client
+
+
+def _get_async_client(base_url: str | None = None) -> httpx.AsyncClient:
+    """Async counterpart of ``_get_client``."""
+    url = (base_url or _get_env_base_url()).rstrip("/")
+    client = _async_clients.get(url)
+    if client is None:
+        client = httpx.AsyncClient(base_url=url, timeout=_DEFAULT_TIMEOUT)
+        _async_clients[url] = client
+    return client
+
+
+def _all_configured_base_urls() -> list[str]:
+    """Return the set of base URLs for all configured servers, or the env-var
+    fallback URL when no ``providers.vllm.servers`` config is present.
+
+    Used by callers that need to enumerate across all servers (list_models,
+    validate_key, status checks) rather than route by model id.
+    """
+    servers = _get_servers_config()
+    if servers:
+        urls: list[str] = []
+        seen = set()
+        for entry in servers.values():
+            url = str(entry.get("base_url") or _DEFAULT_BASE_URL).rstrip("/")
+            if url not in seen:
+                seen.add(url)
+                urls.append(url)
+        return urls
+    return [_get_env_base_url()]
 
 
 # ---------------------------------------------------------------------------
@@ -390,8 +487,8 @@ def run_generate(
     **kwargs: Any,
 ) -> GenerateResult:
     """Generate text synchronously via the configured vLLM server."""
-    client = _get_client()
-    served_model = _strip_model_prefix(model)
+    base_url, served_model = _resolve_server(model)
+    client = _get_client(base_url)
     messages = _build_messages(contents, system_instruction)
     body = _build_request_body(
         served_model,
@@ -425,8 +522,8 @@ async def run_agenerate(
     **kwargs: Any,
 ) -> GenerateResult:
     """Generate text asynchronously via the configured vLLM server."""
-    client = _get_async_client()
-    served_model = _strip_model_prefix(model)
+    base_url, served_model = _resolve_server(model)
+    client = _get_async_client(base_url)
     messages = _build_messages(contents, system_instruction)
     body = _build_request_body(
         served_model,
@@ -453,38 +550,65 @@ async def run_agenerate(
 
 
 def list_models() -> list[dict]:
-    """List models served by the configured vLLM instance.
+    """List models served across all configured vLLM servers.
 
-    Returns each model with the ``vllm-local/`` prefix prepended to its
+    With ``providers.vllm.servers`` configured, queries each unique
+    ``base_url`` and returns the union of their served models. Without
+    config, falls back to the env-var single-server case.
+
+    Each returned entry has the ``vllm-local/`` prefix prepended to its
     id so it's directly usable as a model parameter elsewhere in
     Solstone, mirroring how ``ollama.list_models`` exposes prefixed ids.
+    Unreachable servers are debug-logged and skipped — listing succeeds
+    with whatever is reachable.
     """
-    client = _get_client()
-    response = client.get("/v1/models", timeout=10.0)
-    response.raise_for_status()
-    out = []
-    for entry in response.json().get("data") or []:
-        item = dict(entry)
-        served_id = item.get("id")
-        if isinstance(served_id, str) and not served_id.startswith(_VLLM_LOCAL_PREFIX):
-            item["id"] = f"{_VLLM_LOCAL_PREFIX}{served_id}"
-        out.append(item)
+    out: list[dict] = []
+    for base_url in _all_configured_base_urls():
+        try:
+            response = httpx.get(f"{base_url}/v1/models", timeout=5.0)
+            response.raise_for_status()
+        except Exception as exc:
+            LOG.debug("vLLM server unreachable at %s: %s", base_url, exc)
+            continue
+        for entry in response.json().get("data") or []:
+            item = dict(entry)
+            served_id = item.get("id")
+            if isinstance(served_id, str) and not served_id.startswith(
+                _VLLM_LOCAL_PREFIX
+            ):
+                item["id"] = f"{_VLLM_LOCAL_PREFIX}{served_id}"
+            out.append(item)
     return out
 
 
 def validate_key(api_key: str) -> dict:
-    """Check that the configured vLLM server is reachable.
+    """Check that at least one configured vLLM server is reachable.
 
     The ``api_key`` parameter is ignored — vLLM does not require auth by
-    default. Connectivity is validated via the ``/v1/models`` endpoint.
+    default. With ``providers.vllm.servers`` configured, returns
+    ``valid: True`` if *any* server responds; ``unreachable`` lists
+    servers that didn't respond. Without config, validates the single
+    env-var server.
     """
-    try:
-        base_url = _get_base_url()
-        response = httpx.get(f"{base_url}/v1/models", timeout=5)
-        response.raise_for_status()
-        return {"valid": True}
-    except Exception as e:
-        return {"valid": False, "error": str(e)}
+    urls = _all_configured_base_urls()
+    reachable: list[str] = []
+    unreachable: list[dict[str, str]] = []
+    for url in urls:
+        try:
+            response = httpx.get(f"{url}/v1/models", timeout=5)
+            response.raise_for_status()
+            reachable.append(url)
+        except Exception as exc:
+            unreachable.append({"base_url": url, "error": str(exc)})
+    if reachable:
+        result: dict[str, Any] = {"valid": True, "reachable": reachable}
+        if unreachable:
+            result["unreachable"] = unreachable
+        return result
+    # No reachable servers — return the most informative error.
+    if unreachable:
+        return {"valid": False, "error": unreachable[0]["error"]}
+    return {"valid": False, "error": "no vLLM servers configured or reachable"}
 
 
 # ---------------------------------------------------------------------------
@@ -506,8 +630,7 @@ def bench_ensure_installed(model: str, *, allow_pull: bool) -> None:
     Raises SystemExit with remediation guidance if the model is missing
     or the server is unreachable.
     """
-    served_model = _strip_model_prefix(model)
-    base_url = _get_base_url()
+    base_url, served_model = _resolve_server(model)
     try:
         response = httpx.get(f"{base_url}/v1/models", timeout=10.0)
         response.raise_for_status()
@@ -561,8 +684,8 @@ def bench_run_once(
     reasoning that may dwarf the response. Talents that want thinking on
     use ``run_generate`` directly.
     """
-    served_model = _strip_model_prefix(model)
-    client = _get_client()
+    base_url, served_model = _resolve_server(model)
+    client = _get_client(base_url)
 
     blocks: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
     if image_b64 is not None:

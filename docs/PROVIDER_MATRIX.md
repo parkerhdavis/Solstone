@@ -102,6 +102,36 @@ For each registered provider and model, what can it be used for. Marker key:
 | OpenCV (`cv2`) | Video frame extraction | Preprocessing for the screen describe pipeline. Not AI. |
 
 
+# vLLM multi-server config
+
+vLLM serves one model per process (no hot-swap), so production routing across multiple vLLM-served models requires multiple containers, each on its own port. Configure them in `journal.json → providers.vllm.servers` as a map from *friendly name* (the part after `vllm-local/` in a model id) to a server descriptor:
+
+```json
+{
+  "providers": {
+    "vllm": {
+      "servers": {
+        "nemotron-omni": {
+          "base_url": "http://localhost:8000",
+          "served_model_name": "nemotron-omni"
+        },
+        "qwen3.5:35b-a3b": {
+          "base_url": "http://localhost:8001",
+          "served_model_name": "qwen3.5:35b-a3b"
+        }
+      }
+    }
+  }
+}
+```
+
+When the provider receives a request for `vllm-local/<friendly>`, it strips the `vllm-local/` prefix to produce the friendly name, looks it up in `servers`, and uses the resolved `base_url` + `served_model_name`. `served_model_name` defaults to the friendly name when omitted.
+
+When `providers.vllm.servers` is absent (or doesn't contain a given friendly name), the provider falls back to env-var single-server: `VLLM_BASE_URL` (default `http://localhost:8000`) with `served_model_name = friendly_name`. The legacy single-server behavior is preserved exactly.
+
+`list_models()` and `validate_key()` enumerate across all configured servers when present and report partial reachability cleanly. `build_provider_status()` reports `configured: true` if any configured server is reachable; the `issues` list names each unreachable URL.
+
+
 # Cross-cutting observations
 
 Three load-bearing facts to internalize when reasoning about which provider belongs where:
