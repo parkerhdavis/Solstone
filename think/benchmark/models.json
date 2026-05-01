@@ -308,10 +308,11 @@
       "tier_hint": 1,
       "size_gb": 70.0,
       "capabilities": [
-        "generate"
+        "generate",
+        "cogitate"
       ],
       "vram_required_gb": 72,
-      "notes": "vLLM-served counterpart of ollama-local/qwen3.5:35b-a3b-bf16 for direct comparison. Same bf16 quant; the HF base repo is multimodal but only the text path is exercised. capabilities=['generate'] (vision/cogitate untested in this round). See Transient/vLLM vs Ollama Comparison.md.",
+      "notes": "vLLM-served counterpart of ollama-local/qwen3.5:35b-a3b-bf16 (PRO-tier promotable). Same bf16 quant; the HF repo is multimodal but only the text path is exercised. capabilities=['generate'] (cogitate works mechanically per Phase 5 cogitate validation but not yet wired into tier defaults). Production-routable as VLLM_PRO via journal contexts. Watch item: NVFP4 + Qwen MoE on Blackwell (incl. Spark GB10) has known vLLM gibberish-output issues \u2014 we serve at bf16 to dodge this entirely; do not switch to NVFP4 quant without testing. See Transient/vLLM vs Ollama Comparison.md for the broader picture.",
       "benchmarks": {
         "dgx-spark": {
           "output_tok_s": 30.9,
@@ -415,7 +416,7 @@
         "vision"
       ],
       "vram_required_gb": 7,
-      "notes": "vLLM-served counterpart of ollama-local/qwen2.5vl:7b for direct comparison. Uses AWQ-Int4 (closest to Ollama default Q4_K_M); the bf16 variant of this model on vLLM is ~3x slower on Spark due to memory bandwidth, so AWQ is the production-realistic comparison. See Transient/vLLM vs Ollama Comparison.md.",
+      "notes": "vLLM-served counterpart of ollama-local/qwen2.5vl:7b. Uses AWQ-Int4 (closest to Ollama default Q4_K_M); the bf16 variant of this model on vLLM is ~3x slower on Spark due to memory bandwidth, so AWQ is the production-realistic comparison. Not currently wired into a tier default but routable via journal contexts. See Transient/vLLM vs Ollama Comparison.md for the broader picture.",
       "benchmarks": {
         "dgx-spark": {
           "output_tok_s": 45.4,
@@ -427,6 +428,59 @@
               "seconds": 1.31,
               "prompt_tokens": 442,
               "output_tokens": 59,
+              "measured_at": "2026-04-30"
+            }
+          }
+        }
+      }
+    },
+    "vllm-local/qwen3.5:9b-awq": {
+      "label": "Qwen 3.5 9B (AWQ-Int4) \u2014 vLLM-served (FLASH-tier promotable)",
+      "tier_hint": 2,
+      "size_gb": 8.5,
+      "capabilities": [
+        "generate",
+        "cogitate"
+      ],
+      "vram_required_gb": 10,
+      "notes": "vLLM-served counterpart of ollama-local/qwen3.5:9b. AWQ-Int4 from cyankiwi (de-facto community Qwen quantizer; Qwen team recommends his quants on Qwen3-Next official cards) chosen as the apples-to-apples match for Ollama default Q4_K_M. Production-routable as VLLM_FLASH via journal contexts. Caveat: kaitchup benchmarks observed up to 33% accuracy drop on reasoning tasks for quantized 9B variants when thinking is enabled (model thinks more, hits max-output-tokens, returns truncated answers). Sanity-check output quality before enabling thinking on FLASH-tier vLLM calls; AWQ regeneration recipe in ~/solstone-vllm-spike/AWQ_RECIPE.md.",
+      "benchmarks": {
+        "dgx-spark": {
+          "output_tok_s": 34.1,
+          "prompt_tok_s": 0.0,
+          "measured_at": "2026-04-30",
+          "mode": "text_only",
+          "tasks": {
+            "chat_reply": {
+              "seconds": 2.53,
+              "prompt_tokens": 262,
+              "output_tokens": 83,
+              "measured_at": "2026-04-30"
+            }
+          }
+        }
+      }
+    },
+    "vllm-local/qwen3.5:2b-awq": {
+      "label": "Qwen 3.5 2B (AWQ-Int4) \u2014 vLLM-served (LITE-tier promotable)",
+      "tier_hint": 3,
+      "size_gb": 2.4,
+      "capabilities": [
+        "generate"
+      ],
+      "vram_required_gb": 4,
+      "notes": "vLLM-served counterpart of ollama-local/qwen3.5:2b. AWQ-Int4 from cyankiwi for apples-to-apples with Ollama Q4_K_M. Production-routable as VLLM_LITE via journal contexts. Notably faster than the Ollama equivalent on Spark (98 vs 87 tok/s synthetic; 0.87 vs 1.37s chat_reply) \u2014 at this size class vLLM kernels seem to have a real advantage over Ollama. AWQ regeneration recipe in ~/solstone-vllm-spike/AWQ_RECIPE.md.",
+      "benchmarks": {
+        "dgx-spark": {
+          "output_tok_s": 98.2,
+          "prompt_tok_s": 0.0,
+          "measured_at": "2026-04-30",
+          "mode": "text_only",
+          "tasks": {
+            "chat_reply": {
+              "seconds": 0.87,
+              "prompt_tokens": 262,
+              "output_tokens": 83,
               "measured_at": "2026-04-30"
             }
           }
