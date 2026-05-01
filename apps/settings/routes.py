@@ -46,6 +46,23 @@ settings_bp = Blueprint(
 )
 
 
+def _fresh_hardware() -> dict[str, Any] | None:
+    """Return the host's current hardware probe for settings UI endpoints.
+
+    Always attempts a fresh probe so a stale cache (e.g. an empty-GPU
+    snapshot written during driver warmup at boot) self-heals on the
+    next page load. Falls back to the cached probe if a fresh one
+    raises. Returns None only if both fail.
+    """
+    from think.hardware import load_hardware, probe_hardware
+
+    try:
+        return probe_hardware()
+    except Exception as exc:
+        logger.warning("fresh hardware probe failed; using cache: %s", exc)
+        return load_hardware()
+
+
 # API keys that can be configured in the env section
 # Used for system env checks and allowed env fields validation
 API_KEY_ENV_VARS = [
@@ -430,15 +447,8 @@ def get_transcribe() -> Any:
                 load_reference,
                 resolve_hardware_class,
             )
-            from think.hardware import load_hardware, probe_hardware
 
-            hardware = load_hardware()
-            if hardware is None:
-                try:
-                    hardware = probe_hardware()
-                except Exception as exc:
-                    logger.debug("hardware probe failed: %s", exc)
-                    hardware = None
+            hardware = _fresh_hardware()
             if hardware is not None:
                 gpus = hardware.get("gpus") or []
                 hardware_class = (
@@ -644,17 +654,10 @@ def get_benchmark_models() -> Any:
     try:
         from think.benchmark import list_prevetted_models, load_tasks
         from think.benchmark.estimate import load_reference
-        from think.hardware import load_hardware, probe_hardware
     except ImportError as exc:
         return jsonify({"error": f"benchmark module unavailable: {exc}"}), 500
 
-    hardware = load_hardware()
-    if hardware is None:
-        try:
-            hardware = probe_hardware()
-        except Exception as exc:
-            logger.warning("hardware probe failed: %s", exc)
-            hardware = None
+    hardware = _fresh_hardware()
 
     rows = list_prevetted_models(hardware)
 
@@ -733,7 +736,6 @@ def get_benchmark_segment() -> Any:
             _pick_default_tier_models,
             resolve_hardware_class,
         )
-        from think.hardware import load_hardware, probe_hardware
     except ImportError as exc:
         return jsonify({"error": f"benchmark module unavailable: {exc}"}), 500
 
@@ -744,13 +746,7 @@ def get_benchmark_segment() -> Any:
             400,
         )
 
-    hardware = load_hardware()
-    if hardware is None:
-        try:
-            hardware = probe_hardware()
-        except Exception as exc:
-            logger.warning("hardware probe failed: %s", exc)
-            hardware = None
+    hardware = _fresh_hardware()
 
     gpus = (hardware or {}).get("gpus") or []
     hardware_class = resolve_hardware_class(gpus[0].get("name")) if gpus else "cpu-only"
