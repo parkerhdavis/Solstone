@@ -36,7 +36,7 @@ Read, in order, when you enter the repo for a coding task:
 | `think/sol_cli.py` | CLI entry point — `COMMANDS` / `ALIASES` / `GROUPS` dicts | adding a top-level `sol <cmd>` | `docs/SOLCLI.md` |
 | `observe/` | Multimodal capture — screen, audio, transcribe, describe, sense, transfer | capture-side bugs, new input modalities | `docs/OBSERVE.md` |
 | `think/` | Post-processing core — cortex, talent, callosum, indexer, entities, facets, activities, scheduler, heartbeat, supervisor | anything downstream of capture; most coder work lives here | `docs/THINK.md`, `docs/CORTEX.md`, `docs/CALLOSUM.md` |
-| `convey/` | Web app framework — app discovery, routing, bridge, screenshot tooling | layout / framework-level UI changes | `docs/CONVEY.md` |
+| `convey/` | Web app framework — app discovery, routing, bridge | layout / framework-level UI changes | `docs/CONVEY.md` |
 | `apps/` | Convey apps — each self-contained (`call.py` Typer sub-app + `routes.py` + `templates/`) | adding a user-facing feature, a `sol call <app>` verb, a UI surface | `docs/APPS.md` (required reading before modifying `apps/`) |
 | `talent/` | AI talent configs (markdown prompts + optional `.py` post-hooks) + `SKILL.md`s (journal, coder, partner, …) | defining or tuning a talent; adding a journal-side skill | `talent/journal/SKILL.md`, `docs/PROMPT_TEMPLATES.md` |
 | `scripts/` | Repo maintenance scripts — `check_layer_hygiene.py` | tooling that guards the codebase; wired into `make ci` | (none) |
@@ -86,7 +86,7 @@ Verified against `Makefile`. Grouped by use.
 
 | Target | When to use |
 |--------|-------------|
-| `make install` | First setup and whenever `pyproject.toml` or `uv.lock` changes. Creates `.venv/`, syncs deps, installs Playwright chromium, runs `make skills`. |
+| `make install` | First setup and whenever `pyproject.toml` or `uv.lock` changes. Creates `.venv/`, syncs deps, runs `make skills`. |
 | `make skills` | After adding or renaming a `SKILL.md` under `talent/` or `apps/*/talent/`. Rewrites the `.claude/` + `.agents/` skill symlinks into `journal/`. (`make install` depends on this; rarely run alone.) |
 | `make update` | Upgrade all deps to latest, regenerate `uv.lock`. Expect test churn. |
 | `make update-prices` | Refresh genai-prices model-cost data when adding a new provider model or when pricing tests fail. |
@@ -134,10 +134,10 @@ Verified against `Makefile`. Grouped by use.
 
 ### Service management (systemd / launchd)
 
+`.venv/bin/sol setup` is the source-checkout runtime install path after `make install`; it installs or refreshes the source-checkout wrapper, installs the Claude Code skill when Claude is configured, and starts the background service on port 5015 by default. After the first run, the wrapper at `~/.local/bin/sol` lets you use `sol setup` from anywhere. Use `sol service <install|start|stop|restart|status|logs>` for manual service operations.
+
 | Target | When to use |
 |--------|-------------|
-| `make install-service` | Install `sol` as a systemd user service (Linux) or launchd agent (macOS), convey on port 5015 (override with `PORT=8000`). Makes the machine a live solstone host — rarely wanted in a worktree. |
-| `make uninstall-service` | Remove the installed service. |
 | `make service-logs` | Tail the installed service's logs. |
 
 ### Other
@@ -151,7 +151,7 @@ Verified against `Makefile`. Grouped by use.
 
 | Target | Why not |
 |--------|---------|
-| `make uninstall` | Disabled by design. Use `make uninstall-service` (for installed artifacts) or `make clean-install` (to rebuild the dev env). |
+| `make uninstall` | Disabled by design. Use `sol service uninstall`, `sol skills uninstall`, and `python -m think.install_guard uninstall` for installed user artifacts, or `make clean-install` to rebuild the local dev env. |
 
 ## 6. Testing quickstart
 
@@ -161,7 +161,6 @@ Verified against `Makefile`. Grouped by use.
 - **Run app tests:** `make test-apps` or `make test-app APP=<name>`.
 - **Integration tests** (`tests/integration/`): hit real provider APIs, require `.env` keys, run via `make test-integration`.
 - **After editing `convey/` or `apps/`:** `sol restart-convey` to reload code in a running stack.
-- **Screenshots for UI review:** `sol screenshot <route>` (captures into `scratch/`).
 - **`make dev` + `make sandbox`** both write runtime artifacts into the fixtures journal; `tests/fixtures/journal/.gitignore` covers those — never commit them.
 
 Full depth: `docs/testing.md`.
@@ -264,7 +263,7 @@ Generic software principles (DRY, KISS, YAGNI, single responsibility, small focu
 - **Imports:** prefer absolute (`from think.utils import get_journal`), grouped stdlib → third-party → local, one per line.
 - **Type hints** on function signatures; `mypy` via `make check`.
 - **Dependencies:** managed by [uv](https://docs.astral.sh/uv/). `pyproject.toml` is authoritative; `uv.lock` is committed; `make install` syncs; `make update` refreshes.
-- **Python 3.10+.**
+- **Python 3.11+.**
 
 ## 10. Commit hygiene
 
@@ -309,7 +308,7 @@ The live journal also carries `journal/AGENTS.md` as its runtime-facing breadcru
 
 - **Not a runtime guide for cogitate talents.** Runtime CLI restrictions on talents live in `talent/journal/references/cli.md` § Talent CLI Boundaries. If you're tuning what a talent can or cannot call, look there, not here.
 - **Not the journal-layout reference.** `talent/journal/SKILL.md` + its `references/` is the cogitate-audience entry point. This file describes *how those commands are implemented*, not *which ones talents can't call*.
-- **Not an operations manual.** For debugging a live system see `docs/DOCTOR.md`; for service management, the `make install-service` family.
+- **Not an operations manual.** For debugging a live system see `docs/DOCTOR.md`; for setup and service lifecycle, see `docs/INSTALL.md`, `sol setup`, and `sol service`.
 
 ## 13. Owner-facing copy: the system-anatomy canon
 

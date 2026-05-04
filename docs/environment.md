@@ -4,11 +4,14 @@
 
 `get_journal()` / `get_journal_info()` in `think.utils` are the canonical journal resolvers. Trust them unconditionally.
 
-Resolver order:
+Resolver order (with the source label `get_journal_info()` returns):
 
-1. `SOLSTONE_JOURNAL` if it is set
-2. source-tree fallback: `<project_root>/journal` when both `<project_root>/pyproject.toml` and `<project_root>/.git` exist
-3. `SolstoneNotConfigured` if neither branch resolves
+1. `SOLSTONE_JOURNAL` env var, when set and non-empty → `"env"`
+2. `~/.config/solstone/config.toml`, when it has a non-empty `journal = "..."` key → `"config"`
+3. source-tree fallback: `<project_root>/journal` when both `<project_root>/pyproject.toml` and `<project_root>/.git` exist → `"source"`
+4. built-in default: `~/Documents/journal` → `"default"`
+
+`get_journal_info()` no longer raises — there is always a resolved path. `get_journal()` raises `SolstoneNotConfigured` only when `os.makedirs` on the resolved path fails.
 
 Who sets `SOLSTONE_JOURNAL`:
 
@@ -27,7 +30,7 @@ If you think you need to set `SOLSTONE_JOURNAL` from application code, fix the a
 
 ## Service Installation
 
-`make install-service` installs the managed wrapper at `~/.local/bin/sol`, then installs solstone as a systemd user service (Linux) or launchd agent (macOS) with convey on port 5015. Override with `make install-service PORT=8000`.
+From a fresh source checkout, `.venv/bin/sol setup` installs the managed wrapper at `~/.local/bin/sol`, then installs solstone as a systemd user service (Linux) or launchd agent (macOS) with convey on port 5015. After the first run, the wrapper lets you use `sol setup` from anywhere. Override with `.venv/bin/sol setup --port 8000` on the first run or `sol setup --port 8000` after the wrapper exists. Service installation runs only on source-checkout installs in v1; packaged installs skip the service step.
 
 Installed services invoke `~/.local/bin/sol`. They do **not** write `SOLSTONE_JOURNAL` into the service env block; the wrapper exports it before execing the venv `sol`.
 

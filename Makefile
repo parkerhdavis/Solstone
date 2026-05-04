@@ -14,7 +14,7 @@ export TMPDIR := /var/tmp
 PYTEST_BASETEMP_INIT := BASETEMP=$$(mktemp -d /var/tmp/solstone-pytest-XXXXXX); trap 'rm -rf "$$BASETEMP"' EXIT INT TERM;
 PYTEST_BASETEMP_FLAG := --basetemp "$$BASETEMP"
 
-.PHONY: install uninstall test test-apps test-app test-only test-integration test-integration-only test-all format format-check install-checks ci clean clean-install coverage watch versions update update-prices pre-commit skills dev all sandbox sandbox-stop install-pinchtab install-models parakeet-helper parakeet-helper-clean verify-browser update-browser-baselines review verify verify-api update-api-baselines install-service uninstall-service service-logs check-layer-hygiene doctor FORCE
+.PHONY: install uninstall test test-apps test-app test-only test-integration test-integration-only test-all format format-check install-checks ci clean clean-install coverage watch versions update update-prices pre-commit skills dev all sandbox sandbox-stop install-pinchtab install-models parakeet-helper parakeet-helper-clean verify-browser update-browser-baselines review verify verify-api update-api-baselines service-logs check-layer-hygiene FORCE
 
 # Default target - install package in editable mode
 all: install
@@ -28,12 +28,8 @@ PARAKEET_ONNX_VARIANT ?= $(shell if nvidia-smi -L >/dev/null 2>&1; then echo cud
 
 # Require uv
 UV := $(shell command -v uv 2>/dev/null)
-ifeq (,$(filter-out doctor,$(or $(MAKECMDGOALS),all)))
-# doctor-only invocation — skip uv requirement so a uv-less machine can run diagnostics
-else
 ifndef UV
 $(error uv is not installed. Install it: curl -LsSf https://astral.sh/uv/install.sh | sh)
-endif
 endif
 
 # Node — add nvm bin dir to PATH if npx isn't already available
@@ -67,9 +63,6 @@ USER_BIN := $(HOME)/.local/bin
 		echo "parakeet install: PARAKEET_ONNX_VARIANT=$(PARAKEET_ONNX_VARIANT)"; \
 		$(UV) sync --extra parakeet-onnx-$(PARAKEET_ONNX_VARIANT) || { echo "parakeet install: uv sync --extra parakeet-onnx-$(PARAKEET_ONNX_VARIANT) failed" >&2; exit 1; }; \
 	fi
-	@$(VENV_BIN)/python -c "from observe.transcribe.main import PYANNOTE_OVERLAP_MODEL_PATH, PYANNOTE_OVERLAP_MODEL_SHA256, WESPEAKER_MODEL_PATH, WESPEAKER_MODEL_SHA256; from observe.utils import compute_file_sha256; actual = compute_file_sha256(WESPEAKER_MODEL_PATH); assert actual == WESPEAKER_MODEL_SHA256, f'WeSpeaker asset hash mismatch: got {actual}, expected {WESPEAKER_MODEL_SHA256}'; print(f'wespeaker asset ok ({actual[:12]}...)'); actual = compute_file_sha256(PYANNOTE_OVERLAP_MODEL_PATH); assert actual == PYANNOTE_OVERLAP_MODEL_SHA256, f'pyannote asset hash mismatch: got {actual}, expected {PYANNOTE_OVERLAP_MODEL_SHA256}'; print(f'pyannote asset ok ({actual[:12]}...)')"
-	@echo "Installing Playwright browser for sol screenshot..."
-	$(VENV_BIN)/playwright install chromium
 	@$(MAKE) --no-print-directory skills
 	@touch .installed
 
@@ -78,7 +71,7 @@ uv.lock: pyproject.toml
 	$(UV) lock
 
 # Install package in editable mode with isolated venv
-install: doctor skills .installed
+install: .installed
 	@(cd /tmp && $(CURDIR)/$(VENV_BIN)/python -c "from think.sol_cli import main") 2>/dev/null || { \
 		echo ">>> re-registering editable install"; \
 		$(UV) pip install -e . --no-deps; \
@@ -109,61 +102,11 @@ install: doctor skills .installed
 		exit 1; \
 	fi
 	@touch .installed
-	@OS_NAME=$$(uname -s); \
-	ARCH=$$(uname -m); \
-	if [ "$$OS_NAME" = "Darwin" ] && [ "$$ARCH" = "arm64" ] || [ "$$OS_NAME" = "Linux" ] && [ "$$ARCH" = "x86_64" ]; then \
-		PARAKEET_ONNX_VARIANT=$(PARAKEET_ONNX_VARIANT) $(VENV_PY) scripts/install_parakeet_model.py || { echo "parakeet install: install_parakeet_model.py failed" >&2; exit 1; }; \
-	fi
+	@$(VENV_BIN)/sol install-models || { echo "sol install-models failed" >&2; exit 1; }
 
-# Directories where AI coding agents look for skills
-SKILL_DIRS := journal/.agents/skills journal/.claude/skills
-
-# Discover SKILL.md files in talent/ and apps/*/talent/, symlink into agent skill dirs
+# Setup skill symlinks
 skills:
-	@rm -rf .agents/skills .claude/skills
-	@# Collect all skill directories (containing SKILL.md)
-	@SKILLS=""; \
-	for skill_md in talent/*/SKILL.md apps/*/talent/*/SKILL.md; do \
-		[ -f "$$skill_md" ] || continue; \
-		skill_dir=$$(dirname "$$skill_md"); \
-		skill_name=$$(basename "$$skill_dir"); \
-		if echo "$$SKILLS" | grep -qw "$$skill_name"; then \
-			echo "Error: duplicate skill name '$$skill_name' found in $$skill_dir" >&2; \
-			echo "Each skill directory name must be unique across talent/ and apps/*/talent/." >&2; \
-			exit 1; \
-		fi; \
-		SKILLS="$$SKILLS $$skill_name"; \
-	done; \
-	for dir in $(SKILL_DIRS); do \
-		mkdir -p "$$dir"; \
-		for link in "$$dir"/*; do \
-			([ -e "$$link" ] || [ -L "$$link" ]) || continue; \
-			skill_name=$$(basename "$$link"); \
-			if ! echo "$$SKILLS" | grep -qw "$$skill_name"; then \
-				rm -rf "$$link"; \
-			fi; \
-		done; \
-	done; \
-	count=0; \
-	for skill_md in talent/*/SKILL.md apps/*/talent/*/SKILL.md; do \
-		[ -f "$$skill_md" ] || continue; \
-		skill_dir=$$(dirname "$$skill_md"); \
-		skill_name=$$(basename "$$skill_dir"); \
-		for dir in $(SKILL_DIRS); do \
-			target="../../../$$skill_dir"; \
-			link="$$dir/$$skill_name"; \
-			if [ -L "$$link" ] && [ "$$(readlink "$$link")" = "$$target" ]; then \
-				:; \
-			else \
-				rm -rf "$$link"; \
-				ln -s "$$target" "$$link"; \
-			fi; \
-		done; \
-		count=$$((count + 1)); \
-	done; \
-	if [ "$$count" -gt 0 ]; then \
-		echo "Linked $$count skill(s) into $(SKILL_DIRS)"; \
-	fi
+	@$(VENV_BIN)/sol skills install --project
 
 # Start local dev stack against fixture journal (no observers, no daily processing)
 dev: .installed
@@ -286,11 +229,12 @@ install-pinchtab:
 		curl -fsSL https://pinchtab.com/install.sh | bash; \
 	fi
 
-# Build the parakeet helper binary (macOS/arm64 only, requires Xcode CLT)
+# Install and verify local ML models
 install-models:
-	@test -x "$(VENV_PY)" || { echo "parakeet install: missing $(VENV_PY); run make install first" >&2; exit 1; }
-	PARAKEET_ONNX_VARIANT=$(PARAKEET_ONNX_VARIANT) $(VENV_PY) scripts/install_parakeet_model.py
+	@test -x "$(VENV_BIN)/sol" || { echo "missing $(VENV_BIN)/sol; run make install first" >&2; exit 1; }
+	$(VENV_BIN)/sol install-models
 
+# Build the parakeet helper binary (macOS/arm64 only, requires Xcode CLT)
 parakeet-helper:
 	cd observe/transcribe/parakeet_helper && swift build -c release
 	@echo "built: $$(pwd)/observe/transcribe/parakeet_helper/.build/release/parakeet-helper"
@@ -465,101 +409,12 @@ clean:
 	find . -type f -name ".DS_Store" -delete
 	rm -f .installed
 
-# Pre-install diagnostic — stdlib-only; runs on system python without uv/venv
-doctor:
-	@python3 scripts/doctor.py $(if $(VERBOSE),--verbose) $(if $(JSON),--json) $(if $(PORT),--port $(PORT))
-
-# Service management (override port: make install-service PORT=8000)
-install-service: doctor skills .installed
-	@MODE=$$($(PYTHON) -m think.install_guard check); \
-	RC=$$?; \
-	case "$$MODE" in \
-		worktree) \
-			echo "mode: aborted — worktree"; \
-			exit $$RC; \
-			;; \
-		cross_repo) \
-			echo "mode: aborted — cross_repo"; \
-			exit $$RC; \
-			;; \
-		dangling) \
-			echo "mode: aborted — dangling"; \
-			exit $$RC; \
-			;; \
-		not_symlink) \
-			echo "mode: aborted — not_symlink"; \
-			exit $$RC; \
-			;; \
-		up""grade) \
-			echo "mode: up""grade"; \
-			;; \
-		current) \
-			echo "mode: current"; \
-			;; \
-		fresh) \
-			echo "mode: fresh install"; \
-			;; \
-		*) \
-			echo "mode: aborted — unknown"; \
-			exit 2; \
-			;; \
-	esac; \
-	$(PYTHON) -m think.install_guard install; \
-	CI=true npx --yes skills add ./skills/solstone -g -a claude-code -y; \
-	$(VENV_BIN)/sol service install --port $(or $(PORT),5015); \
-	$(VENV_BIN)/sol service restart; \
-	echo "Waiting for supervisor to report healthy..."; \
-	READY=false; \
-	for i in $$(seq 1 20); do \
-		if $(VENV_BIN)/sol health > /dev/null 2>&1; then \
-			READY=true; \
-			break; \
-		fi; \
-		printf .; \
-		sleep 1; \
-	done; \
-	if [ "$$READY" = "true" ]; then \
-		printf '\n'; \
-		echo "Service is healthy."; \
-	else \
-		printf '\n' >&2; \
-		echo "Service readiness timeout after 20s" >&2; \
-		exit 1; \
-	fi; \
-	$(VENV_BIN)/sol service status
-
 # Follow installed service logs
 service-logs:
 	$(VENV_BIN)/sol service logs -f
 
-uninstall-service:
-	@MODE=$$($(PYTHON) -m think.install_guard check); \
-	RC=$$?; \
-	HAS_SERVICE=false; \
-	HAS_SKILL=false; \
-	if [ -f "$$HOME/.config/systemd/user/solstone.service" ] || [ -f "$$HOME/Library/LaunchAgents/org.solpbc.solstone.plist" ]; then \
-		HAS_SERVICE=true; \
-	fi; \
-	if [ -e "$$HOME/.claude/skills/solstone" ]; then \
-		HAS_SKILL=true; \
-	fi; \
-	case "$$MODE" in \
-		worktree|cross_repo|dangling|not_symlink) \
-			echo "mode: aborted — $$MODE"; \
-			exit $$RC; \
-			;; \
-	esac; \
-	if [ "$$MODE" = "fresh" ] && [ "$$HAS_SERVICE" = "false" ] && [ "$$HAS_SKILL" = "false" ]; then \
-		echo "no artifacts to remove"; \
-		exit 0; \
-	fi; \
-	$(VENV_BIN)/sol service stop > /dev/null 2>&1 || true; \
-	$(VENV_BIN)/sol service uninstall; \
-	CI=true npx --yes skills remove -g -a claude-code -y solstone; \
-	$(PYTHON) -m think.install_guard uninstall
-
 uninstall:
-	@echo "Error: 'make uninstall' is disabled. Use the 'uninstall-service' target to remove installed user/system artifacts, or 'make clean-install' to rebuild the local dev environment." >&2
+	@echo "Error: 'make uninstall' is disabled. Use 'sol service uninstall', 'sol skills uninstall', and 'python -m think.install_guard uninstall' to remove installed user artifacts, or 'make clean-install' to rebuild the local dev environment." >&2
 	@exit 1
 
 FORCE:

@@ -3,15 +3,11 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import plistlib
-import shutil
-import socket
 import subprocess
 import sys
-import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,18 +20,9 @@ ROOT = Path(__file__).resolve().parent.parent
 
 @pytest.fixture
 def doctor():
-    path = ROOT / "scripts" / "doctor.py"
-    name = f"doctor_test_{uuid.uuid4().hex}"
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    try:
-        yield module
-    finally:
-        sys.modules.pop(name, None)
+    from think import doctor as doctor_module
+
+    yield doctor_module
 
 
 @pytest.fixture
@@ -676,8 +663,30 @@ class TestJsonAndExitCodes:
         assert output[-1] == "doctor: 3 checks, 1 failed, 1 warnings, 1 skipped"
 
 
+def test_sol_doctor_subprocess_json_shape():
+    """End-to-end: `sol doctor --json` via the venv entry point produces valid diagnostic JSON."""
+    repo_root = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [sys.executable, "-m", "think.sol_cli", "doctor", "--json"],
+        capture_output=True,
+        text=True,
+        cwd=repo_root,
+        timeout=60,
+    )
+    # Exit code: 0 if all checks pass, 1 if any blocker fails. Either is valid
+    # here; this test asserts CLI routing and payload shape, not machine health.
+    assert result.returncode in (
+        0,
+        1,
+    ), f"unexpected exit code {result.returncode}: {result.stderr}"
+    payload = json.loads(result.stdout)
+    assert "checks" in payload and isinstance(payload["checks"], list)
+    assert "summary" in payload and isinstance(payload["summary"], dict)
+    assert len(payload["checks"]) >= 1
+
+
 class TestMakefileIntegration:
-    def test_dry_run_orders_doctor_before_uv_sync(self):
+    def test_dry_run_install_does_not_run_doctor(self):
         result = subprocess.run(
             ["make", "--dry-run", "-B", "install"],
             cwd=ROOT,
@@ -688,38 +697,8 @@ class TestMakefileIntegration:
         )
         assert result.returncode == 0
         lines = result.stdout.splitlines()
-        doctor_idx = next(
-            index
-            for index, line in enumerate(lines)
-            if "python3 scripts/doctor.py" in line
-        )
-        uv_idx = next(index for index, line in enumerate(lines) if "uv sync" in line)
-        assert doctor_idx < uv_idx
-
-    def test_install_service_aborts_before_running_when_doctor_fails(self, tmp_path):
-        if shutil.which("lsof") is None:
-            pytest.skip("lsof not available")
-        installed = ROOT / ".installed"
-        if not installed.exists():
-            pytest.skip(".installed missing")
-        before = installed.stat().st_mtime
-        with socket.socket() as server:
-            server.bind(("127.0.0.1", 0))
-            server.listen(1)
-            port = server.getsockname()[1]
-            env = os.environ.copy()
-            env["HOME"] = str(tmp_path / "home")
-            result = subprocess.run(
-                ["make", "install-service", f"PORT={port}"],
-                cwd=ROOT,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=15,
-                env=env,
-            )
-        assert result.returncode != 0
-        assert installed.stat().st_mtime == before
+        assert all("python3 scripts/doctor.py" not in line for line in lines)
+        assert any("uv sync" in line for line in lines)
 
 
 # ---------------------------------------------------------------------------

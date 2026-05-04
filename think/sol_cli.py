@@ -46,7 +46,10 @@ COMMANDS: dict[str, str] = {
     "top": "think.top",
     "health": "think.health_cli",
     "notify": "think.notify_cli",
+    "doctor": "think.doctor",
     "config": "think.config_cli",
+    "install-models": "think.install_models",
+    "skills": "think.skills_cli",
     "password": "think.password_cli",
     "streams": "think.streams",
     "segment": "think.segment",
@@ -71,9 +74,9 @@ COMMANDS: dict[str, str] = {
     # convey package - web UI
     "convey": "convey.cli",
     "restart-convey": "convey.restart",
-    "screenshot": "convey.screenshot",
     "maint": "convey.maint_cli",
     "service": "think.service",
+    "setup": "think.setup",
 }
 
 # =============================================================================
@@ -124,17 +127,19 @@ GROUPS: dict[str, list[str]] = {
     "Convey (web UI)": [
         "convey",
         "restart-convey",
-        "screenshot",
         "maint",
     ],
+    "Setup": ["setup", "install-models"],
     "Specialized tools": [
         "password",
         "config",
+        "skills",
         "streams",
         "segment",
         "journal-stats",
         "link",
     ],
+    "Installation": ["doctor"],
     "Help": ["chat"],
 }
 

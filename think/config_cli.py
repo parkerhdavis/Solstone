@@ -105,8 +105,8 @@ def _read_wrapper_status() -> tuple[str, str | None]:
 def _wrapper_refusal(alias: Path) -> str:
     return (
         "sol config: refused: "
-        f"{alias} is not a managed wrapper (run 'make install-service' to "
-        "install the wrapper first)"
+        f"{alias} is not a managed wrapper (run 'sol setup' from the solstone "
+        "source checkout to install the wrapper first)"
     )
 
 
@@ -552,7 +552,11 @@ def cmd_show() -> int:
             user_source = "wrapper-embedded"
         else:
             user_source = "caller-override"
-    else:
+    elif info_source == "config":
+        user_source = "user config (~/.config/solstone/config.toml)"
+    elif info_source == "default":
+        user_source = "built-in default (~/Documents/journal)"
+    else:  # "source"
         user_source = "source-tree fallback"
 
     print(f"path: {path}")
