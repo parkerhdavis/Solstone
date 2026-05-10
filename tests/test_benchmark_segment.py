@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2026 sol pbc
 
-"""Tests for think.benchmark.estimate.estimate_segment_time_s."""
+"""Tests for solstone.think.benchmark.estimate.estimate_segment_time_s."""
 
 from __future__ import annotations
 
 import pytest
 
-from think.benchmark import estimate as est_mod
-from think.benchmark.estimate import estimate_segment_time_s
+from solstone.think.benchmark import estimate as est_mod
+from solstone.think.benchmark.estimate import estimate_segment_time_s
 
 FAKE_REFERENCE = {
     "classes": {
@@ -398,7 +398,7 @@ class TestHarnessPreflight:
     def _patch(self, monkeypatch, tmp_path):
         # _preflight_transcriber reads transcribers.json from disk; redirect
         # by writing a fake into a tmp path the function can be steered to.
-        from think.benchmark import harness
+        from solstone.think.benchmark import harness
 
         fixture = tmp_path / "transcribers.json"
         fixture.write_text(__import__("json").dumps(FAKE_TRANSCRIBERS))

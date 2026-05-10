@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2026 sol pbc
 
-"""Tests for think.hardware — the host hardware probe."""
+"""Tests for solstone.think.hardware — the host hardware probe."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
-from think import hardware
+from solstone.think import hardware
 
 
 @pytest.fixture
@@ -136,7 +136,7 @@ class TestProbeRam:
                 return fake.read_text()
             return original(self, *args, **kwargs)
 
-        with patch("think.hardware.platform.system", return_value="Linux"):
+        with patch("solstone.think.hardware.platform.system", return_value="Linux"):
             monkeypatch.setattr(Path, "read_text", fake_read_text)
             ram_gb = hardware._probe_ram_gb()
         # 32925156 kB ≈ 31.4 GB

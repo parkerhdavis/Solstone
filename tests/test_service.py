@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from think import service
+from solstone.think import service
 
 
 class TestPlatform:
@@ -34,12 +34,15 @@ class TestPlatform:
 
 
 class TestPlistGeneration:
-    def test_round_trip(self):
+    def test_round_trip(self, tmp_path):
+        journal_path = str(tmp_path / "journal")
+        service_log = str(Path(journal_path) / "health" / "service.log")
         env = {
             "HOME": "/Users/test",
             "PATH": "/usr/bin",
+            "PYTHONUNBUFFERED": "1",
         }
-        data = service._generate_plist(env)
+        data = service._generate_plist(env, journal_path=journal_path)
         plist = plistlib.loads(data)
         assert plist["Label"] == "org.solpbc.solstone"
         assert plist["ProgramArguments"][0] == str(
@@ -47,19 +50,39 @@ class TestPlistGeneration:
         )
         assert plist["ProgramArguments"][1] == "supervisor"
         assert plist["EnvironmentVariables"] == env
-        assert plist["KeepAlive"] is True
+        assert plist["EnvironmentVariables"]["PYTHONUNBUFFERED"] == "1"
+        assert plist["KeepAlive"] == {"SuccessfulExit": False}
         assert plist["RunAtLoad"] is True
-        assert "StandardOutPath" not in plist
-        assert "StandardErrorPath" not in plist
+        assert plist["StandardOutPath"] == service_log
+        assert plist["StandardErrorPath"] == service_log
+
+    def test_keep_alive_is_sticky_stop(self, tmp_path):
+        env = {
+            "HOME": "/Users/test",
+            "PATH": "/usr/bin",
+        }
+        data = service._generate_plist(env, journal_path=str(tmp_path / "journal"))
+        plist = plistlib.loads(data)
+
+        # Clean exits stay stopped; non-zero exits respawn.
+        assert isinstance(plist["KeepAlive"], dict)
+        assert plist["KeepAlive"]["SuccessfulExit"] is False
+
+    def test_invalid_journal_path_rejected(self):
+        with pytest.raises(ValueError, match="shell-active character"):
+            service._generate_plist({}, journal_path="/tmp/bad\npath")
 
 
 class TestSystemdUnit:
-    def test_unit_content(self):
+    def test_unit_content(self, tmp_path):
+        journal_path = str(tmp_path / "journal")
+        service_log = str(Path(journal_path) / "health" / "service.log")
         env = {
             "HOME": "/home/test",
             "PATH": "/usr/bin",
+            "PYTHONUNBUFFERED": "1",
         }
-        unit = service._generate_systemd_unit(env)
+        unit = service._generate_systemd_unit(env, journal_path=journal_path)
         lines = unit.splitlines()
 
         # Section headers must start at column 0 (no leading whitespace)
@@ -67,10 +90,14 @@ class TestSystemdUnit:
         assert any(line == "[Service]" for line in lines)
         assert any(line == "[Install]" for line in lines)
 
-        assert "Type=simple" in unit
+        assert "Type=notify" in unit
         assert "Restart=on-failure" in unit
+        assert "StartLimitIntervalSec=120" in unit
+        assert "StartLimitBurst=10" in unit
         assert "KillMode=control-group" in unit
         assert "TimeoutStopSec=30" in unit
+        assert f"StandardOutput=append:{service_log}" in unit
+        assert "StandardError=inherit" in unit
         assert (
             f"ExecStart={Path.home() / '.local' / 'bin' / 'sol'} supervisor 5015"
             in unit
@@ -78,19 +105,26 @@ class TestSystemdUnit:
         assert "supervisor" in unit
         assert "Environment=HOME=/home/test" in unit
         assert "Environment=PATH=/usr/bin" in unit
+        assert "Environment=PYTHONUNBUFFERED=1" in unit
         assert "SOLSTONE_JOURNAL" not in unit
         assert "WantedBy=default.target" in unit
 
-    def test_no_stdio_redirection(self):
+    def test_native_stdio_redirection(self, tmp_path):
+        journal_path = str(tmp_path / "journal")
+        service_log = str(Path(journal_path) / "health" / "service.log")
         env = {
             "HOME": "/home/test",
             "PATH": "/usr/bin",
         }
 
-        unit = service._generate_systemd_unit(env)
+        unit = service._generate_systemd_unit(env, journal_path=journal_path)
 
-        assert "StandardOutput" not in unit
-        assert "StandardError" not in unit
+        assert f"StandardOutput=append:{service_log}" in unit
+        assert "StandardError=inherit" in unit
+
+    def test_invalid_journal_path_rejected(self):
+        with pytest.raises(ValueError, match="shell-active character"):
+            service._generate_systemd_unit({}, journal_path="/tmp/bad$path")
 
 
 class TestLogs:
@@ -133,6 +167,7 @@ class TestEnvCollection:
         assert "ANTHROPIC_API_KEY" not in env
         assert "OPENAI_API_KEY" not in env
         assert "GOOGLE_API_KEY" not in env
+        assert env["PYTHONUNBUFFERED"] == "1"
 
     def test_includes_venv_in_path(self, monkeypatch, tmp_path):
         monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
@@ -235,15 +270,86 @@ class TestServiceHelpers:
         monkeypatch.setattr(service, "service_is_installed", lambda: True)
         monkeypatch.setattr(service, "_platform", lambda: "darwin")
         monkeypatch.setattr(service.os, "getuid", lambda: 501)
-        run_mock = MagicMock(return_value=MagicMock(returncode=0))
+        launchctl_stdout = """gui/501/org.solpbc.solstone = {
+\tactive count = 1
+\tpath = /Users/jer/Library/LaunchAgents/org.solpbc.solstone.plist
+\ttype = LaunchAgent
+\tstate = running
+\tprogram = /Users/jer/.local/bin/sol
+\tpid = 12345
+\tdomain = gui/501
+\tasid = 100012
+\tlast exit code = 0
+\trun interval = 0
+\tactive transactions = 0
+\tdefault environment = {
+\t\tPATH => /usr/bin:/bin
+\t}
+\tenvironment = {
+\t\tHOME => /Users/jer
+\t}
+\tdomain = gui/501
+\tminimum runtime = 10
+\texit timeout = 5
+\tendpoints = {
+\t}
+\tevent triggers = {
+\t}
+\tpid local dispatch queue = {
+\t\tjob state = running
+\t}
+}
+"""
+        run_mock = MagicMock(
+            return_value=MagicMock(returncode=0, stdout=launchctl_stdout)
+        )
         monkeypatch.setattr(service.subprocess, "run", run_mock)
         assert service.service_is_running() is True
 
-    def test_service_is_running_false_darwin(self, monkeypatch):
+    def test_service_is_running_false_when_not_loaded_darwin(self, monkeypatch):
         monkeypatch.setattr(service, "service_is_installed", lambda: True)
         monkeypatch.setattr(service, "_platform", lambda: "darwin")
         monkeypatch.setattr(service.os, "getuid", lambda: 501)
-        run_mock = MagicMock(return_value=MagicMock(returncode=1))
+        run_mock = MagicMock(return_value=MagicMock(returncode=1, stdout=""))
+        monkeypatch.setattr(service.subprocess, "run", run_mock)
+        assert service.service_is_running() is False
+
+    def test_service_is_running_false_when_loaded_but_stopped_darwin(self, monkeypatch):
+        monkeypatch.setattr(service, "service_is_installed", lambda: True)
+        monkeypatch.setattr(service, "_platform", lambda: "darwin")
+        monkeypatch.setattr(service.os, "getuid", lambda: 501)
+        launchctl_stdout = """gui/501/org.solpbc.solstone = {
+\tactive count = 0
+\tpath = /Users/jer/Library/LaunchAgents/org.solpbc.solstone.plist
+\ttype = LaunchAgent
+\tstate = not running
+\tprogram = /Users/jer/.local/bin/sol
+\tdomain = gui/501
+\tasid = 100012
+\trun interval = 0
+\tactive transactions = 0
+\tdefault environment = {
+\t\tPATH => /usr/bin:/bin
+\t}
+\tenvironment = {
+\t\tHOME => /Users/jer
+\t}
+\tdomain = gui/501
+\tminimum runtime = 10
+\texit timeout = 5
+\tendpoints = {
+\t}
+\tevent triggers = {
+\t}
+\tpid local dispatch queue = {
+\t\tjob state = exited
+\t}
+\tlast exit code = 0
+}
+"""
+        run_mock = MagicMock(
+            return_value=MagicMock(returncode=0, stdout=launchctl_stdout)
+        )
         monkeypatch.setattr(service.subprocess, "run", run_mock)
         assert service.service_is_running() is False
 
@@ -338,6 +444,34 @@ class TestRestart:
         assert "New supervisor process started" in out
 
 
+class TestUp:
+    def test_up_darwin_polls_health_until_ready(self, monkeypatch):
+        monkeypatch.setattr(service, "_platform", lambda: "darwin")
+        monkeypatch.setattr(service, "service_is_installed", lambda: True)
+        monkeypatch.setattr(service, "service_is_running", lambda: True)
+        health_check = MagicMock(side_effect=[1, 1, 0, 0])
+        sleep = MagicMock()
+        monkeypatch.setattr("solstone.think.health_cli.health_check", health_check)
+        monkeypatch.setattr(service.time, "sleep", sleep)
+
+        assert service._up(port=5015) == 0
+        assert health_check.call_count == 4
+        assert sleep.call_count == 2
+
+    def test_up_linux_does_not_poll_health(self, monkeypatch):
+        monkeypatch.setattr(service, "_platform", lambda: "linux")
+        monkeypatch.setattr(service, "service_is_installed", lambda: True)
+        monkeypatch.setattr(service, "service_is_running", lambda: True)
+        health_check = MagicMock(return_value=0)
+        sleep = MagicMock()
+        monkeypatch.setattr("solstone.think.health_cli.health_check", health_check)
+        monkeypatch.setattr(service.time, "sleep", sleep)
+
+        assert service._up(port=5015) == 0
+        health_check.assert_called_once_with()
+        sleep.assert_not_called()
+
+
 class TestInstall:
     def test_linux_idempotent(self, monkeypatch, tmp_path, capsys):
         monkeypatch.setattr(sys, "platform", "linux")
@@ -346,7 +480,7 @@ class TestInstall:
         unit_path = tmp_path / "solstone.service"
         monkeypatch.setattr(service, "_unit_path", lambda: unit_path)
 
-        with patch("think.service.subprocess.run") as mock_run:
+        with patch("solstone.think.service.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
 
             result = service._install()
@@ -363,20 +497,22 @@ class TestInstall:
 class TestLingerCheck:
     def test_warns_when_linger_disabled(self, capsys):
         mock_result = MagicMock(returncode=0, stdout="Linger=no\n")
-        with patch("think.service.subprocess.run", return_value=mock_result):
+        with patch("solstone.think.service.subprocess.run", return_value=mock_result):
             service._check_linger()
         output = capsys.readouterr().out
         assert "linger is not enabled" in output.lower()
 
     def test_silent_when_linger_enabled(self, capsys):
         mock_result = MagicMock(returncode=0, stdout="Linger=yes\n")
-        with patch("think.service.subprocess.run", return_value=mock_result):
+        with patch("solstone.think.service.subprocess.run", return_value=mock_result):
             service._check_linger()
         output = capsys.readouterr().out
         assert "linger" not in output.lower()
 
     def test_silent_when_loginctl_missing(self, capsys):
-        with patch("think.service.subprocess.run", side_effect=FileNotFoundError):
+        with patch(
+            "solstone.think.service.subprocess.run", side_effect=FileNotFoundError
+        ):
             service._check_linger()
         output = capsys.readouterr().out
         assert output == ""
@@ -384,25 +520,25 @@ class TestLingerCheck:
 
 class TestRegistry:
     def test_service_command_registered(self):
-        from think import sol_cli as sol
+        from solstone.think import sol_cli as sol
 
         assert "service" in sol.COMMANDS
-        assert sol.COMMANDS["service"] == "think.service"
+        assert sol.COMMANDS["service"] == "solstone.think.service"
 
     def test_up_alias(self):
-        from think import sol_cli as sol
+        from solstone.think import sol_cli as sol
 
         assert "up" in sol.ALIASES
-        assert sol.ALIASES["up"] == ("think.service", ["up"])
+        assert sol.ALIASES["up"] == ("solstone.think.service", ["up"])
 
     def test_down_alias(self):
-        from think import sol_cli as sol
+        from solstone.think import sol_cli as sol
 
         assert "down" in sol.ALIASES
-        assert sol.ALIASES["down"] == ("think.service", ["down"])
+        assert sol.ALIASES["down"] == ("solstone.think.service", ["down"])
 
     def test_service_group_exists(self):
-        from think import sol_cli as sol
+        from solstone.think import sol_cli as sol
 
         assert "Service" in sol.GROUPS
         assert "service" in sol.GROUPS["Service"]
@@ -424,7 +560,7 @@ class TestMain:
 
     def test_restart_if_installed_flag(self, monkeypatch):
         monkeypatch.setattr(sys, "argv", ["sol service", "restart", "--if-installed"])
-        with patch("think.service._restart", return_value=0) as mock:
+        with patch("solstone.think.service._restart", return_value=0) as mock:
             with pytest.raises(SystemExit):
                 service.main()
             mock.assert_called_once_with(if_installed=True)
@@ -469,7 +605,7 @@ class TestRemoveStalePlists:
             program_arguments=[str(old), "supervisor", "5015"],
         )
 
-        with patch("think.service.subprocess.run") as run:
+        with patch("solstone.think.service.subprocess.run") as run:
             run.return_value = MagicMock(returncode=0, stderr="", stdout="")
             assert service.remove_stale_plists() == (1, 0)
 
@@ -494,7 +630,7 @@ class TestRemoveStalePlists:
             program_arguments=[str(current), "supervisor", "5015"],
         )
 
-        with patch("think.service.subprocess.run") as run:
+        with patch("solstone.think.service.subprocess.run") as run:
             assert service.remove_stale_plists() == (0, 0)
 
         run.assert_not_called()
@@ -521,7 +657,7 @@ class TestRemoveStalePlists:
             program_arguments=[str(current), "supervisor", "5015"],
         )
 
-        with patch("think.service.subprocess.run") as run:
+        with patch("solstone.think.service.subprocess.run") as run:
             assert service.remove_stale_plists() == (0, 0)
 
         run.assert_not_called()
@@ -551,7 +687,7 @@ class TestRemoveStalePlists:
             program_arguments=[str(old_two)],
         )
 
-        with patch("think.service.subprocess.run") as run:
+        with patch("solstone.think.service.subprocess.run") as run:
             run.side_effect = [
                 MagicMock(returncode=1, stderr="Could not find service"),
                 MagicMock(returncode=1, stderr="unexpected doom"),
@@ -596,7 +732,7 @@ class TestRemoveStalePlists:
             return original_unlink(path, *args, **kwargs)
 
         with (
-            patch("think.service.subprocess.run") as run,
+            patch("solstone.think.service.subprocess.run") as run,
             patch.object(
                 Path,
                 "unlink",
@@ -616,7 +752,7 @@ class TestRemoveStalePlists:
         launch_agents, _plist_path, _current = self._configure(monkeypatch, tmp_path)
         launch_agents.mkdir(parents=True, exist_ok=True)
 
-        with patch("think.service.subprocess.run") as run:
+        with patch("solstone.think.service.subprocess.run") as run:
             assert service.remove_stale_plists() == (0, 0)
 
         run.assert_not_called()
@@ -643,7 +779,7 @@ class TestRemoveStalePlists:
             program_arguments=["/tmp/sol"],
         )
 
-        with patch("think.service.subprocess.run") as run:
+        with patch("solstone.think.service.subprocess.run") as run:
             assert service.remove_stale_plists() == (0, 0)
 
         run.assert_not_called()
@@ -657,7 +793,7 @@ class TestRemoveStalePlists:
         bad_path = launch_agents / "broken.plist"
         bad_path.write_bytes(b"not a plist")
 
-        with patch("think.service.subprocess.run") as run:
+        with patch("solstone.think.service.subprocess.run") as run:
             assert service.remove_stale_plists() == (0, 0)
 
         run.assert_not_called()
@@ -677,7 +813,7 @@ class TestRemoveStalePlists:
             program_arguments=[str(old)],
         )
 
-        with patch("think.service.subprocess.run") as run:
+        with patch("solstone.think.service.subprocess.run") as run:
             run.return_value = MagicMock(returncode=0, stderr="", stdout="")
             assert service.remove_stale_plists() == (1, 0)
             first = capsys.readouterr()
@@ -704,7 +840,7 @@ class TestRemoveStalePlists:
             program=str(old),
         )
 
-        with patch("think.service.subprocess.run") as run:
+        with patch("solstone.think.service.subprocess.run") as run:
             run.return_value = MagicMock(returncode=0, stderr="", stdout="")
             assert service.remove_stale_plists() == (1, 0)
 
@@ -723,7 +859,7 @@ class TestRemoveStalePlists:
         launch_agents.mkdir(parents=True, exist_ok=True)
         self._write_plist(plist_path, label=service.SERVICE_LABEL)
 
-        with patch("think.service.subprocess.run") as run:
+        with patch("solstone.think.service.subprocess.run") as run:
             assert service.remove_stale_plists() == (0, 0)
 
         run.assert_not_called()
@@ -744,7 +880,7 @@ class TestRemoveStalePlists:
             program_arguments=[str(missing)],
         )
 
-        with patch("think.service.subprocess.run") as run:
+        with patch("solstone.think.service.subprocess.run") as run:
             run.return_value = MagicMock(returncode=0, stderr="", stdout="")
             assert service.remove_stale_plists() == (1, 0)
 
@@ -769,7 +905,7 @@ class TestRemoveStalePlists:
             program_arguments=[str(broken)],
         )
 
-        with patch("think.service.subprocess.run") as run:
+        with patch("solstone.think.service.subprocess.run") as run:
             run.return_value = MagicMock(returncode=0, stderr="", stdout="")
             assert service.remove_stale_plists() == (1, 0)
 
@@ -781,7 +917,7 @@ class TestRemoveStalePlists:
     def test_absent_launch_agents_dir_is_noop(self, monkeypatch, tmp_path, capsys):
         _launch_agents, _plist_path, _current = self._configure(monkeypatch, tmp_path)
 
-        with patch("think.service.subprocess.run") as run:
+        with patch("solstone.think.service.subprocess.run") as run:
             assert service.remove_stale_plists() == (0, 0)
 
         run.assert_not_called()
@@ -794,7 +930,7 @@ class TestRemoveStalePlists:
             monkeypatch, tmp_path, platform="linux"
         )
 
-        with patch("think.service.subprocess.run") as run:
+        with patch("solstone.think.service.subprocess.run") as run:
             assert service.remove_stale_plists() == (0, 0)
 
         run.assert_not_called()

@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2026 sol pbc
 
-"""Tests for think.benchmark.estimate — hardware-class resolution + estimates."""
+"""Tests for solstone.think.benchmark.estimate — hardware-class resolution + estimates."""
 
 from __future__ import annotations
 
 import pytest
 
-from think.benchmark import estimate as est_mod
-from think.benchmark.estimate import (
+from solstone.think.benchmark import estimate as est_mod
+from solstone.think.benchmark.estimate import (
     estimate_output_tok_s,
     estimate_task_time_s,
     list_prevetted_models,

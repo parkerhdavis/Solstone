@@ -11,7 +11,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from think.call import call_app
+from solstone.think.call import call_app
 
 runner = CliRunner()
 
@@ -30,7 +30,7 @@ def test_journal_export_writes_zip_and_manifest(journal_copy):
     assert result.stdout.strip() == str(archive_path.resolve())
     assert archive_path.exists()
     manifest = _read_manifest(archive_path)
-    assert manifest["solstone_version"] == "0.1.0"
+    assert manifest["solstone_version"] == "0.2.0"
     assert manifest["source_journal"] == str(journal_copy.resolve())
     assert manifest["day_count"] > 0
     assert manifest["entity_count"] > 0
@@ -59,7 +59,7 @@ def test_journal_export_default_path_and_quiet(tmp_path, monkeypatch):
 
 
 def test_journal_export_service_down_bypasses_require_up(journal_copy, monkeypatch):
-    import think.tools.call as call_module
+    import solstone.think.tools.call as call_module
 
     archive_path = journal_copy.parent / "journal-export.zip"
 
@@ -75,7 +75,7 @@ def test_journal_export_service_down_bypasses_require_up(journal_copy, monkeypat
 
 
 def test_journal_export_atomic_write_failure(journal_copy, monkeypatch):
-    import think.journal_export as export_module
+    import solstone.think.journal_export as export_module
 
     archive_path = journal_copy.parent / "journal-export.zip"
 
@@ -92,7 +92,7 @@ def test_journal_export_atomic_write_failure(journal_copy, monkeypatch):
 
 
 def test_journal_export_service_up_advisory(journal_copy, monkeypatch):
-    import think.tools.call as call_module
+    import solstone.think.tools.call as call_module
 
     archive_path = journal_copy.parent / "journal-export.zip"
     monkeypatch.setattr(call_module, "is_solstone_up", lambda: True)

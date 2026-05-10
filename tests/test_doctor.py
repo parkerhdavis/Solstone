@@ -13,14 +13,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from think import install_guard
+from solstone.think import install_guard
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture
 def doctor():
-    from think import doctor as doctor_module
+    from solstone.think import doctor as doctor_module
 
     yield doctor_module
 
@@ -86,7 +86,7 @@ def test_install_guard_import_succeeds_when_frontmatter_is_shadowed(tmp_path):
         [
             sys.executable,
             "-c",
-            "from think.install_guard import parse_wrapper; print('ok')",
+            "from solstone.think.install_guard import parse_wrapper; print('ok')",
         ],
         cwd=ROOT,
         capture_output=True,
@@ -195,7 +195,8 @@ class TestSolImportable:
         result = doctor.sol_importable_check(args(doctor))
         assert result.status == "ok"
         assert (
-            result.detail == "from think.sol_cli import main succeeded outside repo cwd"
+            result.detail
+            == "from solstone.think.sol_cli import main succeeded outside repo cwd"
         )
 
     def test_fail_on_module_not_found(self, doctor, monkeypatch, tmp_path):
@@ -208,13 +209,13 @@ class TestSolImportable:
             "run_probe",
             lambda *_args, **_kwargs: doctor.ProbeOutput(
                 "",
-                "Traceback (most recent call last):\nModuleNotFoundError: No module named 'think'\n",
+                "Traceback (most recent call last):\nModuleNotFoundError: No module named 'solstone'\n",
                 1,
             ),
         )
         result = doctor.sol_importable_check(args(doctor))
         assert result.status == "fail"
-        assert result.detail == "ModuleNotFoundError: No module named 'think'"
+        assert result.detail == "ModuleNotFoundError: No module named 'solstone'"
 
     def test_fail_on_other_exception(self, doctor, monkeypatch, tmp_path):
         monkeypatch.setattr(doctor, "ROOT", tmp_path)
@@ -231,6 +232,91 @@ class TestSolImportable:
         result = doctor.sol_importable_check(args(doctor))
         assert result.status == "fail"
         assert result.detail == "SyntaxError: broken import"
+
+
+class TestPackagedInstall:
+    def setup_packaged(self, doctor, monkeypatch, tmp_path):
+        monkeypatch.setattr(doctor, "ROOT", tmp_path)
+        monkeypatch.setattr(doctor, "is_packaged_install", lambda: True)
+
+    def test_python_version_uses_metadata_when_pyproject_absent(
+        self, doctor, monkeypatch, tmp_path
+    ):
+        self.setup_packaged(doctor, monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            doctor,
+            "distribution",
+            lambda name: SimpleNamespace(metadata={"Requires-Python": ">=3.11"}),
+        )
+
+        result = doctor.python_version_check(args(doctor))
+
+        assert result.status == "ok"
+        assert ">=3.11" in result.detail
+
+    def test_uv_installed_skips(self, doctor, monkeypatch, tmp_path):
+        self.setup_packaged(doctor, monkeypatch, tmp_path)
+
+        result = doctor.uv_installed_check(args(doctor))
+
+        assert result.status == "skip"
+        assert result.detail == "uv is only required for source-checkout development"
+
+    def test_venv_consistent_skips(self, doctor, monkeypatch, tmp_path):
+        self.setup_packaged(doctor, monkeypatch, tmp_path)
+
+        result = doctor.venv_consistent_check(args(doctor))
+
+        assert result.status == "skip"
+        assert result.detail == "packaged install: env managed by uv tool / pipx"
+
+    def test_sol_importable_uses_in_process_import(self, doctor, monkeypatch, tmp_path):
+        self.setup_packaged(doctor, monkeypatch, tmp_path)
+
+        result = doctor.sol_importable_check(args(doctor))
+
+        assert result.status == "ok"
+        assert result.detail == "import solstone succeeded in packaged install"
+
+    def test_local_bin_sol_reachable_canonical_pass(
+        self, doctor, monkeypatch, home_root
+    ):
+        local = home_root / ".local" / "bin" / "sol"
+        local.parent.mkdir(parents=True)
+        local.write_text("#!/bin/sh\n", encoding="utf-8")
+        monkeypatch.setattr(doctor.shutil, "which", lambda name: str(local))
+
+        result = doctor.local_bin_sol_reachable_check(args(doctor))
+
+        assert result.status == "ok"
+        assert "~/.local/bin/sol is on PATH" in result.detail
+
+    def test_local_bin_sol_reachable_symlink_pass(
+        self, doctor, monkeypatch, home_root, tmp_path
+    ):
+        target = tmp_path / "usr" / "local" / "bin" / "sol"
+        target.parent.mkdir(parents=True)
+        target.write_text("#!/bin/sh\n", encoding="utf-8")
+        local = home_root / ".local" / "bin" / "sol"
+        local.parent.mkdir(parents=True)
+        local.symlink_to(target)
+        monkeypatch.setattr(doctor.shutil, "which", lambda name: str(target))
+
+        result = doctor.local_bin_sol_reachable_check(args(doctor))
+
+        assert result.status == "ok"
+        assert "symlinks to PATH sol" in result.detail
+
+    def test_local_bin_sol_reachable_warns_when_missing(
+        self, doctor, monkeypatch, home_root
+    ):
+        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+
+        result = doctor.local_bin_sol_reachable_check(args(doctor))
+
+        assert result.status == "warn"
+        assert ".local/bin/sol" in result.detail
+        assert "uv tool install solstone" in (result.fix or "")
 
 
 class TestNpxChecks:
@@ -485,7 +571,7 @@ class TestStaleAliasSymlink:
         )
         result = doctor.stale_alias_symlink_check(args(doctor))
         assert result.status == "skip"
-        assert "could not import think.install_guard" in result.detail
+        assert "could not import solstone.think.install_guard" in result.detail
 
 
 class TestMacosFirewall:
@@ -667,7 +753,7 @@ def test_sol_doctor_subprocess_json_shape():
     """End-to-end: `sol doctor --json` via the venv entry point produces valid diagnostic JSON."""
     repo_root = Path(__file__).resolve().parent.parent
     result = subprocess.run(
-        [sys.executable, "-m", "think.sol_cli", "doctor", "--json"],
+        [sys.executable, "-m", "solstone.think.sol_cli", "doctor", "--json"],
         capture_output=True,
         text=True,
         cwd=repo_root,

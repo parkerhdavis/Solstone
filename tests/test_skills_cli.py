@@ -6,15 +6,15 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+from importlib import resources
 from pathlib import Path
 
 import pytest
 
-from think import skills_cli
-from think.skills_cli import (
+from solstone.think import skills_cli
+from solstone.think.skills_cli import (
     GLOBAL_SKIP_MESSAGE,
     discover_user_bundles,
-    get_project_root,
     install_project,
     install_user,
     list_project_status,
@@ -29,16 +29,16 @@ def _write_skill(path: Path, content: bytes | None = None) -> None:
 
 
 def _mini_user_repo(tmp_path: Path, content: bytes | None = None) -> Path:
-    repo = tmp_path / "repo"
-    _write_skill(repo / "skills" / "solstone", content)
-    return repo
+    bundle_dir = tmp_path / "bundles"
+    _write_skill(bundle_dir / "solstone", content)
+    return bundle_dir
 
 
 def _mini_project_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
-    _write_skill(repo / "talent" / "journal")
-    _write_skill(repo / "talent" / "routines")
-    _write_skill(repo / "apps" / "foo" / "talent" / "bar")
+    _write_skill(repo / "solstone" / "talent" / "journal")
+    _write_skill(repo / "solstone" / "talent" / "routines")
+    _write_skill(repo / "solstone" / "apps" / "foo" / "talent" / "bar")
     return repo
 
 
@@ -57,7 +57,7 @@ def test_install_user_creates_targets_for_present_agents(tmp_path):
     report = install_user(repo, home, ["all"])
 
     assert report.error_count == 0
-    source = repo / "skills" / "solstone" / "SKILL.md"
+    source = repo / "solstone" / "SKILL.md"
     assert (
         home / ".claude" / "skills" / "solstone" / "SKILL.md"
     ).read_bytes() == source.read_bytes()
@@ -114,7 +114,7 @@ def test_install_user_replaces_modified_source(tmp_path):
     repo = _mini_user_repo(tmp_path, b"first")
     home = _home(tmp_path, ".claude")
     install_user(repo, home, ["claude"])
-    (repo / "skills" / "solstone" / "SKILL.md").write_bytes(b"second")
+    (repo / "solstone" / "SKILL.md").write_bytes(b"second")
 
     report = install_user(repo, home, ["claude"])
 
@@ -233,7 +233,10 @@ def test_install_project_creates_symlinks(tmp_path):
             link = link_parent / name
             assert link.is_symlink()
             assert os.readlink(link) == os.path.relpath(
-                repo / ("talent" if name != "bar" else "apps/foo/talent") / name,
+                repo
+                / "solstone"
+                / ("talent" if name != "bar" else "apps/foo/talent")
+                / name,
                 link_parent,
             )
 
@@ -262,7 +265,7 @@ def test_install_project_cleans_stale_symlinks(tmp_path):
     repo = _mini_project_repo(tmp_path)
     target = tmp_path / "work"
     install_project(repo, target, ["all"])
-    shutil.rmtree(repo / "talent" / "routines")
+    shutil.rmtree(repo / "solstone" / "talent" / "routines")
 
     report = install_project(repo, target, ["all"])
 
@@ -273,15 +276,15 @@ def test_install_project_cleans_stale_symlinks(tmp_path):
 
 def test_install_project_dedupe_error(tmp_path):
     repo = tmp_path / "repo"
-    _write_skill(repo / "talent" / "foo")
-    _write_skill(repo / "apps" / "x" / "talent" / "foo")
+    _write_skill(repo / "solstone" / "talent" / "foo")
+    _write_skill(repo / "solstone" / "apps" / "x" / "talent" / "foo")
 
     with pytest.raises(ValueError) as exc_info:
         install_project(repo, tmp_path / "work", ["all"])
 
     message = str(exc_info.value)
-    assert str(repo / "talent" / "foo") in message
-    assert str(repo / "apps" / "x" / "talent" / "foo") in message
+    assert str(repo / "solstone" / "talent" / "foo") in message
+    assert str(repo / "solstone" / "apps" / "x" / "talent" / "foo") in message
 
 
 def test_install_project_agent_claude_only(tmp_path):
@@ -313,7 +316,7 @@ def test_install_project_relative_target_outside_repo(tmp_path):
     link_parent = target / ".claude" / "skills"
     link = link_parent / "journal"
     assert os.readlink(link) == os.path.relpath(
-        repo / "talent" / "journal", link_parent
+        repo / "solstone" / "talent" / "journal", link_parent
     )
 
 
@@ -378,7 +381,8 @@ def test_main_install_project_no_dir_uses_cwd(monkeypatch, tmp_path):
 
 def test_repo_root_resolution_works_from_arbitrary_cwd(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
+    bundle_dir = Path(str(resources.files("solstone") / "_user_bundles"))
 
-    bundles = discover_user_bundles(Path(get_project_root()))
+    bundles = discover_user_bundles(bundle_dir)
 
     assert [bundle.name for bundle in bundles] == ["solstone"]

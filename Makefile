@@ -14,7 +14,7 @@ export TMPDIR := /var/tmp
 PYTEST_BASETEMP_INIT := BASETEMP=$$(mktemp -d /var/tmp/solstone-pytest-XXXXXX); trap 'rm -rf "$$BASETEMP"' EXIT INT TERM;
 PYTEST_BASETEMP_FLAG := --basetemp "$$BASETEMP"
 
-.PHONY: install uninstall test test-apps test-app test-only test-integration test-integration-only test-all format format-check install-checks ci clean clean-install coverage watch versions update update-prices pre-commit skills dev all sandbox sandbox-stop install-pinchtab install-models parakeet-helper parakeet-helper-clean verify-browser update-browser-baselines review verify verify-api update-api-baselines service-logs check-layer-hygiene FORCE
+.PHONY: install uninstall test test-apps test-app test-only test-integration test-integration-only test-all format format-check install-checks ci clean clean-install coverage watch versions update update-prices pre-commit skills dev all sandbox sandbox-stop install-pinchtab install-models parakeet-helper parakeet-helper-clean wheel-macos wheel-macos-clean verify-browser update-browser-baselines review verify verify-api update-api-baselines service-logs check-layer-hygiene release release-test FORCE
 
 # Default target - install package in editable mode
 all: install
@@ -25,6 +25,16 @@ VENV_BIN := $(VENV)/bin
 VENV_PY := $(VENV_BIN)/python
 PYTHON := $(VENV_PY)
 PARAKEET_ONNX_VARIANT ?= $(shell if nvidia-smi -L >/dev/null 2>&1; then echo cuda; else echo cpu; fi)
+
+# Dev install extras: Darwin lacks arm64 wheels for parakeet-onnx-cuda's
+# nvidia-* deps, so on Darwin we sync only the platform-agnostic extras and
+# skip the full extras sync (which would otherwise force resolution of
+# parakeet variants and fail). All other hosts (Linux primary) keep it.
+ifeq ($(shell uname -s),Darwin)
+EXTRAS_ARGS := --extra pdf --extra whisper
+else
+EXTRAS_ARGS := --all-extras
+endif
 
 # Require uv
 UV := $(shell command -v uv 2>/dev/null)
@@ -49,7 +59,7 @@ USER_BIN := $(HOME)/.local/bin
 # Marker file to track installation
 .installed: pyproject.toml uv.lock .python-version-hash
 	@echo "Installing package with uv..."
-	$(UV) sync
+	$(UV) sync --group dev $(EXTRAS_ARGS)
 	@# Python 3.14+ needs onnxruntime from nightly (not yet on PyPI)
 	@OS_NAME=$$(uname -s); \
 	PY_MINOR=$$($(PYTHON) -c "import sys; print(sys.version_info.minor)"); \
@@ -61,7 +71,7 @@ USER_BIN := $(HOME)/.local/bin
 	ARCH=$$(uname -m); \
 	if [ "$$OS_NAME" = "Linux" ] && [ "$$ARCH" = "x86_64" ]; then \
 		echo "parakeet install: PARAKEET_ONNX_VARIANT=$(PARAKEET_ONNX_VARIANT)"; \
-		$(UV) sync --extra parakeet-onnx-$(PARAKEET_ONNX_VARIANT) || { echo "parakeet install: uv sync --extra parakeet-onnx-$(PARAKEET_ONNX_VARIANT) failed" >&2; exit 1; }; \
+		$(UV) sync --extra all --extra parakeet-onnx-$(PARAKEET_ONNX_VARIANT) || { echo "parakeet install: uv sync --extra all --extra parakeet-onnx-$(PARAKEET_ONNX_VARIANT) failed" >&2; exit 1; }; \
 	fi
 	@$(MAKE) --no-print-directory skills
 	@touch .installed
@@ -72,10 +82,10 @@ uv.lock: pyproject.toml
 
 # Install package in editable mode with isolated venv
 install: .installed
-	@(cd /tmp && $(CURDIR)/$(VENV_BIN)/python -c "from think.sol_cli import main") 2>/dev/null || { \
+	@(cd /tmp && $(CURDIR)/$(VENV_BIN)/python -c "from solstone.think.sol_cli import main") 2>/dev/null || { \
 		echo ">>> re-registering editable install"; \
 		$(UV) pip install -e . --no-deps; \
-		if (cd /tmp && $(CURDIR)/$(VENV_BIN)/python -c "from think.sol_cli import main"); then \
+		if (cd /tmp && $(CURDIR)/$(VENV_BIN)/python -c "from solstone.think.sol_cli import main"); then \
 			echo ">>> re-registered successfully"; \
 		else \
 			echo ">>> editable install still broken; run make clean-install"; \
@@ -89,7 +99,7 @@ install: .installed
 	elif [ "$$OS_NAME" = "Linux" ]; then \
 		if [ "$$ARCH" = "x86_64" ]; then \
 			echo "parakeet install: PARAKEET_ONNX_VARIANT=$(PARAKEET_ONNX_VARIANT)"; \
-			$(UV) sync --extra parakeet-onnx-$(PARAKEET_ONNX_VARIANT) || { echo "parakeet install: uv sync --extra parakeet-onnx-$(PARAKEET_ONNX_VARIANT) failed" >&2; exit 1; }; \
+			$(UV) sync --extra all --extra parakeet-onnx-$(PARAKEET_ONNX_VARIANT) || { echo "parakeet install: uv sync --extra all --extra parakeet-onnx-$(PARAKEET_ONNX_VARIANT) failed" >&2; exit 1; }; \
 			if [ "$(PARAKEET_ONNX_VARIANT)" = "cuda" ]; then \
 				$(UV) pip install --reinstall onnxruntime-gpu || { echo "parakeet install: failed to force-reinstall onnxruntime-gpu" >&2; exit 1; }; \
 				$(VENV_PY) -c "import onnxruntime as ort; ort.preload_dlls(cuda=True, cudnn=True); assert 'CUDAExecutionProvider' in ort.get_available_providers(), 'CUDAExecutionProvider missing after install'; print('parakeet install: CUDA runtime ready')" || { echo "parakeet install: CUDA runtime validation failed" >&2; exit 1; }; \
@@ -236,12 +246,37 @@ install-models:
 
 # Build the parakeet helper binary (macOS/arm64 only, requires Xcode CLT)
 parakeet-helper:
-	cd observe/transcribe/parakeet_helper && swift build -c release
-	@echo "built: $$(pwd)/observe/transcribe/parakeet_helper/.build/release/parakeet-helper"
+	cd solstone/observe/transcribe/parakeet_helper && swift build -c release
+	@echo "built: $$(pwd)/solstone/observe/transcribe/parakeet_helper/.build/release/parakeet-helper"
 
 # Remove parakeet helper build artifacts
 parakeet-helper-clean:
-	rm -rf observe/transcribe/parakeet_helper/.build observe/transcribe/parakeet_helper/.swiftpm observe/transcribe/parakeet_helper/Package.resolved
+	rm -rf solstone/observe/transcribe/parakeet_helper/.build solstone/observe/transcribe/parakeet_helper/.swiftpm solstone/observe/transcribe/parakeet_helper/Package.resolved
+
+# Build a signed/notarized macOS Apple Silicon platform wheel
+# (Darwin/arm64 only; requires Xcode CLT, Developer ID cert, and the
+# `sol-pbc-notary` notarytool keychain profile in sol-signing.keychain-db).
+# `uv build` runs in its own PEP 517 isolated env, so this target intentionally
+# does not depend on `.installed` — the wheel build is fully decoupled from
+# the dev venv install state.
+ifeq ($(shell uname -s)/$(shell uname -m),Darwin/arm64)
+wheel-macos: parakeet-helper
+	@echo "==> signing and notarizing parakeet-helper"
+	./scripts/sign-and-notarize-helper.sh solstone/observe/transcribe/parakeet_helper/.build/release/parakeet-helper
+	@echo "==> staging helper into _bin/"
+	mkdir -p solstone/observe/transcribe/parakeet_helper/_bin
+	cp solstone/observe/transcribe/parakeet_helper/.build/release/parakeet-helper solstone/observe/transcribe/parakeet_helper/_bin/parakeet-helper
+	@echo "==> building macosx_14_0_arm64 platform wheel"
+	$(UV) build --wheel -C--build-option=--plat-name=macosx_14_0_arm64
+else
+wheel-macos:
+	@echo "wheel-macos: only supported on Darwin/arm64 (got $(shell uname -s)/$(shell uname -m))" >&2
+	@exit 1
+endif
+
+# Remove the staged helper copy that wheel-macos installs into _bin/
+wheel-macos-clean:
+	rm -rf solstone/observe/transcribe/parakeet_helper/_bin
 
 # Run browser scenarios against sandbox
 verify-browser: .installed
@@ -330,7 +365,7 @@ test: .installed format-check
 # Run app tests
 test-apps: .installed
 	@echo "Running app tests..."
-	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) apps/ -q
+	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) solstone/apps/ -q
 
 # Run specific app tests
 test-app: .installed
@@ -339,7 +374,7 @@ test-app: .installed
 		echo "Example: make test-app APP=todos"; \
 		exit 1; \
 	fi
-	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) apps/$(APP)/tests/ -v
+	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) solstone/apps/$(APP)/tests/ -v
 
 # Run specific test file or pattern
 test-only: .installed
@@ -377,7 +412,7 @@ test-integration-only: .installed
 # Run all tests (core + apps + integration)
 test-all: .installed
 	@echo "Running all tests (core + apps + integration)..."
-	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) tests/ -v --cov=. --ignore=tests/integration $(LINK_LIVE_TESTS) && $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) apps/ -v --cov=. --cov-append
+	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) tests/ -v --cov=. --ignore=tests/integration $(LINK_LIVE_TESTS) && $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) solstone/apps/ -v --cov=. --cov-append
 
 # Auto-format and fix code, then report any remaining issues
 format: .installed
@@ -414,7 +449,7 @@ service-logs:
 	$(VENV_BIN)/sol service logs -f
 
 uninstall:
-	@echo "Error: 'make uninstall' is disabled. Use 'sol service uninstall', 'sol skills uninstall', and 'python -m think.install_guard uninstall' to remove installed user artifacts, or 'make clean-install' to rebuild the local dev environment." >&2
+	@echo "Error: 'make uninstall' is disabled. Use 'sol service uninstall', 'sol skills uninstall', and 'python -m solstone.think.install_guard uninstall' to remove installed user artifacts, or 'make clean-install' to rebuild the local dev environment." >&2
 	@exit 1
 
 FORCE:
@@ -434,6 +469,9 @@ install-checks: .installed
 	@echo ""
 	@echo "=== Running layer-hygiene check ==="
 	@$(MAKE) check-layer-hygiene
+	@echo ""
+	@echo "=== Checking extras consistency ==="
+	@$(VENV_BIN)/python scripts/check_extras_consistency.py
 	@echo ""
 	@echo "=== Running mypy ==="
 	@$(MYPY) . || true
@@ -459,7 +497,7 @@ watch: .installed
 # Generate coverage report (core + apps, excluding core integration tests)
 coverage: .installed
 	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) tests/ --cov=. --cov-report=html --cov-report=term --ignore=tests/integration $(LINK_LIVE_TESTS)
-	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) apps/ --cov=. --cov-report=html --cov-report=term --cov-append
+	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) solstone/apps/ --cov=. --cov-report=html --cov-report=term --cov-append
 	@echo "Coverage report generated in htmlcov/index.html"
 
 # Update all dependencies to latest versions and refresh genai-prices
@@ -494,3 +532,9 @@ pre-commit: .installed
 # Low-bar layer-hygiene check (see docs/coding-standards.md § Layer Hygiene)
 check-layer-hygiene: .installed
 	$(VENV_BIN)/python scripts/check_layer_hygiene.py
+
+release: ## Publish solstone to PyPI (production)
+	@bash scripts/release.sh
+
+release-test: ## Publish solstone to TestPyPI
+	@bash scripts/release.sh --test

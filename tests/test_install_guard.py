@@ -6,13 +6,12 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 
-from think import install_guard
+from solstone.think import install_guard
 
 V1_WRAPPER_TEMPLATE = """\
 #!/bin/sh
@@ -60,6 +59,53 @@ fi
 if [ "$1" = "supervisor" ]; then
     mkdir -p "$SOLSTONE_JOURNAL/health"
     exec >>"$SOLSTONE_JOURNAL/health/service.log" 2>&1
+    export PYTHONUNBUFFERED=1
+fi
+exec "$SOL_BIN" "$@"
+"""
+
+V4_WRAPPER_TEMPLATE = """\
+#!/bin/bash
+# sol — managed by 'sol config'. Edits will be overwritten.
+# managed-version: 4
+: "${{SOLSTONE_JOURNAL:={journal}}}"
+export SOLSTONE_JOURNAL
+SOL_BIN='{sol_bin}'
+if [ ! -x "$SOL_BIN" ]; then
+    printf 'sol: venv binary missing or not executable: %s\\n' "$SOL_BIN" >&2
+    exit 127
+fi
+if [ "$1" = "supervisor" ]; then
+    mkdir -p "$SOLSTONE_JOURNAL/health"
+    exec > >(tee -a "$SOLSTONE_JOURNAL/health/service.log") 2>&1
+    export PYTHONUNBUFFERED=1
+fi
+exec "$SOL_BIN" "$@"
+"""
+
+V5_WRAPPER_TEMPLATE = """\
+#!/bin/bash
+# sol — managed by 'sol config'. Edits will be overwritten.
+# managed-version: 5
+: "${{SOLSTONE_JOURNAL:={journal}}}"
+export SOLSTONE_JOURNAL
+SOL_BIN='{sol_bin}'
+# Warn when pyproject.toml or uv.lock is newer than .installed.
+# Skipped silently if .installed is absent.
+REPO_ROOT="${{SOL_BIN%/.venv/bin/sol}}"
+if [ -f "$REPO_ROOT/.installed" ]; then
+  if [ "$REPO_ROOT/pyproject.toml" -nt "$REPO_ROOT/.installed" ] \\
+     || [ "$REPO_ROOT/uv.lock" -nt "$REPO_ROOT/.installed" ]; then
+    echo "sol: WARNING — venv is stale (pyproject.toml or uv.lock changed since last install). Run: cd $REPO_ROOT && make install" >&2
+  fi
+fi
+if [ ! -x "$SOL_BIN" ]; then
+    printf 'sol: venv binary missing or not executable: %s\\n' "$SOL_BIN" >&2
+    exit 127
+fi
+if [ "$1" = "supervisor" ]; then
+    mkdir -p "$SOLSTONE_JOURNAL/health"
+    exec > >(tee -a "$SOLSTONE_JOURNAL/health/service.log") 2>&1
     export PYTHONUNBUFFERED=1
 fi
 exec "$SOL_BIN" "$@"
@@ -130,6 +176,16 @@ def render_v3_wrapper(*, journal: str, sol_bin: str) -> str:
     return V3_WRAPPER_TEMPLATE.format(journal=journal, sol_bin=escaped_sol_bin)
 
 
+def render_v4_wrapper(*, journal: str, sol_bin: str) -> str:
+    escaped_sol_bin = sol_bin.replace("'", "'\\''")
+    return V4_WRAPPER_TEMPLATE.format(journal=journal, sol_bin=escaped_sol_bin)
+
+
+def render_v5_wrapper(*, journal: str, sol_bin: str) -> str:
+    escaped_sol_bin = sol_bin.replace("'", "'\\''")
+    return V5_WRAPPER_TEMPLATE.format(journal=journal, sol_bin=escaped_sol_bin)
+
+
 def make_v1_wrapper(
     home_root: Path,
     *,
@@ -178,6 +234,40 @@ def make_v3_wrapper(
     return alias
 
 
+def make_v4_wrapper(
+    home_root: Path,
+    *,
+    journal: str,
+    sol_bin: str,
+    mode: int = 0o755,
+) -> Path:
+    alias = home_root / ".local" / "bin" / "sol"
+    alias.parent.mkdir(parents=True, exist_ok=True)
+    alias.write_text(
+        render_v4_wrapper(journal=journal, sol_bin=sol_bin),
+        encoding="utf-8",
+    )
+    alias.chmod(mode)
+    return alias
+
+
+def make_v5_wrapper(
+    home_root: Path,
+    *,
+    journal: str,
+    sol_bin: str,
+    mode: int = 0o755,
+) -> Path:
+    alias = home_root / ".local" / "bin" / "sol"
+    alias.parent.mkdir(parents=True, exist_ok=True)
+    alias.write_text(
+        render_v5_wrapper(journal=journal, sol_bin=sol_bin),
+        encoding="utf-8",
+    )
+    alias.chmod(mode)
+    return alias
+
+
 def other_target(tmp_path: Path) -> Path:
     target = tmp_path / "other" / ".venv" / "bin" / "sol"
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -201,7 +291,7 @@ def alias_error(curdir: Path, installed: str, *, allow_force: bool = False) -> s
         "or remove ~/.local/bin/sol manually if that repo is gone.\n"
     )
     if allow_force:
-        message += "Rerun 'python -m think.install_guard install --force' only if you intend to replace it from this repo.\n"
+        message += "Rerun 'python -m solstone.think.install_guard install --force' only if you intend to replace it from this repo.\n"
     return message
 
 
@@ -219,7 +309,7 @@ class TestWrapperHelpers:
     def test_current_journal_for_alias_falls_back_to_documents_journal(
         self, home_root, monkeypatch
     ):
-        from think import utils as think_utils
+        from solstone.think import utils as think_utils
 
         def raise_not_configured():
             raise think_utils.SolstoneNotConfigured("not configured")
@@ -239,7 +329,7 @@ class TestWrapperHelpers:
         assert install_guard.parse_wrapper(content) == {
             "journal": journal,
             "sol_bin": sol_bin,
-            "version": 4,
+            "version": 6,
         }
 
     def test_render_wrapper_round_trip_tricky_paths(self):
@@ -251,7 +341,7 @@ class TestWrapperHelpers:
         assert install_guard.parse_wrapper(content) == {
             "journal": journal,
             "sol_bin": sol_bin,
-            "version": 4,
+            "version": 6,
         }
 
     def test_render_wrapper_matches_spec_template(self):
@@ -259,25 +349,34 @@ class TestWrapperHelpers:
         sol_bin = "/Users/jer/projects/solstone/.venv/bin/sol"
 
         content = install_guard.render_wrapper(journal, sol_bin)
+        warning_line = (
+            '    echo "sol: WARNING — venv is stale (pyproject.toml or uv.lock changed '
+            'since last install). Run: cd $REPO_ROOT && make install" >&2\n'
+        )
 
-        assert (
-            content == "#!/bin/bash\n"
+        expected = (
+            "#!/bin/bash\n"
             "# sol — managed by 'sol config'. Edits will be overwritten.\n"
-            "# managed-version: 4\n"
+            "# managed-version: 6\n"
             ': "${SOLSTONE_JOURNAL:=/Users/jer/Documents/Solstone}"\n'
             "export SOLSTONE_JOURNAL\n"
             "SOL_BIN='/Users/jer/projects/solstone/.venv/bin/sol'\n"
+            "# Warn when pyproject.toml or uv.lock is newer than .installed.\n"
+            "# Skipped silently if .installed is absent.\n"
+            'REPO_ROOT="${SOL_BIN%/.venv/bin/sol}"\n'
+            'if [ -f "$REPO_ROOT/.installed" ]; then\n'
+            '  if [ "$REPO_ROOT/pyproject.toml" -nt "$REPO_ROOT/.installed" ] \\\n'
+            '     || [ "$REPO_ROOT/uv.lock" -nt "$REPO_ROOT/.installed" ]; then\n'
+            + warning_line
+            + "  fi\n"
+            "fi\n"
             'if [ ! -x "$SOL_BIN" ]; then\n'
             "    printf 'sol: venv binary missing or not executable: %s\\n' \"$SOL_BIN\" >&2\n"
             "    exit 127\n"
             "fi\n"
-            'if [ "$1" = "supervisor" ]; then\n'
-            '    mkdir -p "$SOLSTONE_JOURNAL/health"\n'
-            '    exec > >(tee -a "$SOLSTONE_JOURNAL/health/service.log") 2>&1\n'
-            "    export PYTHONUNBUFFERED=1\n"
-            "fi\n"
             'exec "$SOL_BIN" "$@"\n'
         )
+        assert content == expected
 
     def test_parse_wrapper_accepts_v1(self):
         journal = "/tmp/solstone"
@@ -319,7 +418,7 @@ class TestWrapperHelpers:
         journal = "/tmp/solstone"
         sol_bin = "/tmp/repo/.venv/bin/sol"
 
-        content = install_guard.render_wrapper(journal, sol_bin)
+        content = render_v4_wrapper(journal=journal, sol_bin=sol_bin)
 
         assert install_guard.parse_wrapper(content) == {
             "journal": journal,
@@ -327,10 +426,38 @@ class TestWrapperHelpers:
             "version": 4,
         }
 
+    def test_parse_wrapper_accepts_v5(self):
+        journal = "/tmp/solstone"
+        sol_bin = "/tmp/repo/.venv/bin/sol"
+
+        content = render_v5_wrapper(journal=journal, sol_bin=sol_bin)
+
+        assert install_guard.parse_wrapper(content) == {
+            "journal": journal,
+            "sol_bin": sol_bin,
+            "version": 5,
+        }
+
+    def test_parse_wrapper_accepts_v6(self):
+        journal = "/tmp/solstone"
+        sol_bin = "/tmp/repo/.venv/bin/sol"
+
+        content = install_guard.render_wrapper(journal, sol_bin)
+
+        assert install_guard.parse_wrapper(content) == {
+            "journal": journal,
+            "sol_bin": sol_bin,
+            "version": 6,
+        }
+
     @pytest.mark.parametrize("char", ["$", "`", '"', "\\"])
     def test_validate_journal_path_for_wrapper_rejects_invalid_chars(self, char: str):
         with pytest.raises(ValueError, match="shell-active character"):
             install_guard.validate_journal_path_for_wrapper(f"/tmp/bad{char}path")
+
+    def test_validate_journal_path_for_wrapper_rejects_newline(self):
+        with pytest.raises(ValueError, match="shell-active character"):
+            install_guard.validate_journal_path_for_wrapper("/tmp/bad\npath")
 
 
 class TestCheckAlias:
@@ -437,7 +564,7 @@ class TestCheckCommand:
         assert captured.out == "fresh\n"
         assert captured.err == ""
 
-    def test_check_reports_current_for_v4_wrapper_with_matching_paths(
+    def test_check_reports_current_for_v5_wrapper_with_matching_paths(
         self, home_root, tmp_path, capsys
     ):
         repo = make_repo(tmp_path)
@@ -587,7 +714,7 @@ class TestInstall:
     @pytest.fixture(autouse=True)
     def path_already_present(self, monkeypatch):
         monkeypatch.setattr(
-            "think.install_guard.userpath.in_current_path",
+            "solstone.think.install_guard.userpath.in_current_path",
             lambda _path: True,
         )
 
@@ -612,7 +739,7 @@ class TestInstall:
         assert install_guard.parse_wrapper(alias.read_text(encoding="utf-8")) == {
             "journal": install_guard._current_journal_for_alias(),
             "sol_bin": str(target),
-            "version": 4,
+            "version": 6,
         }
 
     def test_install_refuses_foreign_regular_file_without_force(
@@ -651,7 +778,7 @@ class TestInstall:
         assert install_guard.parse_wrapper(alias.read_text(encoding="utf-8")) == {
             "journal": install_guard._current_journal_for_alias(),
             "sol_bin": str(target),
-            "version": 4,
+            "version": 6,
         }
         assert os.access(alias, os.X_OK)
 
@@ -675,10 +802,10 @@ class TestInstall:
         assert install_guard.parse_wrapper(first_content) == {
             "journal": install_guard._current_journal_for_alias(),
             "sol_bin": str(target),
-            "version": 4,
+            "version": 6,
         }
 
-    def test_v1_wrapper_upgrades_to_v4_end_to_end(
+    def test_v1_wrapper_upgrades_to_v6_end_to_end(
         self, home_root, tmp_path, monkeypatch, capsys
     ):
         repo = make_repo(tmp_path)
@@ -702,7 +829,7 @@ class TestInstall:
         assert install_guard.parse_wrapper(alias.read_text(encoding="utf-8")) == {
             "journal": install_guard._current_journal_for_alias(),
             "sol_bin": str(target),
-            "version": 4,
+            "version": 6,
         }
 
         assert install_guard.cmd_check(repo) == 0
@@ -710,7 +837,7 @@ class TestInstall:
         assert captured.out == "current\n"
         assert captured.err == ""
 
-    def test_v2_wrapper_upgrades_to_v4_end_to_end(
+    def test_v2_wrapper_upgrades_to_v6_end_to_end(
         self, home_root, tmp_path, monkeypatch, capsys
     ):
         repo = make_repo(tmp_path)
@@ -734,7 +861,7 @@ class TestInstall:
         assert install_guard.parse_wrapper(alias.read_text(encoding="utf-8")) == {
             "journal": install_guard._current_journal_for_alias(),
             "sol_bin": str(target),
-            "version": 4,
+            "version": 6,
         }
 
         assert install_guard.cmd_check(repo) == 0
@@ -742,7 +869,7 @@ class TestInstall:
         assert captured.out == "current\n"
         assert captured.err == ""
 
-    def test_v3_wrapper_upgrades_to_v4_end_to_end(
+    def test_v3_wrapper_upgrades_to_v6_end_to_end(
         self, home_root, tmp_path, monkeypatch, capsys
     ):
         repo = make_repo(tmp_path)
@@ -765,11 +892,80 @@ class TestInstall:
         assert out == "installed\npath: ~/.local/bin already on PATH\n"
         assert err == ""
         assert content.startswith("#!/bin/bash\n")
-        assert 'exec > >(tee -a "$SOLSTONE_JOURNAL/health/service.log") 2>&1' in content
+        assert (
+            'exec > >(tee -a "$SOLSTONE_JOURNAL/health/service.log") 2>&1'
+            not in content
+        )
         assert install_guard.parse_wrapper(content) == {
             "journal": install_guard._current_journal_for_alias(),
             "sol_bin": str(target),
-            "version": 4,
+            "version": 6,
+        }
+
+        assert install_guard.cmd_check(repo) == 0
+        captured = capsys.readouterr()
+        assert captured.out == "current\n"
+        assert captured.err == ""
+
+    def test_v4_wrapper_upgrades_to_v6_end_to_end(
+        self, home_root, tmp_path, monkeypatch, capsys
+    ):
+        repo = make_repo(tmp_path)
+        target = ensure_expected_target(repo)
+        alias = make_v4_wrapper(
+            home_root,
+            journal=install_guard._current_journal_for_alias(),
+            sol_bin=str(target),
+        )
+
+        assert install_guard.cmd_check(repo) == 0
+        captured = capsys.readouterr()
+        assert captured.out == "upgrade\n"
+        assert captured.err == ""
+
+        rc, out, err = run_main(monkeypatch, capsys, repo, "install")
+
+        assert rc == 0
+        assert out == "installed\npath: ~/.local/bin already on PATH\n"
+        assert err == ""
+        assert install_guard.parse_wrapper(alias.read_text(encoding="utf-8")) == {
+            "journal": install_guard._current_journal_for_alias(),
+            "sol_bin": str(target),
+            "version": 6,
+        }
+
+        assert install_guard.cmd_check(repo) == 0
+        captured = capsys.readouterr()
+        assert captured.out == "current\n"
+        assert captured.err == ""
+
+    def test_v5_wrapper_upgrades_to_v6_end_to_end(
+        self, home_root, tmp_path, monkeypatch, capsys
+    ):
+        repo = make_repo(tmp_path)
+        target = ensure_expected_target(repo)
+        alias = make_v5_wrapper(
+            home_root,
+            journal=install_guard._current_journal_for_alias(),
+            sol_bin=str(target),
+        )
+
+        assert install_guard.cmd_check(repo) == 0
+        captured = capsys.readouterr()
+        assert captured.out == "upgrade\n"
+        assert captured.err == ""
+
+        rc, out, err = run_main(monkeypatch, capsys, repo, "install")
+
+        content = alias.read_text(encoding="utf-8")
+        assert rc == 0
+        assert out == "installed\npath: ~/.local/bin already on PATH\n"
+        assert err == ""
+        assert 'if [ "$1" = "supervisor" ]' not in content
+        assert install_guard.parse_wrapper(content) == {
+            "journal": install_guard._current_journal_for_alias(),
+            "sol_bin": str(target),
+            "version": 6,
         }
 
         assert install_guard.cmd_check(repo) == 0
@@ -798,12 +994,12 @@ class TestInstall:
         append_mock = Mock(return_value=True)
         restart_mock = Mock(return_value=False)
         monkeypatch.setattr(
-            "think.install_guard.userpath.in_current_path",
+            "solstone.think.install_guard.userpath.in_current_path",
             lambda _path: False,
         )
-        monkeypatch.setattr("think.install_guard.userpath.append", append_mock)
+        monkeypatch.setattr("solstone.think.install_guard.userpath.append", append_mock)
         monkeypatch.setattr(
-            "think.install_guard.userpath.need_shell_restart",
+            "solstone.think.install_guard.userpath.need_shell_restart",
             restart_mock,
         )
 
@@ -816,7 +1012,7 @@ class TestInstall:
         assert install_guard.parse_wrapper(alias.read_text(encoding="utf-8")) == {
             "journal": install_guard._current_journal_for_alias(),
             "sol_bin": str(target),
-            "version": 4,
+            "version": 6,
         }
         append_mock.assert_called_once_with(
             str(alias.parent),
@@ -895,11 +1091,92 @@ class TestUninstall:
         assert not install_guard.alias_path().exists()
 
 
-class TestWrapperRedirect:
+class TestWrapperStalenessProbe:
     @staticmethod
     def _wrapper_env() -> dict[str, str]:
         env = os.environ.copy()
         env.pop("SOLSTONE_JOURNAL", None)
+        return env
+
+    @staticmethod
+    def _write_repo_wrapper(tmp_path: Path) -> tuple[Path, Path, Path]:
+        repo = tmp_path / "repo"
+        journal = tmp_path / "journal"
+        marker = tmp_path / "stub-ran"
+        sol_bin = repo / ".venv" / "bin" / "sol"
+        sol_bin.parent.mkdir(parents=True)
+        write_executable_script(
+            sol_bin,
+            "#!{python}\n"
+            "from pathlib import Path\n"
+            "Path({marker!r}).write_text('ran', encoding='utf-8')\n".format(
+                python=sys.executable,
+                marker=str(marker),
+            ),
+        )
+        (repo / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+        (repo / "uv.lock").write_text("", encoding="utf-8")
+        wrapper = write_executable_script(
+            tmp_path / "sol",
+            install_guard.render_wrapper(str(journal), str(sol_bin)),
+        )
+        return repo, wrapper, marker
+
+    @staticmethod
+    def _run_wrapper(wrapper: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [str(wrapper), "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=TestWrapperStalenessProbe._wrapper_env(),
+        )
+
+    def test_warns_when_pyproject_is_newer_than_installed(self, tmp_path):
+        repo, wrapper, marker = self._write_repo_wrapper(tmp_path)
+        installed = repo / ".installed"
+        installed.touch()
+        os.utime(installed, (1000, 1000))
+        os.utime(repo / "pyproject.toml", (2000, 2000))
+        os.utime(repo / "uv.lock", (1000, 1000))
+
+        result = self._run_wrapper(wrapper)
+
+        assert result.returncode == 0
+        assert "WARNING — venv is stale" in result.stderr
+        assert "make install" in result.stderr
+        assert marker.read_text(encoding="utf-8") == "ran"
+
+    def test_skips_warning_when_installed_is_fresh(self, tmp_path):
+        repo, wrapper, marker = self._write_repo_wrapper(tmp_path)
+        installed = repo / ".installed"
+        installed.touch()
+        os.utime(repo / "pyproject.toml", (1000, 1000))
+        os.utime(repo / "uv.lock", (1500, 1500))
+        os.utime(installed, (2000, 2000))
+
+        result = self._run_wrapper(wrapper)
+
+        assert result.returncode == 0
+        assert "WARNING — venv is stale" not in result.stderr
+        assert marker.read_text(encoding="utf-8") == "ran"
+
+    def test_skips_warning_when_installed_marker_is_missing(self, tmp_path):
+        _repo, wrapper, marker = self._write_repo_wrapper(tmp_path)
+
+        result = self._run_wrapper(wrapper)
+
+        assert result.returncode == 0
+        assert "WARNING — venv is stale" not in result.stderr
+        assert marker.read_text(encoding="utf-8") == "ran"
+
+
+class TestWrapperRuntime:
+    @staticmethod
+    def _wrapper_env() -> dict[str, str]:
+        env = os.environ.copy()
+        env.pop("SOLSTONE_JOURNAL", None)
+        env.pop("PYTHONUNBUFFERED", None)
         return env
 
     @staticmethod
@@ -910,19 +1187,24 @@ class TestWrapperRedirect:
         )
 
     @staticmethod
-    def _write_python_stub_sol_bin(tmp_path: Path, body: str) -> Path:
-        return write_executable_script(
-            tmp_path / "stub-sol", f"#!{sys.executable}\n{body}"
-        )
-
-    @staticmethod
     def _write_wrapper(tmp_path: Path, *, journal: Path, sol_bin: Path) -> Path:
         return write_executable_script(
             tmp_path / "sol",
             install_guard.render_wrapper(str(journal), str(sol_bin)),
         )
 
-    def test_wrapper_redirects_supervisor_stdio_to_service_log(self, tmp_path):
+    def test_rendered_v6_wrapper_has_no_supervisor_stdio_block(self):
+        content = install_guard.render_wrapper(
+            "/tmp/solstone",
+            "/tmp/repo/.venv/bin/sol",
+        )
+
+        assert "# managed-version: 6" in content
+        assert 'if [ "$1" = "supervisor" ]' not in content
+        assert "tee -a" not in content
+        assert "PYTHONUNBUFFERED" not in content
+
+    def test_wrapper_supervisor_passthrough_does_not_redirect(self, tmp_path):
         journal = tmp_path / "j"
         sol_bin = self._write_stub_sol_bin(tmp_path)
         wrapper = self._write_wrapper(tmp_path, journal=journal, sol_bin=sol_bin)
@@ -936,14 +1218,31 @@ class TestWrapperRedirect:
         )
 
         assert result.returncode == 0
-        assert "OUT supervisor 5015" in result.stdout
-        assert "ERR supervisor 5015" in result.stdout
-        assert result.stderr == ""
-        content = (journal / "health" / "service.log").read_text(encoding="utf-8")
-        assert "OUT supervisor 5015" in content
-        assert "ERR supervisor 5015" in content
+        assert result.stdout == "OUT supervisor 5015\n"
+        assert result.stderr == "ERR supervisor 5015\n"
+        assert not (journal / "health" / "service.log").exists()
 
-    def test_wrapper_does_not_redirect_for_other_subcommands(self, tmp_path):
+    def test_wrapper_does_not_export_pythonunbuffered(self, tmp_path):
+        journal = tmp_path / "j"
+        sol_bin = write_executable_script(
+            tmp_path / "stub-sol",
+            '#!/bin/sh\nprintf "%s\\n" "${PYTHONUNBUFFERED:-<unset>}"\n',
+        )
+        wrapper = self._write_wrapper(tmp_path, journal=journal, sol_bin=sol_bin)
+
+        result = subprocess.run(
+            [str(wrapper), "supervisor"],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=self._wrapper_env(),
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.strip() == "<unset>"
+        assert not (journal / "health" / "service.log").exists()
+
+    def test_wrapper_passthrough_for_other_subcommands(self, tmp_path):
         journal = tmp_path / "j"
         sol_bin = self._write_stub_sol_bin(tmp_path)
         wrapper = self._write_wrapper(tmp_path, journal=journal, sol_bin=sol_bin)
@@ -960,65 +1259,3 @@ class TestWrapperRedirect:
         assert result.stdout == "OUT not-supervisor\n"
         assert result.stderr == "ERR not-supervisor\n"
         assert not (journal / "health" / "service.log").exists()
-
-    def test_wrapper_exports_pythonunbuffered_for_supervisor(self, tmp_path):
-        journal = tmp_path / "j"
-        sol_bin = self._write_python_stub_sol_bin(
-            tmp_path,
-            'import time\nprint("FAST_LINE")\ntime.sleep(2)\nprint("SLOW_LINE")\n',
-        )
-        wrapper = self._write_wrapper(tmp_path, journal=journal, sol_bin=sol_bin)
-
-        proc = subprocess.Popen([str(wrapper), "supervisor"], env=self._wrapper_env())
-        log = journal / "health" / "service.log"
-        deadline = time.time() + 1.0
-        saw_fast_early = False
-        while time.time() < deadline:
-            if log.exists() and "FAST_LINE" in log.read_text(encoding="utf-8"):
-                saw_fast_early = True
-                break
-            time.sleep(0.05)
-
-        assert saw_fast_early
-        assert proc.wait(timeout=5) == 0
-        content = log.read_text(encoding="utf-8")
-        assert "FAST_LINE" in content
-        assert "SLOW_LINE" in content
-
-    def test_wrapper_does_not_export_pythonunbuffered_for_cli(self, tmp_path):
-        journal = tmp_path / "j"
-        sol_bin = self._write_python_stub_sol_bin(
-            tmp_path,
-            'import os\nprint(os.environ.get("PYTHONUNBUFFERED", "<unset>"))\n',
-        )
-        wrapper = self._write_wrapper(tmp_path, journal=journal, sol_bin=sol_bin)
-
-        result = subprocess.run(
-            [str(wrapper), "not-supervisor"],
-            capture_output=True,
-            text=True,
-            check=False,
-            env=self._wrapper_env(),
-        )
-
-        assert result.returncode == 0
-        assert result.stdout.strip() == "<unset>"
-        assert not (journal / "health" / "service.log").exists()
-
-    def test_wrapper_appends_not_truncates(self, tmp_path):
-        journal = tmp_path / "j"
-        sol_bin = self._write_stub_sol_bin(tmp_path)
-        wrapper = self._write_wrapper(tmp_path, journal=journal, sol_bin=sol_bin)
-
-        for _ in range(2):
-            result = subprocess.run(
-                [str(wrapper), "supervisor", "5015"],
-                capture_output=True,
-                text=True,
-                check=False,
-                env=self._wrapper_env(),
-            )
-            assert result.returncode == 0
-
-        content = (journal / "health" / "service.log").read_text(encoding="utf-8")
-        assert content.count("OUT supervisor 5015") == 2

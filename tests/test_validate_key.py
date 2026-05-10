@@ -4,16 +4,13 @@
 from __future__ import annotations
 
 import json
+import os
 from unittest.mock import Mock, patch
 
 import pytest
 
-import think.providers
-import think.providers.anthropic
-import think.providers.google
-import think.providers.openai
-from convey import create_app
-from think.providers import validate_key
+from solstone.convey import create_app
+from solstone.think.providers import anthropic, google, openai, validate_key
 
 
 @pytest.fixture
@@ -25,10 +22,10 @@ def settings_client(journal_copy):
 
 @pytest.fixture(autouse=True)
 def reset_google_backend_cache():
-    original = think.providers.google._detected_backend
-    think.providers.google._detected_backend = None
+    original = google._detected_backend
+    google._detected_backend = None
     yield
-    think.providers.google._detected_backend = original
+    google._detected_backend = original
 
 
 def test_validate_key_anthropic_success():
@@ -36,7 +33,7 @@ def test_validate_key_anthropic_success():
     client.models.list.return_value = [Mock()]
 
     with patch("anthropic.Anthropic", return_value=client) as mock_cls:
-        result = think.providers.anthropic.validate_key("test-key")
+        result = anthropic.validate_key("test-key")
 
     assert result == {"valid": True}
     mock_cls.assert_called_once_with(api_key="test-key", timeout=10)
@@ -47,7 +44,7 @@ def test_validate_key_anthropic_auth_error():
     client.models.list.side_effect = Exception("invalid x-api-key")
 
     with patch("anthropic.Anthropic", return_value=client):
-        result = think.providers.anthropic.validate_key("bad-key")
+        result = anthropic.validate_key("bad-key")
 
     assert result["valid"] is False
     assert "invalid x-api-key" in result["error"]
@@ -58,7 +55,7 @@ def test_validate_key_openai_success():
     client.models.list.return_value = [Mock()]
 
     with patch("openai.OpenAI", return_value=client) as mock_cls:
-        result = think.providers.openai.validate_key("test-key")
+        result = openai.validate_key("test-key")
 
     assert result == {"valid": True}
     mock_cls.assert_called_once_with(api_key="test-key", timeout=10)
@@ -69,7 +66,7 @@ def test_validate_key_openai_auth_error():
     client.models.list.side_effect = Exception("Incorrect API key")
 
     with patch("openai.OpenAI", return_value=client):
-        result = think.providers.openai.validate_key("bad-key")
+        result = openai.validate_key("bad-key")
 
     assert result["valid"] is False
     assert "Incorrect API key" in result["error"]
@@ -80,10 +77,10 @@ def test_validate_key_google_success():
     client.models.list.return_value = [Mock()]
 
     with (
-        patch("think.providers.google.genai.Client", return_value=client) as mock_cls,
-        patch("think.providers.google._probe_backend", return_value="aistudio"),
+        patch.object(google.genai, "Client", return_value=client) as mock_cls,
+        patch.object(google, "_probe_backend", return_value="aistudio"),
     ):
-        result = think.providers.google.validate_key("test-key")
+        result = google.validate_key("test-key")
 
     assert result == {"valid": True, "backend": "aistudio"}
     mock_cls.assert_called_once()
@@ -95,10 +92,10 @@ def test_validate_key_google_auth_error():
     client.models.list.side_effect = Exception("API key not valid")
 
     with (
-        patch("think.providers.google.genai.Client", return_value=client),
-        patch("think.providers.google._probe_backend", return_value="aistudio"),
+        patch.object(google.genai, "Client", return_value=client),
+        patch.object(google, "_probe_backend", return_value="aistudio"),
     ):
-        result = think.providers.google.validate_key("bad-key")
+        result = google.validate_key("bad-key")
 
     assert result["valid"] is False
     assert "API key not valid" in result["error"]
@@ -110,10 +107,10 @@ def test_validate_key_google_returns_backend_aistudio():
     client.models.list.return_value = [Mock()]
 
     with (
-        patch("think.providers.google.genai.Client", return_value=client),
-        patch("think.providers.google._probe_backend", return_value="aistudio"),
+        patch.object(google.genai, "Client", return_value=client),
+        patch.object(google, "_probe_backend", return_value="aistudio"),
     ):
-        result = think.providers.google.validate_key("test-key")
+        result = google.validate_key("test-key")
 
     assert result == {"valid": True, "backend": "aistudio"}
 
@@ -124,10 +121,10 @@ def test_validate_key_google_returns_backend_vertex():
     client.models.list.return_value = [Mock()]
 
     with (
-        patch("think.providers.google.genai.Client", return_value=client) as mock_cls,
-        patch("think.providers.google._probe_backend", return_value="vertex"),
+        patch.object(google.genai, "Client", return_value=client) as mock_cls,
+        patch.object(google, "_probe_backend", return_value="vertex"),
     ):
-        result = think.providers.google.validate_key("test-key")
+        result = google.validate_key("test-key")
 
     assert result == {"valid": True, "backend": "vertex"}
     assert mock_cls.call_args.kwargs["vertexai"] is True
@@ -157,13 +154,13 @@ def test_validate_vertex_credentials(tmp_path):
     mock_creds.service_account_email = "test@project.iam.gserviceaccount.com"
 
     with (
-        patch("think.providers.google.genai.Client", return_value=client) as mock_cls,
+        patch.object(google.genai, "Client", return_value=client) as mock_cls,
         patch(
             "google.oauth2.service_account.Credentials.from_service_account_file",
             return_value=mock_creds,
         ),
     ):
-        result = think.providers.google.validate_vertex_credentials(str(sa_file))
+        result = google.validate_vertex_credentials(str(sa_file))
 
     assert result == {
         "valid": True,
@@ -180,7 +177,7 @@ def test_probe_backend_aistudio():
     mock_resp = Mock()
     mock_resp.status_code = 200
     with patch("httpx.get", return_value=mock_resp):
-        result = think.providers.google._probe_backend("test-key")
+        result = google._probe_backend("test-key")
     assert result == "aistudio"
 
 
@@ -189,20 +186,20 @@ def test_probe_backend_vertex():
     mock_resp = Mock()
     mock_resp.status_code = 403
     with patch("httpx.get", return_value=mock_resp):
-        result = think.providers.google._probe_backend("test-key")
+        result = google._probe_backend("test-key")
     assert result == "vertex"
 
 
 def test_probe_backend_error_defaults_aistudio():
     """Network error defaults to aistudio."""
     with patch("httpx.get", side_effect=Exception("timeout")):
-        result = think.providers.google._probe_backend("test-key")
+        result = google._probe_backend("test-key")
     assert result == "aistudio"
 
 
 def test_detect_backend_caches():
     """Second call returns cached result without probing."""
-    import think.providers.google as gmod
+    import solstone.think.providers.google as gmod
 
     original = gmod._detected_backend
     try:
@@ -221,13 +218,13 @@ def test_detect_backend_caches():
 
 def test_get_effective_backend_config_override():
     """Config override skips detection."""
-    import think.providers.google as gmod
+    import solstone.think.providers.google as gmod
 
     original = gmod._detected_backend
     try:
         gmod._detected_backend = None
         config = {"providers": {"google_backend": "vertex"}}
-        with patch("think.utils.get_config", return_value=config):
+        with patch("solstone.think.utils.get_config", return_value=config):
             result = gmod._get_effective_backend("key")
         assert result == "vertex"
         assert gmod._detected_backend is None
@@ -236,7 +233,9 @@ def test_get_effective_backend_config_override():
 
 
 def test_validate_key_dispatcher_success():
-    with patch("think.providers.google.validate_key", return_value={"valid": True}):
+    with patch(
+        "solstone.think.providers.google.validate_key", return_value={"valid": True}
+    ):
         result = validate_key("google", "test-key")
 
     assert result == {"valid": True}
@@ -253,7 +252,7 @@ def test_validate_key_timeout():
     client.models.list.side_effect = TimeoutError("Connection timed out")
 
     with patch("openai.OpenAI", return_value=client):
-        result = think.providers.openai.validate_key("test-key")
+        result = openai.validate_key("test-key")
 
     assert result["valid"] is False
     assert "timed out" in result["error"]
@@ -263,7 +262,7 @@ def test_update_config_saves_key_validation(settings_client):
     client, journal = settings_client
 
     with patch(
-        "think.providers.validate_key",
+        "solstone.think.providers.validate_key",
         return_value={"valid": False, "error": "bad key"},
     ):
         response = client.put(
@@ -309,6 +308,34 @@ def test_update_config_clears_key_validation(settings_client):
     assert "google" not in saved["providers"]["key_validation"]
 
 
+def test_update_config_env_mirrors_os_environ(settings_client, monkeypatch):
+    """The HTTP env-section save path must mirror into os.environ in-process,
+    matching the CLI pattern (apps/settings/call.py keys_set/keys_clear).
+    Without this, /api/providers reports `configured: false` until restart."""
+    client, _ = settings_client
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+
+    with patch(
+        "solstone.think.providers.validate_key",
+        return_value={"valid": True},
+    ):
+        response = client.put(
+            "/app/settings/api/config",
+            json={"section": "env", "data": {"GOOGLE_API_KEY": "live-key"}},
+        )
+
+    assert response.status_code == 200
+    assert os.environ.get("GOOGLE_API_KEY") == "live-key"
+
+    response = client.put(
+        "/app/settings/api/config",
+        json={"section": "env", "data": {"GOOGLE_API_KEY": ""}},
+    )
+
+    assert response.status_code == 200
+    assert "GOOGLE_API_KEY" not in os.environ
+
+
 def test_get_providers_includes_key_validation(settings_client):
     client, journal = settings_client
     config_path = journal / "config" / "journal.json"
@@ -339,7 +366,7 @@ def test_validate_all_keys_endpoint(settings_client):
             "error": "" if provider == "google" else "bad key",
         }
 
-    with patch("think.providers.validate_key", side_effect=fake_validate):
+    with patch("solstone.think.providers.validate_key", side_effect=fake_validate):
         response = client.post("/app/settings/api/validate-keys")
 
     assert response.status_code == 200
@@ -392,7 +419,7 @@ def test_providers_vertex_credentials_roundtrip(settings_client):
 
     # Mock validation (don't actually call Google API)
     with patch(
-        "apps.settings.routes.validate_vertex_credentials",
+        "solstone.apps.settings.routes.validate_vertex_credentials",
         return_value={
             "valid": True,
             "email": "test@test-project.iam.gserviceaccount.com",
@@ -491,7 +518,7 @@ def test_validate_all_keys_with_vertex_credentials(settings_client):
     config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 
     with patch(
-        "think.providers.google.validate_vertex_credentials",
+        "solstone.think.providers.google.validate_vertex_credentials",
         return_value={"valid": True, "backend": "vertex"},
     ) as mock_validate:
         response = client.post("/app/settings/api/validate-keys")

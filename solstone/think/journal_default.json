@@ -1,0 +1,91 @@
+{
+  "identity": {
+    "name": "",
+    "preferred": "",
+    "bio": "",
+    "pronouns": {
+      "subject": "",
+      "object": "",
+      "possessive": "",
+      "reflexive": ""
+    },
+    "aliases": [],
+    "email_addresses": [],
+    "timezone": ""
+  },
+  "support": {
+    "enabled": true,
+    "proactive": true,
+    "anonymous_feedback": false,
+    "portal_url": "https://support.solpbc.org"
+  },
+  "describe": {
+    "max_concurrent": 1,
+    "redact": [
+      "use *** instead of any visible passwords, credentials, keys, tokens, and secrets",
+      "completely omit and ignore any NSFW or adult content, do not mention or note it",
+      "use *** instead of any visible credit card numbers, bank account numbers, and government ID numbers"
+    ]
+  },
+  "transcribe": {
+    "max_concurrent": 1
+  },
+  "agent": {
+    "name": "sol",
+    "name_status": "default",
+    "named_date": null,
+    "proposal_count": 0
+  },
+  "voice": {
+    "openai_api_key": null,
+    "model": "gpt-realtime",
+    "brain_model": "haiku"
+  },
+  "push": {
+    "apns_key_path": null,
+    "apns_key_id": null,
+    "apns_team_id": null,
+    "bundle_id": null,
+    "environment": "development"
+  },
+  "sol_voice": {
+    "daily_cap": 5,
+    "category_caps": {
+      "briefing": 3,
+      "pattern": 2,
+      "commitment": 2,
+      "error": 2,
+      "arrival": 3,
+      "notice": 2
+    },
+    "rate_floor_minutes": 20,
+    "mute_window": {
+      "enabled": false,
+      "start_hour_local": 22,
+      "end_hour_local": 7
+    },
+    "category_self_mute_hours": 24,
+    "category_self_mute_clear_markers": {},
+    "default_dedupe_window": "24h",
+    "system_notifications": {
+      "macos": false,
+      "linux": false
+    },
+    "debug_show_throttled": false
+  },
+  "convey": {
+    "allow_network_access": false,
+    "trust_localhost": true
+  },
+  "pairing": {
+    "host_url": null,
+    "token_ttl_seconds": 600
+  },
+  "retention": {
+    "raw_media": "keep",
+    "raw_media_days": null,
+    "per_stream": {},
+    "storage_warning_disk_percent": 80,
+    "storage_warning_raw_media_gb": null
+  }
+}

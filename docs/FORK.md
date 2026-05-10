@@ -6,21 +6,21 @@ This document tracks significant changes made on this fork of Solstone.
 
 ![AI Providers settings tab showing Generate routed to vLLM (Local) at the Fast/Lightweight tier with Ollama as backup. Benchmark card reads "Qwen 3.5 2B (AWQ-Int4) — vLLM-served (LITE-tier promotable)" with a "not installed" badge and "98 tok/s measured" — the same per-tier details panel that was previously Ollama-only.](../.github/vllm-provider-add-2026-04-30.png)
 
-**Files:** `think/providers/vllm.py`, `apps/vllm/` (CLI app + tests), `think/providers/__init__.py`, `think/providers/ollama.py` (content-block intake), `think/providers/shared.py`, `think/benchmark/harness.py`, `think/benchmark/models.json` (vllm-local entries), `think/models.py` (`VLLM_PRO/FLASH/LITE`), `think/supervisor.py` (`start_vllm_servers`), `think/doctor.py` (vLLM advisory checks), `apps/benchmark/call.py` (provider-aware `_list_installed_models`), `apps/settings/workspace.html` + `apps/settings/routes.py` (UI parity)
+**Files:** `solstone/think/providers/vllm.py`, `solstone/apps/vllm/` (CLI app + tests), `solstone/think/providers/__init__.py`, `solstone/think/providers/ollama.py` (content-block intake), `solstone/think/providers/shared.py`, `solstone/think/benchmark/harness.py`, `solstone/think/benchmark/models.json` (vllm-local entries), `solstone/think/models.py` (`VLLM_PRO/FLASH/LITE`), `solstone/think/supervisor.py` (`start_vllm_servers`), `solstone/think/doctor.py` (vLLM advisory checks), `solstone/apps/benchmark/call.py` (provider-aware `_list_installed_models`), `solstone/apps/settings/workspace.html` + `solstone/apps/settings/routes.py` (UI parity)
 
 Added vLLM as a peer local provider alongside Ollama, scoped to the multimodal-omni capabilities Ollama can't serve at all — most importantly, audio input. Ollama's GGUF-only stack doesn't accept audio content blocks; vLLM's HuggingFace path does. The integration was sequenced as Phases 0-4 (spike → provider → benchmark → tier promotion → server lifecycle) and is now operationally durable on the DGX Spark.
 
-**Provider module (`think/providers/vllm.py`).** OpenAI-compatible client speaking to a local vLLM server over `/v1/chat/completions`. Consumes text + image + audio content blocks. Multi-server config schema in `journal.json → providers.vllm.servers` lets a single Solstone instance route to multiple vLLM processes — necessary because vLLM pins one model per process and has no hot-swap. `run_generate`, `run_agenerate`, `bench_run_once`, `bench_ensure_installed`, `validate_key`, `list_models` are implemented; `run_cogitate` is deferred to Phase 5.
+**Provider module (`solstone/think/providers/vllm.py`).** OpenAI-compatible client speaking to a local vLLM server over `/v1/chat/completions`. Consumes text + image + audio content blocks. Multi-server config schema in `journal.json → providers.vllm.servers` lets a single Solstone instance route to multiple vLLM processes — necessary because vLLM pins one model per process and has no hot-swap. `run_generate`, `run_agenerate`, `bench_run_once`, `bench_ensure_installed`, `validate_key`, `list_models` are implemented; `run_cogitate` is deferred to Phase 5.
 
-**Tier promotion (`think/models.py`).** `VLLM_PRO` (qwen3.5:35b-a3b bf16), `VLLM_FLASH` (qwen3.5:9b AWQ-Int4), `VLLM_LITE` (qwen3.5:2b AWQ-Int4) constants alongside the Ollama tier defaults. Journal context can now route any tier to vLLM-served models by config without the harness needing per-tier wiring.
+**Tier promotion (`solstone/think/models.py`).** `VLLM_PRO` (qwen3.5:35b-a3b bf16), `VLLM_FLASH` (qwen3.5:9b AWQ-Int4), `VLLM_LITE` (qwen3.5:2b AWQ-Int4) constants alongside the Ollama tier defaults. Journal context can now route any tier to vLLM-served models by config without the harness needing per-tier wiring.
 
-**`sol call vllm` CLI (`apps/vllm/`).** Wraps the `docker run` invocation we'd otherwise hand-launch from a spike workspace. `serve` spawns `docker run --rm` with the right flags (`--gpus all`, `--ipc=host`, `/root/.cache/huggingface` mount for the model cache, `/root/.cache/vllm` mount so torch.compile artifacts persist across restarts) and translates SIGINT/SIGTERM into `docker stop` with a 30s grace window. `list` and `status` enumerate configured servers and ping each `/v1/models`. Server-per-model; `--name <name>` selects which entry to operate on.
+**`sol call vllm` CLI (`solstone/apps/vllm/`).** Wraps the `docker run` invocation we'd otherwise hand-launch from a spike workspace. `serve` spawns `docker run --rm` with the right flags (`--gpus all`, `--ipc=host`, `/root/.cache/huggingface` mount for the model cache, `/root/.cache/vllm` mount so torch.compile artifacts persist across restarts) and translates SIGINT/SIGTERM into `docker stop` with a 30s grace window. `list` and `status` enumerate configured servers and ping each `/v1/models`. Server-per-model; `--name <name>` selects which entry to operate on.
 
-**Supervisor integration (`think/supervisor.py`).** `start_vllm_servers()` reads `providers.vllm.servers` from journal config and registers one `vllm-<name>` managed process per entry, each running `sol call vllm serve --name <name> -v` under the standard restart policy. No-op when no servers are configured. Opt-out via `--no-vllm`. vLLM containers now get the same lifecycle treatment as cortex/link/sense/convey — restart-on-crash, callosum events, unified logs.
+**Supervisor integration (`solstone/think/supervisor.py`).** `start_vllm_servers()` reads `providers.vllm.servers` from journal config and registers one `vllm-<name>` managed process per entry, each running `sol call vllm serve --name <name> -v` under the standard restart policy. No-op when no servers are configured. Opt-out via `--no-vllm`. vLLM containers now get the same lifecycle treatment as cortex/link/sense/convey — restart-on-crash, callosum events, unified logs.
 
-**Doctor advisory checks (`think/doctor.py`).** Three new linux-only advisory checks: `vllm_docker_available`, `vllm_nvidia_smi`, `vllm_servers_reachable`. All stdlib-only (urllib for HTTP) so doctor stays runnable on a fresh clone before `uv sync` — `scripts/doctor.py` is now a stdlib-only bootstrap shim that delegates to `think.doctor.main`, so the same checks run via `python3 scripts/doctor.py` pre-install or `sol doctor` once the venv exists. Skips cleanly when there's no journal config or no `providers.vllm.servers` section.
+**Doctor advisory checks (`solstone/think/doctor.py`).** Three new linux-only advisory checks: `vllm_docker_available`, `vllm_nvidia_smi`, `vllm_servers_reachable`. All stdlib-only (urllib for HTTP) so doctor stays runnable on a fresh clone before `uv sync` — `scripts/doctor.py` is now a stdlib-only bootstrap shim that delegates to `solstone.think.doctor.main`, so the same checks run via `python3 scripts/doctor.py` pre-install or `sol doctor` once the venv exists. Skips cleanly when there's no journal config or no `providers.vllm.servers` section.
 
-**Benchmark integration.** vLLM models registered in `think/benchmark/models.json` under the `vllm-local/` prefix with measured numbers on `dgx-spark` (Nemotron-3-Nano-Omni, Qwen3.5 35B/9B/2B, Qwen2.5-VL 7B). Harness genericized via `_resolve_provider(model)` so dispatch goes through the provider's `bench_run_once` interface — vLLM and Ollama use the same harness path. The shared `think.providers.list_installed_local_models()` queries both Ollama (`/api/tags`) and vLLM (`/v1/models`); the settings + benchmark CLI both call it.
+**Benchmark integration.** vLLM models registered in `solstone/think/benchmark/models.json` under the `vllm-local/` prefix with measured numbers on `dgx-spark` (Nemotron-3-Nano-Omni, Qwen3.5 35B/9B/2B, Qwen2.5-VL 7B). Harness genericized via `_resolve_provider(model)` so dispatch goes through the provider's `bench_run_once` interface — vLLM and Ollama use the same harness path. The shared `solstone.think.providers.list_installed_local_models()` queries both Ollama (`/api/tags`) and vLLM (`/v1/models`); the settings + benchmark CLI both call it.
 
 **Settings UI parity.** The providers tab's per-tier benchmark details panel renders for vllm selection the same way it does for ollama — same tier-anchor lookup, same per-task seconds, same fits-in-vram check. Rows filtered by `model_id` prefix; the recommended-models list correctly skips vLLM rows (vLLM "install" means editing journal config, not `ollama pull`).
 
@@ -29,9 +29,9 @@ Added vLLM as a peer local provider alongside Ollama, scoped to the multimodal-o
 
 ## 🧩 Multimodal Content-Block Message Shape
 
-**Files:** `think/providers/shared.py`, `think/providers/ollama.py`, `think/providers/vllm.py`, `think/benchmark/harness.py`, `think/benchmark/tasks.json`, `think/benchmark/fixtures/audio_30s.wav`, `think/benchmark/fixtures/README.md`, `think/benchmark/estimate.py`
+**Files:** `solstone/think/providers/shared.py`, `solstone/think/providers/ollama.py`, `solstone/think/providers/vllm.py`, `solstone/think/benchmark/harness.py`, `solstone/think/benchmark/tasks.json`, `solstone/think/benchmark/fixtures/audio_30s.wav`, `solstone/think/benchmark/fixtures/README.md`, `solstone/think/benchmark/estimate.py`
 
-Replaced the harness's string-only `messages` payload with content-block lists (`TextBlock`, `ImageBlock`, `AudioBlock` TypedDicts in `think/providers/shared.py`). Providers consume the blocks in their native shapes — Ollama maps `ImageBlock` to its `images: [...]` field and raises `NotImplementedError` on `AudioBlock`; vLLM emits OpenAI-style `image_url` and `input_audio` blocks. The harness auto-detects audio mode from the task spec and base64-encodes audio fixtures via `_load_audio_b64`. `audio_transcribe` and `audio_summarize` task entries reference `think/benchmark/fixtures/audio_30s.wav` — the first audio benchmark fixture, a public-domain LibriVox clip (Tom Sawyer chapter 1) with provenance documented in `fixtures/README.md`. The estimator's `_task_applies_to_model` now gates audio tasks on the model's `audio` capability.
+Replaced the harness's string-only `messages` payload with content-block lists (`TextBlock`, `ImageBlock`, `AudioBlock` TypedDicts in `solstone/think/providers/shared.py`). Providers consume the blocks in their native shapes — Ollama maps `ImageBlock` to its `images: [...]` field and raises `NotImplementedError` on `AudioBlock`; vLLM emits OpenAI-style `image_url` and `input_audio` blocks. The harness auto-detects audio mode from the task spec and base64-encodes audio fixtures via `_load_audio_b64`. `audio_transcribe` and `audio_summarize` task entries reference `solstone/think/benchmark/fixtures/audio_30s.wav` — the first audio benchmark fixture, a public-domain LibriVox clip (Tom Sawyer chapter 1) with provenance documented in `fixtures/README.md`. The estimator's `_task_applies_to_model` now gates audio tasks on the model's `audio` capability.
 
 
 ## 📊 Provider Matrix Reference
@@ -45,11 +45,11 @@ New top-level reference doc capturing the per-provider × per-capability routing
 
 ![AI Providers settings tab with a benchmark card for Qwen 3.5 2B showing 87 tok/s and per-task time estimates split into foreground (Chat reply, Voice reply, Search query, Agent turn) and background (Entity extraction, Todo extraction, Meeting summary, Activity clustering, Daily insights, Segment sense, Speaker attribution, Screen record, Awareness tender, Pulse) sections.](../.github/model-benchmark-2026-04-25.png)
 
-**Files:** `apps/benchmark/`, `think/benchmark/`, `tests/test_benchmark_estimate.py`
+**Files:** `solstone/apps/benchmark/`, `solstone/think/benchmark/`, `tests/test_benchmark_estimate.py`
 
-Added a `benchmark` app and supporting `think/benchmark/` module that estimates expected output tok/s for pre-vetted Ollama models on the user's hardware without requiring the models to be pulled. A reference table of measured tok/s per canonical hardware class (see `think/benchmark/reference.json`) is interpolated by FP16 throughput × memory bandwidth when the exact hardware isn't listed. The registry (`models.json`) covers text and vision models across tiers, with direct wall-clock measurements taken on DGX Spark used to ground the task-time heuristics.
+Added a `benchmark` app and supporting `solstone/think/benchmark/` module that estimates expected output tok/s for pre-vetted Ollama models on the user's hardware without requiring the models to be pulled. A reference table of measured tok/s per canonical hardware class (see `solstone/think/benchmark/reference.json`) is interpolated by FP16 throughput × memory bandwidth when the exact hardware isn't listed. The registry (`models.json`) covers text and vision models across tiers, with direct wall-clock measurements taken on DGX Spark used to ground the task-time heuristics.
 
-The `sol call benchmark` CLI exposes `profile` (probe + cache host hardware), `list-models` (pre-vetted + installed models with tok/s and task-time estimates), `estimate <model-id>` (single-model estimate, optionally `--task <task_id>` for a wall-clock estimate against a reference workload), and `tasks` (show the reference-task catalog). A harness (`think/benchmark/harness.py`) runs the fixture-backed reference tasks (`fixtures/*.txt`) to produce new measurements that feed back into the registry. The settings UI surfaces per-model tok/s alongside the cogitate details panel, with generic tier labels and a recommended-models section for quick orientation. The same details panel renders for both Ollama and vLLM provider selections (see vLLM section above).
+The `sol call benchmark` CLI exposes `profile` (probe + cache host hardware), `list-models` (pre-vetted + installed models with tok/s and task-time estimates), `estimate <model-id>` (single-model estimate, optionally `--task <task_id>` for a wall-clock estimate against a reference workload), and `tasks` (show the reference-task catalog). A harness (`solstone/think/benchmark/harness.py`) runs the fixture-backed reference tasks (`fixtures/*.txt`) to produce new measurements that feed back into the registry. The settings UI surfaces per-model tok/s alongside the cogitate details panel, with generic tier labels and a recommended-models section for quick orientation. The same details panel renders for both Ollama and vLLM provider selections (see vLLM section above).
 
 The settings benchmark API endpoints always re-probe the host's hardware on each request rather than trusting the cached probe at `journal/health/hardware.json`. This self-heals the case where the cache was poisoned by a transient `nvidia-smi` failure (driver warmup at boot, container-startup contention) — without it, a single bad probe could leave the providers UI showing "tok/s unknown" and "may not fit" indefinitely.
 
@@ -58,9 +58,9 @@ The settings benchmark API endpoints always re-probe the host's hardware on each
 
 ![Background processing card showing a 2m 31s estimate for a 5-minute Solo active segment, broken down into Audio, Video frames, Talents, and Overhead lanes.](../.github/segment-benchmark-2026-04-25.png)
 
-**Files:** `apps/benchmark/`, `think/benchmark/segment.json`,
-`think/benchmark/estimate.py`, `apps/settings/routes.py`,
-`apps/settings/workspace.html`, `tests/test_benchmark_segment.py`,
+**Files:** `solstone/apps/benchmark/`, `solstone/think/benchmark/segment.json`,
+`solstone/think/benchmark/estimate.py`, `solstone/apps/settings/routes.py`,
+`solstone/apps/settings/workspace.html`, `tests/test_benchmark_segment.py`,
 `tests/test_settings_benchmark_routes.py`
 
 Layered a **semantic benchmark** on top of the existing per-task
@@ -75,7 +75,7 @@ Decomposed into three lanes plus a small fixed overhead:
   `speaker_attribution_llm`, plus housekeeping `awareness_tender` /
   `pulse`).
 
-Three named scenarios live in `think/benchmark/segment.json`:
+Three named scenarios live in `solstone/think/benchmark/segment.json`:
 `solo_active`, `meeting_active`, `idle`. Each scenario fixes a
 qualified-frame count, a talent recipe, and a fixed overhead.
 
@@ -102,7 +102,7 @@ and `GET /app/settings/api/benchmark/segment`. Scenario picker,
 headline total + confidence chip, lane breakdown rows, collapsible
 per-talent disclosure, notes footer.
 
-Five fork-only fixture files under `think/benchmark/fixtures/` for
+Five fork-only fixture files under `solstone/think/benchmark/fixtures/` for
 the new per-segment talents (`segment_sense`,
 `speaker_attribution_llm`, `screen_record`, `awareness_tender`,
 `pulse`), with measured token counts in `tasks.json` (qwen
@@ -113,7 +113,7 @@ tokenizer, consistent across model sizes).
 
 ![Settings transcription tab with an attention dot in the side-nav and a callout warning that Parakeet does not list NVIDIA DGX Spark (GB10) as supported, suggesting Whisper instead.](../.github/tab-attention-2026-04-25.png)
 
-**Files:** `apps/settings/workspace.html`, `apps/settings/routes.py`,
+**Files:** `solstone/apps/settings/workspace.html`, `solstone/apps/settings/routes.py`,
 `tests/test_settings_benchmark_routes.py`
 
 Quality-of-life pass on the settings UI:
@@ -141,15 +141,15 @@ client can do the compat evaluation without a second round-trip.
 
 ## 🎤 Transcriber RTF Benchmarking + `transcribers.json`
 
-**Files:** `think/benchmark/transcribers.json`,
-`think/benchmark/harness.py`, `think/benchmark/estimate.py`,
-`apps/benchmark/call.py`, `tests/test_benchmark_segment.py`
+**Files:** `solstone/think/benchmark/transcribers.json`,
+`solstone/think/benchmark/harness.py`, `solstone/think/benchmark/estimate.py`,
+`solstone/apps/benchmark/call.py`, `tests/test_benchmark_segment.py`
 
 Added a parallel benchmark surface for STT backends, since
 transcription doesn't fit a tok/s model — its cost is real-time
 factor (RTF = `wall_seconds / audio_seconds`) on local backends and a
 flat per-5min wall-clock heuristic on cloud backends. New
-`think/benchmark/transcribers.json` declares each backend with three
+`solstone/think/benchmark/transcribers.json` declares each backend with three
 orthogonal axes:
 
 - `supported_hardware` — explicit list of hardware-class keys from
@@ -159,7 +159,7 @@ orthogonal axes:
 - `benchmarkable` — whether the harness should run RTF capture.
   Cloud backends are not benchmarkable in the RTF sense.
 
-`think/benchmark/harness.py` gained a `--transcriber <backend>
+`solstone/think/benchmark/harness.py` gained a `--transcriber <backend>
 --audio-fixture <path> --class <hw>` mode. Hard-fails before any
 transcription work runs when the chosen transcriber doesn't list the
 host's hardware class, or when a cloud backend is asked for RTF.
@@ -185,7 +185,7 @@ This fork uses [solpbc/field_journal](https://github.com/solpbc/field_journal) �
 
 ## Ollama (Local) Provider
 
-> **Merged upstream.** The `think/providers/ollama.py` provider, tests, and
+> **Merged upstream.** The `solstone/think/providers/ollama.py` provider, tests, and
 > associated config/docs changes are now part of upstream Solstone.
 
 Added a new `ollama` provider that routes text generation requests to a local

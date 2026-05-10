@@ -8,11 +8,12 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
-from think import health_cli, service, setup
-from think.user_config import write_user_config
+from solstone.think import health_cli, service, setup
+from solstone.think.user_config import write_user_config
 
 
 def patch_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
@@ -28,6 +29,7 @@ def patch_source_checkout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Pa
     (repo / "pyproject.toml").write_text("[project]\nname = 'solstone'\n")
     (repo / ".git").mkdir()
     monkeypatch.setattr(setup, "get_project_root", lambda: str(repo))
+    monkeypatch.setattr(setup, "source_checkout", lambda: True)
     return repo
 
 
@@ -35,6 +37,7 @@ def patch_packaged_install(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> P
     root = tmp_path / "site-packages"
     root.mkdir()
     monkeypatch.setattr(setup, "get_project_root", lambda: str(root))
+    monkeypatch.setattr(setup, "source_checkout", lambda: False)
     return root
 
 
@@ -139,7 +142,7 @@ def expected_doctor_command(port: int = 5015) -> list[str]:
     return [
         sys.executable,
         "-m",
-        "think.sol_cli",
+        "solstone.think.sol_cli",
         "doctor",
         "--json",
         "--port",
@@ -151,7 +154,7 @@ def expected_install_models_command() -> list[str]:
     return [
         sys.executable,
         "-m",
-        "think.sol_cli",
+        "solstone.think.sol_cli",
         "install-models",
         "--variant",
         "auto",
@@ -162,7 +165,7 @@ def expected_skills_command() -> list[str]:
     return [
         sys.executable,
         "-m",
-        "think.sol_cli",
+        "solstone.think.sol_cli",
         "skills",
         "install",
         "--agent",
@@ -171,14 +174,14 @@ def expected_skills_command() -> list[str]:
 
 
 def expected_wrapper_command() -> list[str]:
-    return [sys.executable, "-m", "think.install_guard", "install"]
+    return [sys.executable, "-m", "solstone.think.install_guard", "install"]
 
 
 def expected_service_install_command(port: int = 5015) -> list[str]:
     return [
         sys.executable,
         "-m",
-        "think.sol_cli",
+        "solstone.think.sol_cli",
         "service",
         "install",
         "--port",
@@ -187,7 +190,7 @@ def expected_service_install_command(port: int = 5015) -> list[str]:
 
 
 def expected_service_restart_command() -> list[str]:
-    return [sys.executable, "-m", "think.sol_cli", "service", "restart"]
+    return [sys.executable, "-m", "solstone.think.sol_cli", "service", "restart"]
 
 
 def assert_command(
@@ -209,7 +212,9 @@ def assert_step_names_and_statuses(
 
 
 def read_manifest(journal: Path) -> dict[str, Any]:
-    return json.loads((journal / ".setup-state.json").read_text(encoding="utf-8"))
+    return json.loads(
+        (journal / "health" / "setup-state.json").read_text(encoding="utf-8")
+    )
 
 
 def touch_file(path: Path) -> None:
@@ -251,7 +256,8 @@ def write_clean_prior_manifest(journal: Path) -> dict[str, list[Path]]:
         }
         for name in STEP_NAMES
     ]
-    (journal / ".setup-state.json").write_text(
+    (journal / "health").mkdir(parents=True, exist_ok=True)
+    (journal / "health" / "setup-state.json").write_text(
         json.dumps(
             {
                 "schema_version": 1,
@@ -390,7 +396,7 @@ def test_dry_run_side_effect_free(
     assert rc == 0
     assert calls == []
     assert not (home / ".config" / "solstone" / "config.toml").exists()
-    assert not (journal / ".setup-state.json").exists()
+    assert not (journal / "health" / "setup-state.json").exists()
     assert "setup dry-run:" in capsys.readouterr().out
 
 
@@ -533,7 +539,8 @@ def test_clean_rerun_preface_when_manifest_complete(
             "service",
         )
     ]
-    (journal / ".setup-state.json").write_text(
+    (journal / "health").mkdir(parents=True, exist_ok=True)
+    (journal / "health" / "setup-state.json").write_text(
         json.dumps(
             {
                 "schema_version": 1,
@@ -570,7 +577,8 @@ def test_partial_rerun_preface_when_steps_failed(
     journal = tmp_path / "journal"
     journal.mkdir()
     started_at = "2026-05-02T21:29:42Z"
-    (journal / ".setup-state.json").write_text(
+    (journal / "health").mkdir(parents=True, exist_ok=True)
+    (journal / "health" / "setup-state.json").write_text(
         json.dumps(
             {
                 "schema_version": 1,
@@ -654,7 +662,8 @@ def test_force_flag_changes_preface_text(
             "service",
         )
     ]
-    (journal / ".setup-state.json").write_text(
+    (journal / "health").mkdir(parents=True, exist_ok=True)
+    (journal / "health" / "setup-state.json").write_text(
         json.dumps(
             {
                 "schema_version": 1,
@@ -688,7 +697,8 @@ def test_partial_completion_runs_remaining_steps(
     (home / ".claude").mkdir()
     journal = tmp_path / "journal"
     journal.mkdir()
-    (journal / ".setup-state.json").write_text(
+    (journal / "health").mkdir(parents=True, exist_ok=True)
+    (journal / "health" / "setup-state.json").write_text(
         json.dumps(
             {
                 "schema_version": 1,
@@ -894,7 +904,7 @@ def test_port_out_of_range_rejected_at_parse_time(
     assert "--port must be in 1024-65535" in capsys.readouterr().err
 
 
-def test_packaged_install_skips_service(
+def test_packaged_install_runs_service_step(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -912,13 +922,31 @@ def test_packaged_install_skips_service(
 
     assert rc == 0
     out = capsys.readouterr().out
-    assert "packaged-install service support is not implemented in v1" in out
+    unsupported_message = " ".join(
+        ["packaged-install service support", "is not implemented"]
+    )
+    assert unsupported_message not in out
+    assert "solstone is running at http://localhost:5015" in out
     assert_command(calls, 0, expected_doctor_command())
-    assert len(calls) == 1
-    assert [step["status"] for step in read_manifest(journal)["steps"]][-2:] == [
-        "skipped",
-        "skipped",
-    ]
+    assert_command(
+        calls,
+        1,
+        [
+            sys.executable,
+            "-m",
+            "solstone.think.sol_cli",
+            "service",
+            "install",
+            "--port",
+            "5015",
+        ],
+    )
+    assert len(calls) == 2
+    steps = read_manifest(journal)["steps"]
+    assert steps[-2]["status"] == "skipped"
+    assert steps[-2]["reason"] == "packaged_install"
+    assert steps[-1]["name"] == "service"
+    assert steps[-1]["status"] == "ok"
 
 
 def test_no_claude_config_skips_skills(
@@ -1002,12 +1030,13 @@ def test_resumption_wedged_service_restarts(
     journal = tmp_path / "journal"
     write_clean_prior_manifest(journal)
     calls = patch_subprocess(monkeypatch)
-    health_results = iter([1, 0])
-    monkeypatch.setattr(health_cli, "health_check", lambda: next(health_results, 0))
+    health_check = Mock(side_effect=[1, 0])
+    monkeypatch.setattr(health_cli, "health_check", health_check)
 
     rc = setup.main(["--yes", "--journal", str(journal)])
 
     assert rc == 0
+    assert health_check.call_count == 2
     assert_command(calls, 0, expected_service_restart_command())
     assert len(calls) == 1
     service_step = read_manifest(journal)["steps"][-1]
@@ -1022,8 +1051,6 @@ def test_resumption_wedged_service_falls_through_when_restart_fails(
     patch_home(monkeypatch, tmp_path)
     patch_source_checkout(monkeypatch, tmp_path)
     monkeypatch.delenv("SOLSTONE_JOURNAL", raising=False)
-    monkeypatch.setattr(setup, "HEALTH_ATTEMPTS", 1)
-    monkeypatch.setattr(setup, "HEALTH_SLEEP_SECONDS", 0)
     monkeypatch.setattr(service, "_up", lambda port=5015: 0)
     journal = tmp_path / "journal"
     write_clean_prior_manifest(journal)
@@ -1112,7 +1139,7 @@ def test_base_exceptions_propagate(
 
     if isinstance(exc, SystemExit):
         assert raised.value.code == 7
-    assert not (journal / ".setup-state.json").exists()
+    assert not (journal / "health" / "setup-state.json").exists()
 
 
 def test_env_journal_overrides_config(
@@ -1158,7 +1185,7 @@ def test_journal_is_regular_file_dead_ends(
     assert rc == 2
     assert calls == []
     assert "directory" in capsys.readouterr().err
-    assert not (journal_file / ".setup-state.json").exists()
+    assert not (journal_file / "health" / "setup-state.json").exists()
 
 
 def test_doctor_parse_failure_records_failed(
@@ -1193,7 +1220,8 @@ def test_invalid_manifest_treated_as_no_prior(
     (home / ".claude").mkdir()
     journal = tmp_path / "journal"
     journal.mkdir()
-    (journal / ".setup-state.json").write_text("{", encoding="utf-8")
+    (journal / "health").mkdir(parents=True, exist_ok=True)
+    (journal / "health" / "setup-state.json").write_text("{", encoding="utf-8")
     calls = patch_subprocess(monkeypatch)
     patch_service_health(monkeypatch)
 

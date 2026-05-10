@@ -1,0 +1,357 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 sol pbc
+
+"""AI provider backends for solstone.think.
+
+This package contains provider-specific implementations for LLM generation
+and agent execution. Each provider module exposes:
+
+- run_generate(): Sync text generation, returns GenerateResult
+- run_agenerate(): Async text generation, returns GenerateResult
+- run_cogitate(): Tool-calling execution with event streaming
+
+GenerateResult is a TypedDict with: text, usage, finish_reason, thinking.
+The wrapper functions in solstone.think.models handle token logging and JSON validation.
+
+Available providers:
+- google: Google Gemini models
+- openai: OpenAI GPT models
+- anthropic: Anthropic Claude models
+- ollama: Ollama local models
+- vllm: vLLM local server (multimodal: text + image + audio)
+"""
+
+import logging
+import os
+import shutil
+from importlib import import_module
+from types import ModuleType
+from typing import Any, Dict, List
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Provider Registry
+# ---------------------------------------------------------------------------
+# Central registry of supported providers and their module paths.
+# All registered providers must implement:
+#   - run_generate(contents, model, ...) -> GenerateResult
+#   - run_agenerate(contents, model, ...) -> GenerateResult
+#   - run_cogitate(config, on_event) -> str
+# ---------------------------------------------------------------------------
+
+PROVIDER_REGISTRY: Dict[str, str] = {
+    "google": "solstone.think.providers.google",
+    "openai": "solstone.think.providers.openai",
+    "anthropic": "solstone.think.providers.anthropic",
+    "ollama": "solstone.think.providers.ollama",
+    "vllm": "solstone.think.providers.vllm",
+}
+
+# ---------------------------------------------------------------------------
+# Provider Metadata
+# ---------------------------------------------------------------------------
+# Display labels, environment variable names, and cogitate CLI binary names
+# for each provider. Used by settings UI, provider status, and agent health
+# checks.
+# ---------------------------------------------------------------------------
+
+PROVIDER_METADATA: Dict[str, Dict[str, Any]] = {
+    "google": {
+        "label": "Google (Gemini)",
+        "env_key": "GOOGLE_API_KEY",
+        "cogitate_cli": "gemini",
+        "vertex_env_keys": [
+            "GOOGLE_GENAI_USE_VERTEXAI",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+        ],
+    },
+    "openai": {
+        "label": "OpenAI (GPT)",
+        "env_key": "OPENAI_API_KEY",
+        "cogitate_cli": "codex",
+    },
+    "anthropic": {
+        "label": "Anthropic (Claude)",
+        "env_key": "ANTHROPIC_API_KEY",
+        "cogitate_cli": "claude",
+    },
+    "ollama": {
+        "label": "Ollama (Local)",
+        "env_key": "",
+        "cogitate_cli": "opencode",
+    },
+    "vllm": {
+        "label": "vLLM (Local)",
+        "env_key": "",
+        # cogitate via vLLM is deferred; OpenCode could in principle drive
+        # the OpenAI-compat endpoint but is unverified. Setting empty here
+        # leaves cogitate_ready=False until the cogitate path is wired up.
+        "cogitate_cli": "",
+    },
+}
+
+
+def get_provider_module(provider: str) -> ModuleType:
+    """Get the provider module for the given provider name.
+
+    Parameters
+    ----------
+    provider
+        Provider name (e.g., "google", "openai", "anthropic").
+
+    Returns
+    -------
+    ModuleType
+        The provider module with run_generate, run_agenerate, and run_cogitate functions.
+
+    Raises
+    ------
+    ValueError
+        If the provider is not registered.
+    """
+    if provider not in PROVIDER_REGISTRY:
+        valid = ", ".join(sorted(PROVIDER_REGISTRY.keys()))
+        raise ValueError(f"Unknown provider: {provider!r}. Valid providers: {valid}")
+
+    return import_module(PROVIDER_REGISTRY[provider])
+
+
+def get_provider_list() -> List[Dict[str, Any]]:
+    """Get list of providers with metadata for UI display.
+
+    Returns
+    -------
+    List[Dict[str, Any]]
+        List of provider info dicts, each containing:
+        - name: Provider identifier (e.g., "google")
+        - label: Display label (e.g., "Google (Gemini)")
+        - env_key: Environment variable for API key
+    """
+    providers = []
+    for name in PROVIDER_REGISTRY:
+        meta = PROVIDER_METADATA.get(name, {"label": name, "env_key": ""})
+        provider = {
+            "name": name,
+            "label": meta.get("label", name),
+            "env_key": meta.get("env_key", ""),
+        }
+        if "vertex_env_keys" in meta:
+            provider["vertex_env_keys"] = meta["vertex_env_keys"]
+        providers.append(provider)
+    return providers
+
+
+def build_provider_status(
+    providers_list: List[Dict[str, Any]],
+    vertex_creds_configured: bool = False,
+) -> Dict[str, Dict[str, Any]]:
+    """Build per-provider readiness status.
+
+    Parameters
+    ----------
+    providers_list
+        Output of get_provider_list().
+    vertex_creds_configured
+        Whether Vertex AI credentials are configured (for Google).
+
+    Returns
+    -------
+    Dict[str, Dict[str, Any]]
+        Keyed by provider name. Each entry has: configured, generate_ready,
+        cogitate_ready, cogitate_cli, cogitate_cli_found, issues.
+    """
+    status = {}
+    for provider in providers_list:
+        name = provider["name"]
+        env_key = provider.get("env_key", "")
+        meta = PROVIDER_METADATA.get(name, {})
+        cogitate_cli = meta.get("cogitate_cli", "")
+        issues: list[str] = []
+
+        if name == "ollama":
+            try:
+                import httpx
+
+                base_url = os.getenv(
+                    "OLLAMA_BASE_URL", "http://localhost:11434"
+                ).rstrip("/")
+                resp = httpx.get(f"{base_url}/api/version", timeout=2)
+                resp.raise_for_status()
+                configured = True
+            except Exception:
+                configured = False
+                base_url = os.getenv(
+                    "OLLAMA_BASE_URL", "http://localhost:11434"
+                ).rstrip("/")
+                issues.append(f"Ollama not reachable at {base_url}")
+        elif name == "vllm":
+            # Multi-server aware: ping every configured server (or the env-var
+            # fallback when no providers.vllm.servers config exists). Configured
+            # = at least one reachable; issues lists each unreachable URL so the
+            # operator can see which container needs attention.
+            import httpx
+
+            from solstone.think.providers.vllm import _all_configured_base_urls
+
+            urls = _all_configured_base_urls()
+            reachable: list[str] = []
+            for url in urls:
+                try:
+                    resp = httpx.get(f"{url}/v1/models", timeout=2)
+                    resp.raise_for_status()
+                    reachable.append(url)
+                except Exception:
+                    issues.append(f"vLLM not reachable at {url}")
+            configured = bool(reachable)
+        elif name == "google":
+            has_key = bool(os.getenv(env_key))
+            configured = has_key or vertex_creds_configured
+            if not configured:
+                issues.append(f"{env_key} not set")
+        else:
+            configured = bool(os.getenv(env_key)) if env_key else False
+            if not configured and env_key:
+                issues.append(f"{env_key} not set")
+
+        cogitate_cli_found = bool(shutil.which(cogitate_cli)) if cogitate_cli else False
+        if cogitate_cli and not cogitate_cli_found:
+            issues.append(f"{cogitate_cli} CLI not found on PATH")
+
+        generate_ready = configured
+        cogitate_ready = configured and cogitate_cli_found
+
+        status[name] = {
+            "configured": configured,
+            "generate_ready": generate_ready,
+            "cogitate_ready": cogitate_ready,
+            "cogitate_cli": cogitate_cli,
+            "cogitate_cli_found": cogitate_cli_found,
+            "issues": issues,
+        }
+    return status
+
+
+def get_provider_models(provider: str) -> list[dict]:
+    """Get available models for a provider.
+
+    Parameters
+    ----------
+    provider
+        Provider name (e.g., "google", "openai", "anthropic").
+
+    Returns
+    -------
+    list[dict]
+        List of raw model info objects returned by the provider API.
+
+    Raises
+    ------
+    ValueError
+        If the provider is not registered.
+    """
+    module = get_provider_module(provider)
+    return module.list_models()
+
+
+def list_installed_local_models() -> set[str]:
+    """Return the set of model IDs currently usable from local providers.
+
+    Queries both Ollama (``/api/tags``) and vLLM (``/v1/models``). A model
+    id appears in the returned set only when its provider is reachable
+    *and* the model is currently available from that provider.
+
+    Provider semantics differ in what "available" means:
+
+    - **Ollama**: model is in the local pull cache (``/api/tags``).
+      Models not in the cache can still be reached by the user via
+      ``ollama pull <name>`` — no server restart needed.
+    - **vLLM**: model is currently being served by the running vLLM
+      instance (``/v1/models``). vLLM has no pull-on-demand; the model
+      is fixed to whatever ``--served-model-name`` was passed at server
+      startup. A model not in this list requires a server restart, not
+      a pull.
+
+    Both providers contribute silently when reachable; unreachable
+    providers are debug-logged but not raised. Callers must still work
+    when neither provider is up.
+    """
+    installed: set[str] = set()
+
+    # Ollama
+    try:
+        from solstone.think.providers.ollama import _OLLAMA_LOCAL_PREFIX, _get_client
+
+        try:
+            client = _get_client()
+            response = client.get("/api/tags", timeout=5.0)
+            response.raise_for_status()
+            for entry in response.json().get("models", []) or []:
+                name = entry.get("name")
+                if name:
+                    installed.add(f"{_OLLAMA_LOCAL_PREFIX}{name}")
+        except Exception as exc:
+            logger.debug("Ollama /api/tags unreachable: %s", exc)
+    except ImportError:
+        logger.debug("ollama provider module unavailable")
+
+    # vLLM
+    try:
+        from solstone.think.providers.vllm import _VLLM_LOCAL_PREFIX
+        from solstone.think.providers.vllm import _get_client as _vllm_client
+
+        try:
+            client = _vllm_client()
+            response = client.get("/v1/models", timeout=5.0)
+            response.raise_for_status()
+            for entry in response.json().get("data", []) or []:
+                served_id = entry.get("id")
+                if not isinstance(served_id, str):
+                    continue
+                # vLLM list_models prefixes ids on read; the raw /v1/models
+                # response carries unprefixed ids, so add the prefix here.
+                if not served_id.startswith(_VLLM_LOCAL_PREFIX):
+                    served_id = f"{_VLLM_LOCAL_PREFIX}{served_id}"
+                installed.add(served_id)
+        except Exception as exc:
+            logger.debug("vLLM /v1/models unreachable: %s", exc)
+    except ImportError:
+        logger.debug("vllm provider module unavailable")
+
+    return installed
+
+
+def validate_key(provider: str, api_key: str) -> dict:
+    """Validate an API key for a provider.
+
+    Parameters
+    ----------
+    provider
+        Provider name (e.g., "google", "openai", "anthropic").
+    api_key
+        The API key string to validate.
+
+    Returns
+    -------
+    dict
+        {"valid": True} or {"valid": False, "error": "..."}.
+
+    Raises
+    ------
+    ValueError
+        If the provider is not registered.
+    """
+    module = get_provider_module(provider)
+    return module.validate_key(api_key)
+
+
+__all__ = [
+    "PROVIDER_REGISTRY",
+    "PROVIDER_METADATA",
+    "get_provider_module",
+    "get_provider_list",
+    "build_provider_status",
+    "get_provider_models",
+    "list_installed_local_models",
+    "validate_key",
+]

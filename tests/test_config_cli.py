@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from think import config_cli, install_guard
+from solstone.think import config_cli, install_guard
 
 
 @pytest.fixture
@@ -63,7 +63,7 @@ def assert_wrapper(alias: Path, *, journal: str, sol_bin: str) -> None:
     assert install_guard.parse_wrapper(alias.read_text(encoding="utf-8")) == {
         "journal": journal,
         "sol_bin": sol_bin,
-        "version": 4,
+        "version": 6,
     }
 
 
@@ -83,9 +83,9 @@ def service_run_mock(*, returncodes: list[int] | None = None):
 
 
 def test_config_command_registered():
-    from think import sol_cli as sol
+    from solstone.think import sol_cli as sol
 
-    assert sol.COMMANDS["config"] == "think.config_cli"
+    assert sol.COMMANDS["config"] == "solstone.think.config_cli"
     assert "config" in sol.GROUPS["Specialized tools"]
 
 
@@ -269,6 +269,7 @@ def test_journal_refuses_source_tree_path_outside_source_checkout(
     home_root, monkeypatch, tmp_path, capsys
 ):
     monkeypatch.setattr(config_cli, "get_project_root", lambda: str(tmp_path))
+    monkeypatch.setattr(config_cli, "is_source_checkout", lambda: False)
 
     rc = config_cli.cmd_journal(str((tmp_path / "journal").resolve()))
     captured = capsys.readouterr()

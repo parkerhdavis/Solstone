@@ -4,7 +4,7 @@
 import datetime as dt
 import importlib
 
-from think.importers.file_importer import FILE_IMPORTER_REGISTRY
+from solstone.think.importers.file_importer import FILE_IMPORTER_REGISTRY
 
 
 class MockPage:
@@ -30,36 +30,36 @@ class MockPdfReader:
 
 
 def test_detect_pdf_file(tmp_path):
-    mod = importlib.import_module("think.importers.documents")
+    mod = importlib.import_module("solstone.think.importers.documents")
     pdf = tmp_path / "file.pdf"
     pdf.write_bytes(b"%PDF-1.4")
     assert mod.importer.detect(pdf) is True
 
 
 def test_detect_non_pdf(tmp_path):
-    mod = importlib.import_module("think.importers.documents")
+    mod = importlib.import_module("solstone.think.importers.documents")
     txt = tmp_path / "file.txt"
     txt.write_text("hello", encoding="utf-8")
     assert mod.importer.detect(txt) is False
 
 
 def test_detect_directory_with_pdfs(tmp_path):
-    mod = importlib.import_module("think.importers.documents")
+    mod = importlib.import_module("solstone.think.importers.documents")
     (tmp_path / "a.pdf").write_bytes(b"%PDF-1.4")
     (tmp_path / "b.pdf").write_bytes(b"%PDF-1.4")
     assert mod.importer.detect(tmp_path) is True
 
 
 def test_detect_empty_directory(tmp_path):
-    mod = importlib.import_module("think.importers.documents")
+    mod = importlib.import_module("solstone.think.importers.documents")
     assert mod.importer.detect(tmp_path) is False
 
 
 def test_preview_single_pdf(tmp_path, monkeypatch):
-    mod = importlib.import_module("think.importers.documents")
+    mod = importlib.import_module("solstone.think.importers.documents")
     pdf = tmp_path / "file.pdf"
     pdf.write_bytes(b"%PDF-1.4")
-    monkeypatch.setattr(mod, "PdfReader", MockPdfReader)
+    monkeypatch.setattr("pypdf.PdfReader", MockPdfReader)
 
     preview = mod.importer.preview(pdf)
 
@@ -70,11 +70,11 @@ def test_preview_single_pdf(tmp_path, monkeypatch):
 
 
 def test_process_text_pdf(tmp_path, monkeypatch):
-    mod = importlib.import_module("think.importers.documents")
+    mod = importlib.import_module("solstone.think.importers.documents")
     pdf = tmp_path / "contract.pdf"
     pdf.write_bytes(b"%PDF-1.4")
     monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
-    monkeypatch.setattr(mod, "PdfReader", MockPdfReader)
+    monkeypatch.setattr("pypdf.PdfReader", MockPdfReader)
     monkeypatch.setattr(mod, "day_path", lambda day: tmp_path / "chronicle" / day)
     monkeypatch.setattr(
         mod,
@@ -102,11 +102,11 @@ def test_process_text_pdf(tmp_path, monkeypatch):
 
 
 def test_process_creates_original_pdf(tmp_path, monkeypatch):
-    mod = importlib.import_module("think.importers.documents")
+    mod = importlib.import_module("solstone.think.importers.documents")
     pdf = tmp_path / "original.pdf"
     pdf.write_bytes(b"%PDF-1.4 fake")
     monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
-    monkeypatch.setattr(mod, "PdfReader", MockPdfReader)
+    monkeypatch.setattr("pypdf.PdfReader", MockPdfReader)
     monkeypatch.setattr(mod, "day_path", lambda day: tmp_path / "chronicle" / day)
     monkeypatch.setattr(
         mod,
@@ -131,7 +131,7 @@ def test_process_creates_original_pdf(tmp_path, monkeypatch):
 
 
 def test_process_scanned_detection(tmp_path, monkeypatch):
-    mod = importlib.import_module("think.importers.documents")
+    mod = importlib.import_module("solstone.think.importers.documents")
 
     class ScannedReader(MockPdfReader):
         def __init__(self, path):
@@ -142,7 +142,7 @@ def test_process_scanned_detection(tmp_path, monkeypatch):
     pdf = tmp_path / "scan.pdf"
     pdf.write_bytes(b"%PDF-1.4")
     monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
-    monkeypatch.setattr(mod, "PdfReader", ScannedReader)
+    monkeypatch.setattr("pypdf.PdfReader", ScannedReader)
     monkeypatch.setattr(mod, "day_path", lambda day: tmp_path / "chronicle" / day)
     monkeypatch.setattr(
         mod,
@@ -174,7 +174,7 @@ def test_process_scanned_detection(tmp_path, monkeypatch):
 
 
 def test_process_scanned_all_fallback(tmp_path, monkeypatch):
-    mod = importlib.import_module("think.importers.documents")
+    mod = importlib.import_module("solstone.think.importers.documents")
 
     class ScannedReader(MockPdfReader):
         def __init__(self, path):
@@ -185,7 +185,7 @@ def test_process_scanned_all_fallback(tmp_path, monkeypatch):
     pdf = tmp_path / "scan.pdf"
     pdf.write_bytes(b"%PDF-1.4")
     monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
-    monkeypatch.setattr(mod, "PdfReader", ScannedReader)
+    monkeypatch.setattr("pypdf.PdfReader", ScannedReader)
     monkeypatch.setattr(mod, "day_path", lambda day: tmp_path / "chronicle" / day)
     monkeypatch.setattr(
         mod,
@@ -218,13 +218,13 @@ def test_process_scanned_all_fallback(tmp_path, monkeypatch):
 
 
 def test_process_multi_file(tmp_path, monkeypatch):
-    mod = importlib.import_module("think.importers.documents")
+    mod = importlib.import_module("solstone.think.importers.documents")
     pdf_a = tmp_path / "a.pdf"
     pdf_b = tmp_path / "b.pdf"
     pdf_a.write_bytes(b"%PDF-1.4")
     pdf_b.write_bytes(b"%PDF-1.4")
     monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
-    monkeypatch.setattr(mod, "PdfReader", MockPdfReader)
+    monkeypatch.setattr("pypdf.PdfReader", MockPdfReader)
     monkeypatch.setattr(mod, "day_path", lambda day: tmp_path / "chronicle" / day)
     monkeypatch.setattr(
         mod,
@@ -240,7 +240,7 @@ def test_process_multi_file(tmp_path, monkeypatch):
 
 
 def test_process_entity_seeding(tmp_path, monkeypatch):
-    mod = importlib.import_module("think.importers.documents")
+    mod = importlib.import_module("solstone.think.importers.documents")
 
     class EntityReader(MockPdfReader):
         def __init__(self, path):
@@ -255,7 +255,7 @@ def test_process_entity_seeding(tmp_path, monkeypatch):
     pdf = tmp_path / "parties.pdf"
     pdf.write_bytes(b"%PDF-1.4")
     monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
-    monkeypatch.setattr(mod, "PdfReader", EntityReader)
+    monkeypatch.setattr("pypdf.PdfReader", EntityReader)
     monkeypatch.setattr(mod, "day_path", lambda day: tmp_path / "chronicle" / day)
     monkeypatch.setattr(
         mod,
@@ -283,7 +283,7 @@ def test_process_entity_seeding(tmp_path, monkeypatch):
 
 
 def test_timestamp_from_metadata(tmp_path):
-    mod = importlib.import_module("think.importers.documents")
+    mod = importlib.import_module("solstone.think.importers.documents")
     pdf = tmp_path / "file.pdf"
     pdf.write_bytes(b"%PDF-1.4")
     reader = MockPdfReader(pdf)
@@ -297,4 +297,4 @@ def test_timestamp_from_metadata(tmp_path):
 
 
 def test_registry_entry():
-    assert FILE_IMPORTER_REGISTRY["document"] == "think.importers.documents"
+    assert FILE_IMPORTER_REGISTRY["document"] == "solstone.think.importers.documents"

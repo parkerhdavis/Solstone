@@ -1,0 +1,617 @@
+{
+  "_comment": "Pre-vetted local models for Solstone, served via Ollama (ollama-local/) or vLLM (vllm-local/). Benchmarks are measured tok/s per canonical hardware class (see reference.json) and are populated via solstone.think.benchmark.harness on real hardware. An empty benchmarks dict means no measurement is available yet \u2014 the estimator falls back to confidence=unknown. Multimodal-omni entries (text+image+audio) report a single output_tok_s tied to text generation plus optional vision_output_tok_s / audio_output_tok_s supplementary fields when measured separately; per-task timings under tasks.<task_id> capture each modality individually.",
+  "models": {
+    "ollama-local/qwen3.5:35b-a3b-bf16": {
+      "label": "Qwen 3.5 35B (A3B, bf16) \u2014 MoE",
+      "tier_hint": 1,
+      "size_gb": 70.0,
+      "capabilities": [
+        "generate",
+        "cogitate"
+      ],
+      "vram_required_gb": 72,
+      "notes": "Large MoE (35B total, ~3B active). Matches think/models.py OLLAMA_PRO. Needs large unified memory (Spark) or multi-GPU.",
+      "benchmarks": {
+        "dgx-spark": {
+          "output_tok_s": 30.1,
+          "prompt_tok_s": 374.1,
+          "measured_at": "2026-04-20",
+          "mode": "text_only",
+          "tasks": {
+            "chat_reply": {
+              "seconds": 3.28,
+              "prompt_tokens": 262,
+              "output_tokens": 80,
+              "measured_at": "2026-04-20"
+            },
+            "voice_brain_turn": {
+              "seconds": 2.36,
+              "prompt_tokens": 183,
+              "output_tokens": 56,
+              "measured_at": "2026-04-20"
+            },
+            "search_query": {
+              "seconds": 3.68,
+              "prompt_tokens": 144,
+              "output_tokens": 94,
+              "measured_at": "2026-04-20"
+            },
+            "agent_turn": {
+              "seconds": 13.78,
+              "prompt_tokens": 714,
+              "output_tokens": 387,
+              "measured_at": "2026-04-20"
+            },
+            "entity_extraction": {
+              "seconds": 23.91,
+              "prompt_tokens": 779,
+              "output_tokens": 680,
+              "measured_at": "2026-04-20"
+            },
+            "todo_extraction": {
+              "seconds": 10.82,
+              "prompt_tokens": 814,
+              "output_tokens": 300,
+              "measured_at": "2026-04-20"
+            },
+            "meeting_summary": {
+              "seconds": 13.54,
+              "prompt_tokens": 1209,
+              "output_tokens": 362,
+              "measured_at": "2026-04-20"
+            },
+            "activity_clustering": {
+              "seconds": 21.16,
+              "prompt_tokens": 921,
+              "output_tokens": 598,
+              "measured_at": "2026-04-20"
+            },
+            "daily_insight": {
+              "seconds": 15.02,
+              "prompt_tokens": 1115,
+              "output_tokens": 410,
+              "measured_at": "2026-04-20"
+            }
+          }
+        }
+      }
+    },
+    "ollama-local/qwen3.5:9b": {
+      "label": "Qwen 3.5 9B",
+      "tier_hint": 2,
+      "size_gb": 5.5,
+      "capabilities": [
+        "generate",
+        "cogitate"
+      ],
+      "vram_required_gb": 8,
+      "notes": "Matches think/models.py OLLAMA_FLASH. Good balance for tool-calling agents.",
+      "benchmarks": {
+        "dgx-spark": {
+          "output_tok_s": 36.0,
+          "prompt_tok_s": 1173.1,
+          "measured_at": "2026-04-20",
+          "mode": "text_only",
+          "tasks": {
+            "chat_reply": {
+              "seconds": 2.41,
+              "prompt_tokens": 262,
+              "output_tokens": 74,
+              "measured_at": "2026-04-20"
+            },
+            "voice_brain_turn": {
+              "seconds": 1.43,
+              "prompt_tokens": 183,
+              "output_tokens": 43,
+              "measured_at": "2026-04-20"
+            },
+            "search_query": {
+              "seconds": 2.63,
+              "prompt_tokens": 144,
+              "output_tokens": 84,
+              "measured_at": "2026-04-20"
+            },
+            "agent_turn": {
+              "seconds": 11.69,
+              "prompt_tokens": 714,
+              "output_tokens": 397,
+              "measured_at": "2026-04-20"
+            },
+            "entity_extraction": {
+              "seconds": 19.5,
+              "prompt_tokens": 779,
+              "output_tokens": 665,
+              "measured_at": "2026-04-20"
+            },
+            "todo_extraction": {
+              "seconds": 8.97,
+              "prompt_tokens": 814,
+              "output_tokens": 300,
+              "measured_at": "2026-04-20"
+            },
+            "meeting_summary": {
+              "seconds": 10.77,
+              "prompt_tokens": 1209,
+              "output_tokens": 355,
+              "measured_at": "2026-04-20"
+            },
+            "activity_clustering": {
+              "seconds": 21.65,
+              "prompt_tokens": 921,
+              "output_tokens": 735,
+              "measured_at": "2026-04-20"
+            },
+            "daily_insight": {
+              "seconds": 11.14,
+              "prompt_tokens": 1115,
+              "output_tokens": 367,
+              "measured_at": "2026-04-20"
+            }
+          }
+        }
+      }
+    },
+    "ollama-local/qwen3.5:2b": {
+      "label": "Qwen 3.5 2B",
+      "tier_hint": 3,
+      "size_gb": 1.8,
+      "capabilities": [
+        "generate"
+      ],
+      "vram_required_gb": 3,
+      "notes": "Matches think/models.py OLLAMA_LITE. Lightweight generator; skip for cogitate.",
+      "benchmarks": {
+        "dgx-spark": {
+          "output_tok_s": 87.0,
+          "prompt_tok_s": 1956.6,
+          "measured_at": "2026-04-20",
+          "mode": "text_only",
+          "tasks": {
+            "chat_reply": {
+              "seconds": 1.37,
+              "prompt_tokens": 262,
+              "output_tokens": 103,
+              "measured_at": "2026-04-20"
+            },
+            "voice_brain_turn": {
+              "seconds": 0.64,
+              "prompt_tokens": 183,
+              "output_tokens": 40,
+              "measured_at": "2026-04-20"
+            },
+            "search_query": {
+              "seconds": 1.15,
+              "prompt_tokens": 144,
+              "output_tokens": 84,
+              "measured_at": "2026-04-20"
+            },
+            "agent_turn": {
+              "seconds": 4.89,
+              "prompt_tokens": 714,
+              "output_tokens": 400,
+              "measured_at": "2026-04-20"
+            },
+            "entity_extraction": {
+              "seconds": 8.12,
+              "prompt_tokens": 779,
+              "output_tokens": 672,
+              "measured_at": "2026-04-20"
+            },
+            "todo_extraction": {
+              "seconds": 3.73,
+              "prompt_tokens": 814,
+              "output_tokens": 300,
+              "measured_at": "2026-04-20"
+            },
+            "meeting_summary": {
+              "seconds": 5.05,
+              "prompt_tokens": 1209,
+              "output_tokens": 405,
+              "measured_at": "2026-04-20"
+            },
+            "activity_clustering": {
+              "seconds": 3.68,
+              "prompt_tokens": 921,
+              "output_tokens": 291,
+              "measured_at": "2026-04-20"
+            },
+            "daily_insight": {
+              "seconds": 5.09,
+              "prompt_tokens": 1115,
+              "output_tokens": 411,
+              "measured_at": "2026-04-20"
+            }
+          }
+        }
+      }
+    },
+    "ollama-local/qwen2.5vl:7b": {
+      "label": "Qwen 2.5 VL 7B \u2014 vision",
+      "tier_hint": 3,
+      "size_gb": 6.0,
+      "capabilities": [
+        "vision"
+      ],
+      "vram_required_gb": 7,
+      "notes": "Vision-language candidate for the describe pipeline (Solstone AI Modalities \u00a72). Smaller, wider compatibility.",
+      "benchmarks": {
+        "dgx-spark": {
+          "output_tok_s": 43.4,
+          "prompt_tok_s": 14908.2,
+          "measured_at": "2026-04-20",
+          "mode": "vision",
+          "tasks": {
+            "screen_frame": {
+              "seconds": 1.54,
+              "prompt_tokens": 442,
+              "output_tokens": 58,
+              "measured_at": "2026-04-20"
+            }
+          }
+        }
+      }
+    },
+    "ollama-local/qwen2.5vl:32b": {
+      "label": "Qwen 2.5 VL 32B \u2014 vision",
+      "tier_hint": 2,
+      "size_gb": 21.0,
+      "capabilities": [
+        "vision"
+      ],
+      "vram_required_gb": 24,
+      "notes": "Middle-tier vision model \u2014 more capable than 7B, much faster than 72B on Spark (~10 tok/s vs ~4).",
+      "benchmarks": {
+        "dgx-spark": {
+          "output_tok_s": 10.0,
+          "prompt_tok_s": 3658.8,
+          "measured_at": "2026-04-20",
+          "mode": "vision",
+          "tasks": {
+            "screen_frame": {
+              "seconds": 12.64,
+              "prompt_tokens": 442,
+              "output_tokens": 123,
+              "measured_at": "2026-04-20"
+            }
+          }
+        }
+      }
+    },
+    "ollama-local/qwen2.5vl:72b": {
+      "label": "Qwen 2.5 VL 72B \u2014 vision",
+      "tier_hint": 1,
+      "size_gb": 48.0,
+      "capabilities": [
+        "vision"
+      ],
+      "vram_required_gb": 52,
+      "notes": "Full-power vision model; target for Spark-class hardware. Note: severely memory-bandwidth-bound on Spark \u2014 qwen2.5vl:32b is ~2.3\u00d7 faster for realtime use.",
+      "benchmarks": {
+        "dgx-spark": {
+          "output_tok_s": 4.4,
+          "prompt_tok_s": 1409.7,
+          "measured_at": "2026-04-20",
+          "mode": "vision",
+          "tasks": {
+            "screen_frame": {
+              "seconds": 18.47,
+              "prompt_tokens": 442,
+              "output_tokens": 79,
+              "measured_at": "2026-04-20"
+            }
+          }
+        }
+      }
+    },
+    "vllm-local/qwen3.5:35b-a3b": {
+      "label": "Qwen 3.5 35B (A3B, bf16) \u2014 vLLM-served (comparison entry)",
+      "tier_hint": 1,
+      "size_gb": 70.0,
+      "capabilities": [
+        "generate",
+        "cogitate"
+      ],
+      "vram_required_gb": 72,
+      "notes": "vLLM-served counterpart of ollama-local/qwen3.5:35b-a3b-bf16 (PRO-tier promotable). Same bf16 quant; the HF repo is multimodal but only the text path is exercised. capabilities=['generate'] (cogitate works mechanically per Phase 5 cogitate validation but not yet wired into tier defaults). Production-routable as VLLM_PRO via journal contexts. Watch item: NVFP4 + Qwen MoE on Blackwell (incl. Spark GB10) has known vLLM gibberish-output issues \u2014 we serve at bf16 to dodge this entirely; do not switch to NVFP4 quant without testing. See Transient/vLLM vs Ollama Comparison.md for the broader picture.",
+      "benchmarks": {
+        "dgx-spark": {
+          "output_tok_s": 30.9,
+          "prompt_tok_s": 0.0,
+          "measured_at": "2026-04-30",
+          "mode": "text_only",
+          "tasks": {
+            "chat_reply": {
+              "seconds": 2.87,
+              "prompt_tokens": 262,
+              "output_tokens": 82,
+              "measured_at": "2026-04-30"
+            },
+            "voice_brain_turn": {
+              "seconds": 1.84,
+              "prompt_tokens": 183,
+              "output_tokens": 51,
+              "measured_at": "2026-04-30"
+            },
+            "search_query": {
+              "seconds": 3.18,
+              "prompt_tokens": 144,
+              "output_tokens": 94,
+              "measured_at": "2026-04-30"
+            },
+            "agent_turn": {
+              "seconds": 13.08,
+              "prompt_tokens": 713,
+              "output_tokens": 400,
+              "measured_at": "2026-04-30"
+            },
+            "entity_extraction": {
+              "seconds": 22.73,
+              "prompt_tokens": 779,
+              "output_tokens": 700,
+              "measured_at": "2026-04-30"
+            },
+            "todo_extraction": {
+              "seconds": 10.58,
+              "prompt_tokens": 814,
+              "output_tokens": 320,
+              "measured_at": "2026-04-30"
+            },
+            "meeting_summary": {
+              "seconds": 11.4,
+              "prompt_tokens": 1209,
+              "output_tokens": 342,
+              "measured_at": "2026-04-30"
+            },
+            "activity_clustering": {
+              "seconds": 23.51,
+              "prompt_tokens": 921,
+              "output_tokens": 721,
+              "measured_at": "2026-04-30"
+            },
+            "daily_insight": {
+              "seconds": 12.91,
+              "prompt_tokens": 1115,
+              "output_tokens": 389,
+              "measured_at": "2026-04-30"
+            },
+            "segment_sense": {
+              "seconds": 13.33,
+              "prompt_tokens": 1312,
+              "output_tokens": 400,
+              "measured_at": "2026-04-30"
+            },
+            "speaker_attribution_llm": {
+              "seconds": 11.64,
+              "prompt_tokens": 888,
+              "output_tokens": 350,
+              "measured_at": "2026-04-30"
+            },
+            "screen_record": {
+              "seconds": 32.32,
+              "prompt_tokens": 1300,
+              "output_tokens": 985,
+              "measured_at": "2026-04-30"
+            },
+            "awareness_tender": {
+              "seconds": 11.19,
+              "prompt_tokens": 670,
+              "output_tokens": 337,
+              "measured_at": "2026-04-30"
+            },
+            "pulse": {
+              "seconds": 12.51,
+              "prompt_tokens": 904,
+              "output_tokens": 376,
+              "measured_at": "2026-04-30"
+            }
+          }
+        }
+      }
+    },
+    "vllm-local/qwen2.5vl:7b-awq": {
+      "label": "Qwen 2.5 VL 7B (AWQ-Int4) \u2014 vLLM-served (comparison entry)",
+      "tier_hint": 3,
+      "size_gb": 6.0,
+      "capabilities": [
+        "vision"
+      ],
+      "vram_required_gb": 7,
+      "notes": "vLLM-served counterpart of ollama-local/qwen2.5vl:7b. Uses AWQ-Int4 (closest to Ollama default Q4_K_M); the bf16 variant of this model on vLLM is ~3x slower on Spark due to memory bandwidth, so AWQ is the production-realistic comparison. Not currently wired into a tier default but routable via journal contexts. See Transient/vLLM vs Ollama Comparison.md for the broader picture.",
+      "benchmarks": {
+        "dgx-spark": {
+          "output_tok_s": 45.4,
+          "prompt_tok_s": 0.0,
+          "measured_at": "2026-04-30",
+          "mode": "vision",
+          "tasks": {
+            "screen_frame": {
+              "seconds": 1.31,
+              "prompt_tokens": 442,
+              "output_tokens": 59,
+              "measured_at": "2026-04-30"
+            }
+          }
+        }
+      }
+    },
+    "vllm-local/qwen3.5:9b-awq": {
+      "label": "Qwen 3.5 9B (AWQ-Int4) \u2014 vLLM-served (FLASH-tier promotable)",
+      "tier_hint": 2,
+      "size_gb": 8.5,
+      "capabilities": [
+        "generate",
+        "cogitate"
+      ],
+      "vram_required_gb": 10,
+      "notes": "vLLM-served counterpart of ollama-local/qwen3.5:9b. AWQ-Int4 from cyankiwi (de-facto community Qwen quantizer; Qwen team recommends his quants on Qwen3-Next official cards) chosen as the apples-to-apples match for Ollama default Q4_K_M. Production-routable as VLLM_FLASH via journal contexts. Caveat: kaitchup benchmarks observed up to 33% accuracy drop on reasoning tasks for quantized 9B variants when thinking is enabled (model thinks more, hits max-output-tokens, returns truncated answers). Sanity-check output quality before enabling thinking on FLASH-tier vLLM calls; AWQ regeneration recipe in ~/solstone-vllm-spike/AWQ_RECIPE.md.",
+      "benchmarks": {
+        "dgx-spark": {
+          "output_tok_s": 34.1,
+          "prompt_tok_s": 0.0,
+          "measured_at": "2026-04-30",
+          "mode": "text_only",
+          "tasks": {
+            "chat_reply": {
+              "seconds": 2.53,
+              "prompt_tokens": 262,
+              "output_tokens": 83,
+              "measured_at": "2026-04-30"
+            }
+          }
+        }
+      }
+    },
+    "vllm-local/qwen3.5:2b-awq": {
+      "label": "Qwen 3.5 2B (AWQ-Int4) \u2014 vLLM-served (LITE-tier promotable)",
+      "tier_hint": 3,
+      "size_gb": 2.4,
+      "capabilities": [
+        "generate"
+      ],
+      "vram_required_gb": 4,
+      "notes": "vLLM-served counterpart of ollama-local/qwen3.5:2b. AWQ-Int4 from cyankiwi for apples-to-apples with Ollama Q4_K_M. Production-routable as VLLM_LITE via journal contexts. Notably faster than the Ollama equivalent on Spark (98 vs 87 tok/s synthetic; 0.87 vs 1.37s chat_reply) \u2014 at this size class vLLM kernels seem to have a real advantage over Ollama. AWQ regeneration recipe in ~/solstone-vllm-spike/AWQ_RECIPE.md.",
+      "benchmarks": {
+        "dgx-spark": {
+          "output_tok_s": 98.2,
+          "prompt_tok_s": 0.0,
+          "measured_at": "2026-04-30",
+          "mode": "text_only",
+          "tasks": {
+            "chat_reply": {
+              "seconds": 0.87,
+              "prompt_tokens": 262,
+              "output_tokens": 83,
+              "measured_at": "2026-04-30"
+            }
+          }
+        }
+      }
+    },
+    "vllm-local/nemotron-omni": {
+      "label": "NVIDIA Nemotron 3 Nano Omni 30B-A3B (NVFP4) \u2014 omni (text+image+audio+video)",
+      "tier_hint": 2,
+      "size_gb": 21.0,
+      "capabilities": [
+        "generate",
+        "vision",
+        "audio"
+      ],
+      "vram_required_gb": 24,
+      "notes": "Served via vLLM 0.20.0 (upstream vllm/vllm-openai container) on Spark; HF: nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4. First multimodal-omni entry in the registry \u2014 unifies what previously took qwen3.5 (text/cogitate) + qwen2.5vl (vision) + Whisper/Parakeet (audio) into one model. Capabilities list intentionally omits 'cogitate' (vLLM-via-OpenCode unverified, deferred) and 'video' (Solstone's video pipeline still does frame-extraction \u2014 unified video is a separate design pass).",
+      "benchmarks": {
+        "dgx-spark": {
+          "output_tok_s": 57.4,
+          "prompt_tok_s": 0.0,
+          "measured_at": "2026-04-30",
+          "mode": "text_only",
+          "vision_output_tok_s": 57.0,
+          "audio_output_tok_s": 56.1,
+          "tasks": {
+            "audio_transcribe": {
+              "seconds": 1.71,
+              "prompt_tokens": 434,
+              "output_tokens": 90,
+              "measured_at": "2026-04-30"
+            },
+            "audio_summarize": {
+              "seconds": 2.74,
+              "prompt_tokens": 458,
+              "output_tokens": 150,
+              "measured_at": "2026-04-30"
+            },
+            "chat_reply": {
+              "seconds": 1.48,
+              "prompt_tokens": 266,
+              "output_tokens": 80,
+              "measured_at": "2026-04-30"
+            },
+            "entity_extraction": {
+              "seconds": 10.08,
+              "prompt_tokens": 771,
+              "output_tokens": 578,
+              "measured_at": "2026-04-30"
+            },
+            "voice_brain_turn": {
+              "seconds": 0.72,
+              "prompt_tokens": 186,
+              "output_tokens": 36,
+              "measured_at": "2026-04-30"
+            },
+            "todo_extraction": {
+              "seconds": 5.66,
+              "prompt_tokens": 802,
+              "output_tokens": 320,
+              "measured_at": "2026-04-30"
+            },
+            "search_query": {
+              "seconds": 1.52,
+              "prompt_tokens": 146,
+              "output_tokens": 83,
+              "measured_at": "2026-04-30"
+            },
+            "meeting_summary": {
+              "seconds": 6.14,
+              "prompt_tokens": 1196,
+              "output_tokens": 346,
+              "measured_at": "2026-04-30"
+            },
+            "agent_turn": {
+              "seconds": 7.01,
+              "prompt_tokens": 710,
+              "output_tokens": 400,
+              "measured_at": "2026-04-30"
+            },
+            "activity_clustering": {
+              "seconds": 13.2,
+              "prompt_tokens": 895,
+              "output_tokens": 750,
+              "measured_at": "2026-04-30"
+            },
+            "daily_insight": {
+              "seconds": 6.67,
+              "prompt_tokens": 1087,
+              "output_tokens": 376,
+              "measured_at": "2026-04-30"
+            },
+            "segment_sense": {
+              "seconds": 7.12,
+              "prompt_tokens": 1314,
+              "output_tokens": 400,
+              "measured_at": "2026-04-30"
+            },
+            "speaker_attribution_llm": {
+              "seconds": 6.21,
+              "prompt_tokens": 875,
+              "output_tokens": 350,
+              "measured_at": "2026-04-30"
+            },
+            "screen_record": {
+              "seconds": 21.23,
+              "prompt_tokens": 1293,
+              "output_tokens": 1213,
+              "measured_at": "2026-04-30"
+            },
+            "awareness_tender": {
+              "seconds": 5.54,
+              "prompt_tokens": 669,
+              "output_tokens": 312,
+              "measured_at": "2026-04-30"
+            },
+            "pulse": {
+              "seconds": 6.7,
+              "prompt_tokens": 888,
+              "output_tokens": 378,
+              "measured_at": "2026-04-30"
+            },
+            "screen_frame": {
+              "seconds": 1.41,
+              "prompt_tokens": 375,
+              "output_tokens": 75,
+              "measured_at": "2026-04-30"
+            }
+          }
+        }
+      }
+    }
+  }
+}

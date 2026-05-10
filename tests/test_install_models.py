@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from think import install_models
+from solstone.think import install_models
 
 
 def _sha256(data: bytes) -> str:
@@ -139,6 +139,53 @@ def test_verify_returns_false_when_files_at_literal_path(tmp_path: Path):
     assert install_models._verify_mac_cache(cache_dir) is False
 
 
+def test_helper_path_env_override_wins(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    fake = tmp_path / "custom" / "parakeet-helper"
+    monkeypatch.setenv(install_models.HELPER_ENV_KEY, str(fake))
+    monkeypatch.setattr(install_models, "_package_root", lambda: tmp_path)
+    assert install_models._helper_path() == fake.expanduser().resolve()
+
+
+def test_helper_path_prefers_bundled_bin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    monkeypatch.delenv(install_models.HELPER_ENV_KEY, raising=False)
+    monkeypatch.setattr(install_models, "_package_root", lambda: tmp_path)
+    bundled = (
+        tmp_path
+        / "observe"
+        / "transcribe"
+        / "parakeet_helper"
+        / "_bin"
+        / "parakeet-helper"
+    )
+    bundled.parent.mkdir(parents=True)
+    bundled.write_text("")
+    assert install_models._helper_path() == bundled
+
+
+def test_helper_path_falls_back_to_swift_build(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    monkeypatch.delenv(install_models.HELPER_ENV_KEY, raising=False)
+    monkeypatch.setattr(install_models, "_package_root", lambda: tmp_path)
+    expected = (
+        tmp_path
+        / "observe"
+        / "transcribe"
+        / "parakeet_helper"
+        / ".build"
+        / "release"
+        / "parakeet-helper"
+    )
+    assert install_models._helper_path() == expected
+
+
 def _prepare_check_main(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -181,3 +228,66 @@ def test_main_check_ready_cache_returns_zero(
 
     assert install_models.main() == 0
     assert f"model ready: {cache_dir}" in capsys.readouterr().out
+
+
+def test_run_mac_helper_soft_fails_on_packaged_install(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+):
+    cache_dir = tmp_path / "cache"
+    sentinel_path = tmp_path / "sentinel.json"
+    missing_helper = tmp_path / "missing" / "parakeet-helper"
+
+    monkeypatch.delenv(install_models.HELPER_ENV_KEY, raising=False)
+    monkeypatch.setattr(install_models, "_helper_path", lambda: missing_helper)
+    monkeypatch.setattr(install_models, "is_packaged_install", lambda: True)
+    monkeypatch.setattr(install_models, "_sentinel_path", lambda variant: sentinel_path)
+    monkeypatch.setattr(install_models, "_cache_dir", lambda variant: cache_dir)
+
+    assert install_models._run_mac_helper(cache_dir) is None
+    stderr = capsys.readouterr().err
+    assert "Apple Silicon Macs running macOS 14" in stderr
+    assert "Intel Mac" in stderr
+    assert "source checkout" in stderr
+
+    assert install_models._install_models("darwin", "arm64", "coreml") == 0
+
+
+def test_fetch_linux_model_soft_fails_on_packaged_install(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+):
+    cache_dir = tmp_path / "cache"
+    sentinel_path = tmp_path / "sentinel.json"
+
+    monkeypatch.setitem(sys.modules, "onnx_asr", None)
+    monkeypatch.setattr(install_models, "is_packaged_install", lambda: True)
+    monkeypatch.setattr(install_models, "_sentinel_path", lambda variant: sentinel_path)
+    monkeypatch.setattr(install_models, "_cache_dir", lambda variant: cache_dir)
+
+    assert install_models._fetch_linux_model(cache_dir) is False
+    stderr = capsys.readouterr().err
+    assert "packaged installs on Linux don't include the parakeet-onnx" in stderr
+    assert "Whisper, Gemini, OpenAI" in stderr
+
+    assert install_models._install_models("linux", "x86_64", "cpu") == 0
+    assert not sentinel_path.exists()
+
+
+def test_fetch_linux_model_raises_on_source_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+):
+    cache_dir = tmp_path / "cache"
+    sentinel_path = tmp_path / "sentinel.json"
+
+    monkeypatch.setitem(sys.modules, "onnx_asr", None)
+    monkeypatch.setattr(install_models, "is_packaged_install", lambda: False)
+    monkeypatch.setattr(install_models, "_sentinel_path", lambda variant: sentinel_path)
+    monkeypatch.setattr(install_models, "_cache_dir", lambda variant: cache_dir)
+
+    assert install_models._install_models("linux", "x86_64", "cpu") == 1
+    assert "parakeet install failed" in capsys.readouterr().err
