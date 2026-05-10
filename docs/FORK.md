@@ -212,7 +212,7 @@ Added `NVM_BIN` detection so `npx` can be found outside interactive shells
 
 > **Merged upstream** in commit [`27b0745`](https://github.com/solpbc/solstone/commit/27b0745fded2c507b5ccb94df906434c5bc7818d)
 
-**File:** `convey/static/websocket.js`
+**File:** `solstone/convey/static/websocket.js`
 
 The WebSocket connection URL was hardcoded to `ws://`, which causes a mixed
 content error when the dashboard is served over HTTPS. The browser blocks
