@@ -10,6 +10,9 @@
   <script src="{{ url_for('root.static', filename='error-handler.js') }}"></script>
   <script src="{{ url_for('root.static', filename='relative-time.js') }}"></script>
   <script src="{{ url_for('root.static', filename='sol_initiated_constants.js') }}"></script>
+  <script src="{{ url_for('root.static', filename='convey_copy.js') }}"></script>
+  <script src="{{ url_for('root.static', filename='diagnostic-console.js') }}" defer></script>
+  <script src="{{ url_for('root.static', filename='chat_reasons.js') }}"></script>
 
   <!-- Embed facets data for immediate client-side access -->
   <script>
@@ -17,12 +20,16 @@
     window.selectedFacet = {% if app_registry.apps[app].facets_enabled() %}{{ selected_facet|tojson|safe }}{% else %}null{% endif %};
     window.appFacetCounts = {{ facet_counts|default({})|tojson|safe }};
   </script>
+  <script>
+    window.CONVEY_SETTINGS = {reportingEnabled: {{ convey_settings.reporting_enabled|tojson }}};
+  </script>
 
-  <!-- WebSocket connection for Callosum events -->
+  <!-- SSE connection for Callosum events -->
   <script src="{{ url_for('root.static', filename='websocket.js') }}"></script>
   <script src="{{ url_for('root.static', filename='api.js') }}"></script>
   <!-- App JavaScript (includes AppServices framework) -->
   <script src="{{ url_for('root.static', filename='app.js') }}"></script>
+  <script src="{{ url_for('root.static', filename='report-error.js') }}"></script>
   <!-- Markdown rendering deps (marked + DOMPurify). Must load before workspace include. -->
   <script src="{{ vendor_lib('marked') }}"></script>
   <script src="{{ vendor_lib('dompurify') }}"></script>
@@ -108,6 +115,7 @@
 
 <!-- Status Pane -->
 {% include "status_pane.html" %}
+{% include "diagnostic_console.html" %}
 
 <!-- Notification Center -->
 <div class="notification-center" id="notification-center" role="log" aria-live="polite" aria-label="notifications"></div>
@@ -208,13 +216,28 @@
     input.style.height = Math.min(120, input.scrollHeight) + 'px';
   }
 
-  function setStatus(text, title) {
+  function setStatus(text, title, action) {
     if (!statusText || !statusWrap) return;
     var label = String(text || '').trim();
     var tooltip = String(title || label).trim();
     statusText.textContent = label;
     statusText.title = tooltip;
     statusWrap.title = tooltip;
+    var actionEl = statusWrap.querySelector('.chat-bar-status-action');
+    if (action && action.label && action.href) {
+      if (!actionEl) {
+        actionEl = document.createElement('a');
+        actionEl.className = 'chat-bar-status-action';
+        actionEl.addEventListener('click', function(event) {
+          event.stopPropagation();
+        });
+        statusText.insertAdjacentElement('afterend', actionEl);
+      }
+      actionEl.textContent = action.label;
+      actionEl.href = action.href;
+    } else if (actionEl) {
+      actionEl.remove();
+    }
   }
 
   function setPendingState(active) {
@@ -846,7 +869,8 @@
     }
     if (eventName === 'chat_error') {
       if (solRequestState) return;
-      setStatus('chat had trouble — try again', 'chat had trouble — try again');
+      var renderedReason = window.renderChatReason(msg.reason, msg.provider || '');
+      setStatus(renderedReason.message, renderedReason.message, renderedReason.action);
     }
   }
 
@@ -885,9 +909,10 @@
       });
     } catch (err) {
       setPendingState(true);
+      var hydrateError = `Couldn't load recent chat session. ${window.CONVEY_COPY.RELOAD_HINT}`;
       setStatus(
-        "Couldn't load recent chat session. Reload to try again.",
-        "Couldn't load recent chat session. Reload to try again."
+        hydrateError,
+        hydrateError
       );
       window.logError(err, { context: 'chat-hydrate' });
     }
@@ -1019,9 +1044,6 @@
     <pre id="errorMessage"></pre>
   </div>
 </div>
-
-<!-- Error Log Display -->
-<div id="error-log"></div>
 
 </body>
 </html>

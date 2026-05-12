@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from typer.testing import CliRunner
 
-from apps.benchmark import call as benchmark_call
+from solstone.apps.benchmark import call as benchmark_call
 from solstone.think.call import call_app
 
 runner = CliRunner()

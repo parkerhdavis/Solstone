@@ -2,17 +2,18 @@
 // Copyright (c) 2026 sol pbc
 
 /**
- * Callosum WebSocket Bridge
+ * Callosum SSE Bridge
  *
- * Connects to /ws/events and broadcasts Callosum events to registered listeners.
+ * Connects to /sse/events and broadcasts Callosum events to registered listeners.
  * Provides window.appEvents API for subscribing to events by tract.
  */
 (function(){
+  const DISCONNECT_FIRST_PHASE_MS = 5000;
+  const DISCONNECT_SECOND_PHASE_MS = 30000;
   const listeners = {};
   const parseErrorHandlers = new Set();
   const connectionStateHandlers = new Set();
-  let ws;
-  let retry = 1000;
+  let eventSource;
   let statusIcon = null;
 
   // Connection metrics
@@ -21,6 +22,10 @@
   let connectionState = 'disconnected';
   let disconnectTimerId = null;
   let disconnectCardId = null;
+  let disconnectSecondPhaseTimerId = null;
+  let firstDisconnectAt = null;
+  let disconnectSecondPhase = false;
+  let reconnectAttempts = [];
 
   function getTractListeners(tract) {
     if (!listeners[tract]) {
@@ -35,13 +40,13 @@
         handler(error, rawPayload);
       } catch (handlerError) {
         if (typeof window.logError === 'function') {
-          window.logError(handlerError, { context: 'websocket-parse-handler' });
+          window.logError(handlerError, { context: 'sse-parse-handler' });
         }
       }
     });
 
     if (typeof window.logError === 'function') {
-      window.logError(error, { context: 'websocket-parse' });
+      window.logError(error, { context: 'sse-parse' });
     }
   }
 
@@ -52,7 +57,7 @@
         handler(payload);
       } catch (handlerError) {
         if (typeof window.logError === 'function') {
-          window.logError(handlerError, { context: 'websocket-connection-handler' });
+          window.logError(handlerError, { context: 'sse-connection-handler' });
         }
       }
     });
@@ -112,14 +117,14 @@
     if (Array.isArray(schema)) {
       const missing = schema.filter(key => msg == null || msg[key] === undefined);
       if (missing.length > 0) {
-        throw new Error(`Missing required websocket field(s): ${missing.join(', ')}`);
+        throw new Error(`Missing required SSE field(s): ${missing.join(', ')}`);
       }
       return;
     }
     if (typeof schema === 'function') {
       const result = schema(msg);
       if (result === false) {
-        throw new Error('WebSocket schema validation failed');
+        throw new Error('SSE schema validation failed');
       }
     }
   }
@@ -166,7 +171,7 @@
               record.options.onDrop(msg, err);
             } catch (dropError) {
               if (typeof window.logError === 'function') {
-                window.logError(dropError, { context: 'websocket-drop' });
+                window.logError(dropError, { context: 'sse-drop' });
               }
             }
           }
@@ -174,12 +179,12 @@
           return;
         }
 
-        console.error(`[WebSocket] Error in ${tract} listener:`, err);
+        console.error(`[SSE] Error in ${tract} listener:`, err);
       }
     });
   }
 
-  function updateStatusIcon(state) {
+	  function updateStatusIcon(state) {
     if (!statusIcon) {
       statusIcon = document.querySelector('.facet-bar .status-icon');
     }
@@ -209,23 +214,70 @@
     if (previousState !== state) {
       notifyConnectionState();
     }
-    window.updateStatusLabel?.();
-  }
+	    window.updateStatusLabel?.();
+	  }
 
-  function connect() {
-    updateStatusIcon('connecting');
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${proto}//${location.host}/ws/events`);
+	  function reconnectAttemptDetails() {
+	    if (!reconnectAttempts.length) return 'no reconnect attempts recorded yet.';
+	    return 'recent attempts: ' + reconnectAttempts
+	      .map(ts => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }))
+	      .join(', ');
+	  }
 
-    ws.onopen = () => {
+	  function enterDisconnectSecondPhase() {
+	    if (
+	      disconnectSecondPhase
+	      || disconnectCardId === null
+	      || firstDisconnectAt === null
+	      || Date.now() - firstDisconnectAt < DISCONNECT_SECOND_PHASE_MS
+	    ) {
+	      return;
+	    }
+	    disconnectSecondPhase = true;
+	    window.AppServices?.notifications?.update(disconnectCardId, {
+	      title: 'connection lost',
+	      message: 'last reconnect attempt failed.',
+	      buttons: [
+	        {
+	          label: 'Reconnect now',
+	          onClick: () => connect(),
+	          dismiss: false
+	        },
+	        {
+	          label: 'Show details',
+	          onClick: (notification) => {
+	            window.AppServices?.notifications?.update(notification.id, {
+	              message: 'last reconnect attempt failed. ' + reconnectAttemptDetails()
+	            });
+	          },
+	          dismiss: false
+	        }
+	      ]
+	    });
+	  }
+
+	  function connect() {
+	    if (eventSource) {
+	      eventSource.close();
+	    }
+	    updateStatusIcon('connecting');
+	    eventSource = new EventSource('/sse/events');
+
+    eventSource.onopen = () => {
       connectedAt = Date.now();
       updateStatusIcon('connected');
-      retry = 1000;
 
-      if (disconnectTimerId) {
-        clearTimeout(disconnectTimerId);
-        disconnectTimerId = null;
-      }
+	      if (disconnectTimerId) {
+	        clearTimeout(disconnectTimerId);
+	        disconnectTimerId = null;
+	      }
+	      if (disconnectSecondPhaseTimerId) {
+	        clearTimeout(disconnectSecondPhaseTimerId);
+	        disconnectSecondPhaseTimerId = null;
+	      }
+	      firstDisconnectAt = null;
+	      disconnectSecondPhase = false;
+	      reconnectAttempts = [];
 
       if (disconnectCardId !== null) {
         window.AppServices?.notifications?.dismiss(disconnectCardId);
@@ -242,42 +294,54 @@
         disconnectCardId = null;
       }
 
-      console.debug('[WebSocket] Connected to /ws/events');
+      console.debug('[SSE] Connected to /sse/events');
     };
 
-    ws.onclose = () => {
-      connectedAt = null;
-      updateStatusIcon('disconnected');
+	    eventSource.onerror = err => {
+	      connectedAt = null;
+	      updateStatusIcon('disconnected');
+	      if (firstDisconnectAt === null) {
+	        firstDisconnectAt = Date.now();
+	        disconnectSecondPhase = false;
+	      }
+	      reconnectAttempts.push(Date.now());
+	      reconnectAttempts = reconnectAttempts.slice(-5);
 
-      if (!disconnectTimerId && disconnectCardId === null) {
-        disconnectTimerId = setTimeout(() => {
-          disconnectTimerId = null;
-          const id = window.AppServices?.notifications?.show({
+	      if (!disconnectTimerId && disconnectCardId === null) {
+	        disconnectTimerId = setTimeout(() => {
+	          disconnectTimerId = null;
+	          const id = window.AppServices?.notifications?.show({
             app: 'system',
             icon: '⚠️',
             title: 'connection lost',
             message: 'reconnecting — some features may be delayed',
             dismissible: false
           });
-          if (id != null) {
-            disconnectCardId = id;
-          }
-        }, 5000);
-      }
+	          if (id != null) {
+	            disconnectCardId = id;
+	          }
+	        }, DISCONNECT_FIRST_PHASE_MS);
+	      }
 
-      retry = Math.min(retry * 1.5, 15000);
-      console.debug(`[WebSocket] Disconnected, reconnecting in ${retry}ms`);
-      setTimeout(connect, retry);
-    };
+	      if (!disconnectSecondPhaseTimerId) {
+	        disconnectSecondPhaseTimerId = setTimeout(() => {
+	          disconnectSecondPhaseTimerId = null;
+	          enterDisconnectSecondPhase();
+	        }, DISCONNECT_SECOND_PHASE_MS);
+	      }
+	      enterDisconnectSecondPhase();
 
-    ws.onmessage = event => {
+	      console.error('[SSE] Error:', err);
+	    };
+
+    eventSource.onmessage = event => {
       lastMessageAt = Date.now();
 
       let msg;
       try {
         msg = JSON.parse(event.data);
       } catch (err) {
-        console.warn('[WebSocket] Failed to parse message:', err);
+        console.warn('[SSE] Failed to parse message:', err);
         notifyParseError(err, event.data);
         return;
       }
@@ -287,10 +351,6 @@
         dispatchToRecords(tract, msg);
       }
       dispatchToRecords('*', msg);
-    };
-
-    ws.onerror = err => {
-      console.error('[WebSocket] Error:', err);
     };
   }
 

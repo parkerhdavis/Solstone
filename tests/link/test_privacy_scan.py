@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import base64
+import logging
 from pathlib import Path
 
 import pytest
+import requests
 
 from tests.link.client import Client
 from tests.link.live_helpers import (
@@ -36,7 +38,12 @@ FORBIDDEN_TOKENS = [
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(60)
-async def test_privacy_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_privacy_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="convey.secure_listener")
     tmp_journal = tmp_path / "journal"
     tmp_journal.mkdir()
     monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_journal))
@@ -62,14 +69,31 @@ async def test_privacy_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
             )
         assert status == 200
         assert headers["content-type"] == "application/json"
+        local_endpoints_response = requests.get(
+            f"{base_url}/app/link/local-endpoints",
+            timeout=10,
+        )
+        local_endpoints_response.raise_for_status()
+        local_endpoints = local_endpoints_response.json().get("endpoints", [])
 
     assert capture is not None
     texts = runtime_texts(tmp_journal, capture)
+    texts["convey.secure_listener"] = "\n".join(
+        record.getMessage()
+        for record in caplog.records
+        if record.name.startswith("convey.secure_listener")
+    )
+    endpoint_ips = [
+        str(endpoint["ip"])
+        for endpoint in [*local_endpoints, *identity.local_endpoints]
+        if isinstance(endpoint, dict) and endpoint.get("ip")
+    ]
     dynamic_tokens = [
         identity.home_attestation,
         enrolled.device_token,
         identity.client_cert_pem[:100],
         identity.home_attestation.split(".")[1],
+        *endpoint_ips,
     ]
 
     for token in FORBIDDEN_TOKENS:

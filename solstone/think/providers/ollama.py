@@ -60,12 +60,13 @@ import httpx
 from solstone.think.models import OLLAMA_FLASH
 from solstone.think.utils import now_ms
 
-from .cli import CLIRunner, ThinkingAggregator, assemble_prompt
+from .cli import CLIRunner, QuotaExhaustedError, ThinkingAggregator, assemble_prompt
 from .shared import (
     BenchmarkResult,
     GenerateResult,
     JSONEventCallback,
     _is_content_block_list,
+    classify_provider_error,
     safe_raw,
 )
 
@@ -626,6 +627,7 @@ async def run_cogitate(
             # the first event (model loading + initial inference).
             first_event_timeout=120,
         )
+        runner.provider = "ollama"
 
         result = await runner.run()
 
@@ -641,11 +643,15 @@ async def run_cogitate(
             finish_event["cli_session_id"] = runner.cli_session_id
         callback.emit(finish_event)
         return result
+    except QuotaExhaustedError:
+        raise
     except Exception as exc:
         callback.emit(
             {
                 "event": "error",
                 "error": str(exc),
+                "reason_code": classify_provider_error(exc, "ollama"),
+                "provider": "ollama",
                 "trace": traceback.format_exc(),
             }
         )

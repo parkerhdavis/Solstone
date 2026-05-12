@@ -26,13 +26,39 @@ cannot forge a cert signed by the pinned CA.
 from __future__ import annotations
 
 import datetime as dt
+import json as _json
 import logging
+import re
 import socket
+from dataclasses import asdict, dataclass
 from typing import Any
+from urllib.parse import quote
 
 from cryptography.hazmat.primitives import serialization
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, Response, abort, jsonify, request
 
+from solstone.apps.link import copy as link_copy
+from solstone.apps.link.copy import (
+    MANUAL_CODE_GROUP,
+    MANUAL_CODE_LEN,
+    PAIR_LINK_HOST,
+    PAIR_LINK_PATH,
+)
+from solstone.apps.link.manual_code import (
+    generate as generate_manual_code,
+)
+from solstone.apps.link.manual_code import (
+    normalize as normalize_manual_code,
+)
+from solstone.convey import emit
+from solstone.convey.reasons import (
+    MISSING_REQUIRED_FIELD,
+    OPERATION_NO_LONGER_AVAILABLE,
+    PAIRED_DEVICE_NOT_FOUND,
+    PAIRING_KEY_INVALID,
+    PAIRING_REQUEST_INVALID,
+)
+from solstone.convey.utils import error_response
 from solstone.think.link.auth import AuthorizedClients, ClientEntry
 from solstone.think.link.ca import (
     generate_nonce,
@@ -40,7 +66,14 @@ from solstone.think.link.ca import (
     mint_attestation,
     sign_csr,
 )
-from solstone.think.link.nonces import NonceStore
+from solstone.think.link.interface_watcher import get_interface_watcher
+from solstone.think.link.local_endpoints import (
+    LocalEndpoint,
+    LocalEndpointsResponse,
+    endpoint_to_dict,
+    response_to_dict,
+)
+from solstone.think.link.nonces import Nonce, NonceStore
 from solstone.think.link.paths import (
     LinkState,
     authorized_clients_path,
@@ -51,6 +84,10 @@ from solstone.think.link.paths import (
 )
 
 logger = logging.getLogger(__name__)
+MANUAL_CODE_RE = re.compile(
+    rf"^[A-Z2-9]{{{MANUAL_CODE_GROUP}}}"
+    rf"[A-Z2-9]{{{MANUAL_CODE_LEN - MANUAL_CODE_GROUP}}}$"
+)
 
 link_bp = Blueprint(
     "app:link",
@@ -71,12 +108,26 @@ def _utc_now_iso() -> str:
     return dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _lan_pair_base_url() -> str:
-    """Best-effort LAN URL for the convey host — used in the QR payload."""
+def _default_device_label() -> str:
+    now = dt.datetime.now()
+    return link_copy.DEVICE_LABEL_DEFAULT_FORMAT.format(
+        month=now.strftime("%b"),
+        day=now.strftime("%d"),
+    )
+
+
+def _is_loopback_request() -> bool:
+    return request.remote_addr in {"127.0.0.1", "::1"}
+
+
+def _current_local_endpoints() -> list[LocalEndpoint]:
+    watcher = get_interface_watcher()
+    return watcher.snapshot() if watcher else []
+
+
+def _resolve_host_port() -> str:
+    """Best-effort LAN host:port for the convey host."""
     host = request.host
-    scheme = "http" if not request.is_secure else "https"
-    # If the request came in on localhost, substitute a routable LAN IP so
-    # the phone's QR scan works. If we can't find one, fall back to host.
     try:
         hostname, _, port = host.partition(":")
         if hostname in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
@@ -85,7 +136,7 @@ def _lan_pair_base_url() -> str:
                 host = f"{lan_ip}:{port}" if port else lan_ip
     except Exception:
         logger.debug("lan ip detection failed", exc_info=True)
-    return f"{scheme}://{host}"
+    return host
 
 
 def _detect_lan_ip() -> str | None:
@@ -108,6 +159,35 @@ def _detect_lan_ip() -> str | None:
 def _ca_fingerprint() -> str:
     ca = load_or_generate_ca(ca_dir())
     return ca.fingerprint_sha256()
+
+
+def _build_pair_link(
+    lan_url: str,
+    nonce: str,
+    ca_fp: str,
+    device_label: str,
+) -> str:
+    fp_hex = ca_fp.removeprefix("sha256:")
+    encoded_label = quote(device_label, safe="")
+    return (
+        f"https://{PAIR_LINK_HOST}{PAIR_LINK_PATH}"
+        f"#h={lan_url}&t={nonce}&f={fp_hex}&l={encoded_label}&v=1"
+    )
+
+
+@dataclass(frozen=True)
+class PairStartResponse:
+    nonce: str
+    pair_link: str
+    manual_code: str
+    expires_in: int
+    device_label: str
+    lan_url: str
+    ca_fingerprint: str
+
+
+def _jsonify_preserving_order(payload: dict[str, Any]) -> Response:
+    return Response(_json.dumps(payload), mimetype="application/json")
 
 
 def _is_lan_accessible() -> bool:
@@ -153,6 +233,19 @@ def api_status() -> Any:
     )
 
 
+@link_bp.get("/local-endpoints")
+def local_endpoints() -> Any:
+    if not _is_loopback_request():
+        abort(404)
+    response = LocalEndpointsResponse(
+        v=1,
+        endpoints=tuple(_current_local_endpoints()),
+        ttl_s=3600,
+        generated_at=_utc_now_iso(),
+    )
+    return jsonify(response_to_dict(response))
+
+
 # ---------------------------------------------------------------------------
 # pair ceremony
 # ---------------------------------------------------------------------------
@@ -160,34 +253,78 @@ def api_status() -> Any:
 
 @link_bp.route("/pair-start", methods=["POST"])
 def pair_start() -> Any:
-    """Generate a single-use 5-minute nonce and return QR-ready payload."""
+    """Generate a single-use 5-minute nonce and return link-ready payload."""
     payload = request.get_json(silent=True) or {}
-    device_label = str(payload.get("device_label") or "").strip() or "unnamed device"
+    device_label = (
+        str(payload.get("device_label") or "").strip() or _default_device_label()
+    )
 
     nonce = generate_nonce()
-    _nonces().add(nonce, device_label)
+    manual_code_hyphenated = generate_manual_code()
+    _nonces().add(
+        nonce,
+        device_label,
+        manual_code=normalize_manual_code(manual_code_hyphenated),
+    )
 
     ca_fp = _ca_fingerprint()
-    pair_url = f"{_lan_pair_base_url()}/app/link/pair?token={nonce}"
-    # The QR payload is a stable shape the mobile can parse — keep it
-    # versioned so future mobiles stay backward-compatible.
-    qr_payload = {
-        "v": 1,
-        "kind": "spl-pair",
-        "pair_url": pair_url,
-        "ca_fingerprint": ca_fp,
-        "expires_in": 300,
-        "device_label": device_label,
+    lan_url = _resolve_host_port()
+    response = PairStartResponse(
+        nonce=nonce,
+        pair_link=_build_pair_link(lan_url, nonce, ca_fp, device_label),
+        manual_code=manual_code_hyphenated,
+        expires_in=300,
+        device_label=device_label,
+        lan_url=lan_url,
+        ca_fingerprint=ca_fp,
+    )
+    return _jsonify_preserving_order(asdict(response))
+
+
+def _complete_pairing(
+    consumed: Nonce,
+    csr_pem: str,
+    device_label: str,
+) -> tuple[dict[str, Any], str, str]:
+    ca = load_or_generate_ca(ca_dir())
+    client_cert_pem, fingerprint = sign_csr(ca, csr_pem, device_label)
+
+    state = LinkState.load_or_create()
+    paired_at = _utc_now_iso()
+    _authorized().add(
+        fingerprint=fingerprint,
+        device_label=device_label,
+        instance_id=state.instance_id,
+        paired_at=paired_at,
+    )
+    attestation = mint_attestation(ca, state.instance_id, fingerprint)
+    ca_chain_pem = ca.cert.public_bytes(serialization.Encoding.PEM).decode("ascii")
+    response: dict[str, Any] = {
+        "client_cert": client_cert_pem,
+        "ca_chain": [ca_chain_pem],
+        "instance_id": state.instance_id,
+        "home_label": state.home_label,
+        "home_attestation": attestation,
+        "fingerprint": fingerprint,
     }
-    return jsonify(
-        {
-            "nonce": nonce,
-            "pair_url": pair_url,
-            "qr_payload": qr_payload,
-            "ca_fingerprint": ca_fp,
-            "expires_in": 300,
-            "device_label": device_label,
-        }
+    endpoints = _current_local_endpoints()
+    if endpoints:
+        response["local_endpoints"] = [endpoint_to_dict(ep) for ep in endpoints]
+    return response, fingerprint, paired_at
+
+
+def _emit_pair_complete(
+    device_label: str,
+    fingerprint: str,
+    paired_at: str,
+) -> None:
+    emit(
+        "link",
+        "pair_complete",
+        device_label=device_label,
+        fingerprint=fingerprint,
+        fingerprint_short=fingerprint.replace("sha256:", "")[:16],
+        paired_at=paired_at,
     )
 
 
@@ -216,44 +353,73 @@ def pair() -> Any:
     body = request.get_json(silent=True) or {}
     nonce_value = request.args.get("token") or body.get("nonce")
     csr_pem = body.get("csr")
-    device_label = str(body.get("device_label") or "").strip() or "unnamed device"
+    device_label = str(body.get("device_label") or "").strip()
 
     if not isinstance(nonce_value, str) or not isinstance(csr_pem, str):
-        return jsonify({"error": "missing fields (nonce + csr required)"}), 400
+        return error_response(
+            MISSING_REQUIRED_FIELD,
+            detail="missing fields (nonce + csr required)",
+        )
 
     consumed = _nonces().consume(nonce_value)
     if consumed is None:
-        return jsonify({"error": "nonce expired or used"}), 410
+        return error_response(
+            OPERATION_NO_LONGER_AVAILABLE,
+            detail="nonce expired or used",
+        )
 
-    effective_label = device_label or (consumed.device_label or "unnamed device")
+    effective_label = device_label or (consumed.device_label or _default_device_label())
 
-    ca = load_or_generate_ca(ca_dir())
     try:
-        client_cert_pem, fingerprint = sign_csr(ca, csr_pem, effective_label)
-    except Exception as exc:
+        response, fingerprint, paired_at = _complete_pairing(
+            consumed,
+            csr_pem,
+            effective_label,
+        )
+    except ValueError as exc:
         logger.info("pair: bad csr: %s", exc)
-        return jsonify({"error": f"bad csr: {exc}"}), 400
+        return error_response(PAIRING_KEY_INVALID, detail=f"bad csr: {exc}")
+    _emit_pair_complete(effective_label, fingerprint, paired_at)
+    return jsonify(response)
 
-    state = LinkState.load_or_create()
-    authorized = _authorized()
-    authorized.add(
-        fingerprint=fingerprint,
-        device_label=effective_label,
-        instance_id=state.instance_id,
-        paired_at=_utc_now_iso(),
-    )
-    attestation = mint_attestation(ca, state.instance_id, fingerprint)
-    ca_chain_pem = ca.cert.public_bytes(serialization.Encoding.PEM).decode("ascii")
-    return jsonify(
-        {
-            "client_cert": client_cert_pem,
-            "ca_chain": [ca_chain_pem],
-            "instance_id": state.instance_id,
-            "home_label": state.home_label,
-            "home_attestation": attestation,
-            "fingerprint": fingerprint,
-        }
-    )
+
+@link_bp.route("/by-code", methods=["POST"])
+def by_code() -> Any:
+    """Mobile pair endpoint — accepts CSR + manual code."""
+    body = request.get_json(silent=True) or {}
+    code = body.get("code")
+    csr_pem = body.get("csr")
+    device_label = str(body.get("device_label") or "").strip()
+
+    if not isinstance(code, str) or not isinstance(csr_pem, str):
+        return error_response(
+            MISSING_REQUIRED_FIELD,
+            detail="missing fields (code + csr required)",
+        )
+
+    canonical_code = normalize_manual_code(code)
+    if not MANUAL_CODE_RE.fullmatch(canonical_code):
+        return error_response(PAIRING_REQUEST_INVALID, detail="bad code")
+
+    consumed = _nonces().consume_by_code(canonical_code)
+    if consumed is None:
+        return error_response(
+            OPERATION_NO_LONGER_AVAILABLE,
+            detail="nonce expired or used",
+        )
+
+    effective_label = device_label or consumed.device_label or _default_device_label()
+    try:
+        response, fingerprint, paired_at = _complete_pairing(
+            consumed,
+            csr_pem,
+            effective_label,
+        )
+    except ValueError as exc:
+        logger.info("by-code: bad csr: %s", exc)
+        return error_response(PAIRING_KEY_INVALID, detail=f"bad csr: {exc}")
+    _emit_pair_complete(effective_label, fingerprint, paired_at)
+    return jsonify(response)
 
 
 @link_bp.route("/unpair", methods=["POST"])
@@ -267,15 +433,21 @@ def unpair() -> Any:
     device_label = body.get("device_label")
     if not isinstance(fingerprint, str):
         if not isinstance(device_label, str):
-            return jsonify({"error": "fingerprint or device_label required"}), 400
+            return error_response(
+                MISSING_REQUIRED_FIELD,
+                detail="fingerprint or device_label required",
+            )
         entry = _authorized().find_by_label(device_label)
         if entry is None:
-            return jsonify({"error": "no paired device with that label"}), 404
+            return error_response(
+                PAIRED_DEVICE_NOT_FOUND,
+                detail="no paired device with that label",
+            )
         fingerprint = entry.fingerprint
 
     removed = _authorized().remove(fingerprint)
     if not removed:
-        return jsonify({"error": "fingerprint not paired"}), 404
+        return error_response(PAIRED_DEVICE_NOT_FOUND, detail="fingerprint not paired")
     return jsonify({"unpaired": fingerprint})
 
 
@@ -298,4 +470,4 @@ def _entry_to_json(entry: ClientEntry) -> dict[str, Any]:
 @link_bp.app_context_processor
 def _inject_link_helpers() -> dict[str, Any]:
     """Make `url_for` to link endpoints easy from templates."""
-    return {}
+    return {"link_copy": link_copy}

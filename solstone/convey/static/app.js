@@ -1522,13 +1522,53 @@
 
 /**
  * Shared loading / empty / error surface-state renderer.
- * Contract: text fields are escaped; icon and action slots accept raw HTML.
- * Examples: SurfaceState.loading({ text: 'Loading…' }), SurfaceState.empty({ icon: '🔍', heading: 'No results' }), SurfaceState.error({ heading: 'Request failed', action: '<button>Retry</button>' }).
+ * Examples: SurfaceState.loading({ text: 'Loading…' }), SurfaceState.empty({ icon: '🔍', heading: 'No results' }), SurfaceState.error({ heading: 'Request failed', retry: true }).
  * Load order: call only after DOMContentLoaded or from later event/callback code.
  */
+function copyToClipboard(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text);
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand('copy');
+  document.body.removeChild(textarea);
+  return Promise.resolve();
+}
+
+window.convey = window.convey || {};
+window.convey.copyToClipboard = copyToClipboard;
+
+const REPORT_KEY_CAP = 100;
+const reportContexts = new Map();
+let reportKeyCounter = 0;
+
+function reportingEnabled() {
+  return !(window.CONVEY_SETTINGS && window.CONVEY_SETTINGS.reportingEnabled === false);
+}
+
+function captureReportContext({ heading, apiError, customDetail }) {
+  const key = `rk-${reportKeyCounter}`;
+  reportKeyCounter += 1;
+  if (reportContexts.size >= REPORT_KEY_CAP) {
+    reportContexts.delete(reportContexts.keys().next().value);
+  }
+  reportContexts.set(key, {
+    heading,
+    apiError: apiError || null,
+    customDetail: customDetail || ''
+  });
+  return key;
+}
+
 window.SurfaceState = (() => {
   const HEADING_LEVELS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']);
   const ERROR_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 21 19H3z"></path><path d="M12 9v4"></path><path d="M12 17h.01"></path></svg>';
+  const STRIP_LAST_KNOWN = /\s*[—-]\s*showing last known state\.?\s*$/i;
 
   function escapeHtml(value) {
     return String(value ?? '')
@@ -1542,6 +1582,128 @@ window.SurfaceState = (() => {
   function normalizeHeadingLevel(level) {
     return HEADING_LEVELS.has(level) ? level : 'h2';
   }
+
+  function hasValue(value) {
+    return value !== undefined && value !== null && value !== '';
+  }
+
+  function formatDetailTimestamp(timestamp) {
+    if (!hasValue(timestamp)) {
+      return '';
+    }
+    const date = new Date(timestamp);
+    if (Number.isNaN(date.getTime())) {
+      return '';
+    }
+    return date.toLocaleString();
+  }
+
+  function renderErrorActions({ retry, retryLabel, secondary, reportable, heading, apiError }) {
+    const parts = [];
+    if (retry) {
+      parts.push(`<button type="button" class="surface-state-retry">${escapeHtml(retryLabel)}</button>`);
+    }
+    if (secondary && hasValue(secondary.label)) {
+      if (hasValue(secondary.href)) {
+        parts.push(`<a class="surface-state-secondary" href="${escapeHtml(secondary.href)}">${escapeHtml(secondary.label)}</a>`);
+      } else {
+        parts.push(`<button type="button" class="surface-state-secondary">${escapeHtml(secondary.label)}</button>`);
+      }
+    }
+    if (reportable && reportingEnabled()) {
+      const reportKey = captureReportContext({ heading, apiError, customDetail: '' });
+      const label = window.CONVEY_COPY.REPORT_BUTTON_LABEL;
+      parts.push(`<button type="button" class="surface-state-report" data-report-key="${escapeHtml(reportKey)}">${escapeHtml(label)}</button>`);
+    }
+    return parts.length ? `<div class="surface-state-action-row">${parts.join('')}</div>` : '';
+  }
+
+  function renderErrorDetail(detail, serverMessage) {
+    if (!detail) {
+      return '';
+    }
+
+    const lines = [];
+    if (hasValue(detail.status) && hasValue(detail.statusText) && hasValue(detail.url)) {
+      lines.push(`<div>HTTP ${escapeHtml(detail.status)} ${escapeHtml(detail.statusText)} · ${escapeHtml(detail.url)}</div>`);
+    }
+
+    const reason = hasValue(detail.rawDetail)
+      ? detail.rawDetail
+      : (hasValue(detail.serverMessage) ? detail.serverMessage : serverMessage);
+    if (hasValue(reason)) {
+      lines.push(`<div>Server reason: ${escapeHtml(reason)}</div>`);
+    }
+
+    const timestamp = formatDetailTimestamp(detail.timestamp);
+    if (timestamp) {
+      lines.push(`<div>Time: ${escapeHtml(timestamp)}</div>`);
+    }
+
+    if (hasValue(detail.correlationId)) {
+      const correlationId = String(detail.correlationId);
+      lines.push(
+        `<div>Reference: <button type="button" class="surface-state-copy-reference" data-copy-value="${escapeHtml(correlationId)}">`
+        + `${escapeHtml(correlationId)} <span class="surface-state-copy-affordance">(click to copy)</span>`
+        + `</button></div>`
+      );
+    }
+
+    if (hasValue(detail.reasonCode)) {
+      lines.push(`<div>Reason code: ${escapeHtml(detail.reasonCode)}</div>`);
+    }
+
+    if (!lines.length) {
+      return '';
+    }
+    return `<details class="surface-state-detail"><summary>Show details</summary>${lines.join('')}</details>`;
+  }
+
+  document.addEventListener('click', event => {
+    const target = event.target instanceof Element ? event.target : null;
+    const trigger = target ? target.closest('.surface-state-copy-reference') : null;
+    if (!trigger) {
+      return;
+    }
+    const value = trigger.getAttribute('data-copy-value') || '';
+    if (!value) {
+      return;
+    }
+    copyToClipboard(value).then(() => {
+      const affordance = trigger.querySelector('.surface-state-copy-affordance');
+      if (affordance) {
+        affordance.textContent = '(copied)';
+      }
+    }).catch(error => {
+      if (window.logError) {
+        window.logError(error, { context: 'surface-state copy reference failed' });
+      }
+    });
+  });
+
+  document.addEventListener('click', event => {
+    const target = event.target instanceof Element ? event.target : null;
+    const trigger = target ? target.closest('.surface-state-report') : null;
+    if (!trigger) {
+      return;
+    }
+    const key = trigger.getAttribute('data-report-key') || '';
+    const context = reportContexts.get(key) || {
+      heading: window.CONVEY_COPY.REPORT_DEFAULT_SUBJECT,
+      apiError: null,
+      customDetail: ''
+    };
+    if (window.convey && typeof window.convey.reportError === 'function') {
+      window.convey.reportError({
+        source: 'auto',
+        heading: context.heading,
+        apiError: context.apiError,
+        customDetail: context.customDetail
+      });
+    } else if (window.logError) {
+      window.logError(new Error('report-error handler unavailable'), { context: 'surface-state report failed' });
+    }
+  });
 
   function render(kind, {
     icon = '',
@@ -1562,6 +1724,16 @@ window.SurfaceState = (() => {
       + `</div>`;
   }
 
+  function stripLastKnownFromHeading(errorHtml) {
+    const template = document.createElement('template');
+    template.innerHTML = errorHtml;
+    const headingEl = template.content.querySelector('.surface-state-heading');
+    if (headingEl) {
+      headingEl.textContent = headingEl.textContent.replace(STRIP_LAST_KNOWN, '');
+    }
+    return template.innerHTML;
+  }
+
   return {
     loading({ text = '' } = {}) {
       return `<div class="surface-state surface-state--loading" role="status" aria-busy="true">`
@@ -1574,30 +1746,25 @@ window.SurfaceState = (() => {
       return render('empty', options);
     },
 
-    error(options = {}) {
-      return render('error', { ...options, role: 'alert' });
-    },
-
-    /**
-     * Render a standard error card HTML string for first-paint or refresh failures.
-     * All user-visible text is escaped, and no action slot is provided by design.
-     *
-     * @param {object} options
-     * @param {string} [options.heading="Couldn't load this section"]
-     * @param {string} [options.desc="Reload the page to try again."]
-     * @param {string} [options.serverMessage]
-     * @returns {string}
-     */
-    errorCard({
+    error({
       heading = 'Couldn\'t load this section',
-      desc = 'Reload the page to try again.',
-      serverMessage = ''
+      desc = window.CONVEY_COPY?.RELOAD_HINT || 'reload to try again.',
+      serverMessage = '',
+      retry = false,
+      retryLabel = 'Try again',
+      secondary = null,
+      detail = null,
+      reportable = true,
+      headingLevel = 'h2'
     } = {}) {
+      const tag = normalizeHeadingLevel(headingLevel);
       return `<div class="surface-state surface-state--error" role="alert">`
         + `<div class="surface-state-icon" aria-hidden="true">${ERROR_ICON}</div>`
-        + `<h2 class="surface-state-heading">${escapeHtml(heading)}</h2>`
+        + `<${tag} class="surface-state-heading">${escapeHtml(heading)}</${tag}>`
         + `<p class="surface-state-desc">${escapeHtml(desc)}</p>`
         + `${serverMessage ? `<p class="surface-state-server-message">${escapeHtml(serverMessage)}</p>` : ''}`
+        + renderErrorActions({ retry, retryLabel, secondary, reportable, heading, apiError: detail })
+        + renderErrorDetail(detail, serverMessage)
         + `</div>`;
     },
 
@@ -1605,19 +1772,23 @@ window.SurfaceState = (() => {
      * Replace an initial loading scaffold or append a singleton refresh error beside it.
      * Prevents the apps/entities anti-pattern where an `.error-message` is stuffed inside
      * the loading scaffold (`apps/entities/workspace.html:2671-2674`).
+     * On first-paint, strips a trailing `— showing last known state` tail from the
+     * rendered heading so callers can pass the same heading on first-paint and refresh
+     * paths without leaking refresh-only language to first-paint owners.
      *
      * @param {string} containerId
-     * @param {string} errorCardHtml
+     * @param {string} errorHtml
      * @returns {HTMLElement|null}
      */
-    replaceLoading(containerId, errorCardHtml) {
+    replaceLoading(containerId, errorHtml) {
       const container = document.getElementById(containerId);
       if (!container) {
         return null;
       }
 
-      if (container.querySelector('.surface-state--loading')) {
-        container.innerHTML = errorCardHtml;
+      const isFirstPaint = container.querySelector('.surface-state--loading');
+      if (isFirstPaint) {
+        container.innerHTML = stripLastKnownFromHeading(errorHtml);
         return container;
       }
 
@@ -1636,7 +1807,7 @@ window.SurfaceState = (() => {
 
       const wrapper = document.createElement('div');
       wrapper.className = 'surface-state-refresh-error';
-      wrapper.innerHTML = errorCardHtml;
+      wrapper.innerHTML = errorHtml;
       container.insertAdjacentElement('afterend', wrapper);
       return container;
     }
@@ -1756,15 +1927,32 @@ window.AppServices = {
 
         if (health.consecutiveFailures >= failuresBeforeFailing && !health.failing) {
           health.failing = true;
-          getMenuItem()?.classList.add('menu-item-bg-failing');
-          this.notifications.show({
-            app: 'system',
-            title: `${appName} background task failing`,
-            message,
-            dismissible: true,
-            autoDismiss: false
-          });
-        }
+	          getMenuItem()?.classList.add('menu-item-bg-failing');
+	          this.notifications.show({
+	            app: 'system',
+	            title: `${String(appName).toLowerCase()} background task`,
+	            message,
+	            dismissible: true,
+	            autoDismiss: false,
+	            buttons: [
+	              {
+	                label: 'Try now',
+	                onClick: () => runNow(),
+	                dismiss: false
+	              },
+	              {
+	                label: 'Disable',
+	                onClick: () => {
+	                  health.disabled = true;
+	                  if (health.intervalId) {
+	                    window.clearInterval(health.intervalId);
+	                    health.intervalId = null;
+	                  }
+	                }
+	              }
+	            ]
+	          });
+	        }
 
         throw error;
       }

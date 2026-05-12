@@ -80,8 +80,13 @@ def patch_subprocess(
     doctor_stdout: str | None = None,
     doctor_returncode: int = 0,
     command_returncode: int = 0,
+    command_stdout: str = "",
+    command_stderr: str = "",
     doctor_timeout: bool = False,
     popen_timeout_command: list[str] | None = None,
+    doctor_jsonl_lines: list[str | dict[str, Any]] | None = None,
+    doctor_jsonl_returncode: int = 0,
+    doctor_jsonl_stderr: str = "",
 ) -> list[list[str]]:
     calls: list[list[str]] = []
 
@@ -98,25 +103,54 @@ def patch_subprocess(
                 stdout=doctor_stdout if doctor_stdout is not None else doctor_payload(),
                 stderr="doctor failed\n" if doctor_returncode else "",
             )
-        return subprocess.CompletedProcess(command, command_returncode)
+        return subprocess.CompletedProcess(
+            command,
+            command_returncode,
+            stdout=command_stdout,
+            stderr=command_stderr,
+        )
 
     class FakePopen:
         def __init__(self, command: list[str], **kwargs: object) -> None:
             del kwargs
             self.command = command
             self.terminated = False
+            self.returncode: int | None = None
+            self._returncode = command_returncode
+            self.stdout = None
+            self.stderr = None
+            if (
+                doctor_jsonl_lines is not None
+                and "doctor" in command
+                and "--jsonl" in command
+            ):
+                serialized = [
+                    item if isinstance(item, str) else json.dumps(item)
+                    for item in doctor_jsonl_lines
+                ]
+                self.stdout = iter(
+                    line if line.endswith("\n") else f"{line}\n" for line in serialized
+                )
+                self.stderr = iter(
+                    line if line.endswith("\n") else f"{line}\n"
+                    for line in doctor_jsonl_stderr.splitlines()
+                )
+                self._returncode = doctor_jsonl_returncode
             calls.append(command)
 
         def wait(self, timeout: float | None = None) -> int:
             if self.command == popen_timeout_command and not self.terminated:
                 raise subprocess.TimeoutExpired(self.command, timeout)
-            return command_returncode
+            self.returncode = self._returncode
+            return self._returncode
 
         def terminate(self) -> None:
             self.terminated = True
+            self.returncode = -15
 
         def kill(self) -> None:
             self.terminated = True
+            self.returncode = -9
 
     monkeypatch.setattr(setup.subprocess, "run", fake_run)
     monkeypatch.setattr(setup.subprocess, "Popen", FakePopen)
@@ -289,7 +323,7 @@ def test_interactive_happy_path_default_journal(
     rc = setup.main([])
 
     assert rc == 0
-    journal = home / "Documents" / "journal"
+    journal = home / "journal"
     assert (home / ".config" / "solstone" / "config.toml").read_text(
         encoding="utf-8"
     ) == f'journal = "{journal}"\n'
@@ -302,6 +336,42 @@ def test_interactive_happy_path_default_journal(
     assert_command(calls, 3, expected_wrapper_command())
     assert_command(calls, 4, expected_service_install_command())
     assert len(calls) == 5
+
+
+def test_resolve_journal_path_precedence_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = patch_home(monkeypatch, tmp_path)
+    patch_source_checkout(monkeypatch, tmp_path)
+    monkeypatch.delenv("SOLSTONE_JOURNAL", raising=False)
+    parser = setup.build_parser()
+
+    cli_journal = tmp_path / "cli-journal"
+    path, source = setup.resolve_journal_path(
+        parser.parse_args(["--journal", str(cli_journal)])
+    )
+    assert path == cli_journal
+    assert source == "cli"
+
+    env_journal = tmp_path / "env-journal"
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(env_journal))
+    path, source = setup.resolve_journal_path(parser.parse_args([]))
+    assert path == env_journal
+    assert source == "env"
+
+    monkeypatch.delenv("SOLSTONE_JOURNAL", raising=False)
+    config_journal = tmp_path / "config-journal"
+    write_user_config(journal=str(config_journal))
+    path, source = setup.resolve_journal_path(parser.parse_args([]))
+    assert path == config_journal
+    assert source == "config"
+
+    write_user_config(journal="")
+    monkeypatch.delenv("SOLSTONE_JOURNAL", raising=False)
+    path, source = setup.resolve_journal_path(parser.parse_args([]))
+    assert path == home / "journal"
+    assert source == "default"
 
 
 def test_interactive_happy_path_journal_override(
@@ -362,9 +432,7 @@ def test_non_interactive_dead_end_on_existing_journal(
     monkeypatch.delenv("SOLSTONE_JOURNAL", raising=False)
     calls = patch_subprocess(monkeypatch)
     patch_service_health(monkeypatch)
-    journal = (
-        tmp_path / "journal" if use_journal_flag else home / "Documents" / "journal"
-    )
+    journal = tmp_path / "journal" if use_journal_flag else home / "journal"
     (journal / "config").mkdir(parents=True)
     argv = ["--yes"]
     if use_journal_flag:
@@ -765,7 +833,7 @@ def test_interactive_port_in_use_prompts_for_choice(
     rc = setup.main([])
 
     assert rc == 0
-    journal = home / "Documents" / "journal"
+    journal = home / "journal"
     assert read_manifest(journal)["args_resolved"]["port"] == {
         "value": 8080,
         "source": "prompt",
@@ -1044,14 +1112,14 @@ def test_resumption_wedged_service_restarts(
     assert service_step["reason"] == "resumed_after_restart"
 
 
-def test_resumption_wedged_service_falls_through_when_restart_fails(
+def test_resumption_wedged_service_falls_through_when_service_up_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     patch_home(monkeypatch, tmp_path)
     patch_source_checkout(monkeypatch, tmp_path)
     monkeypatch.delenv("SOLSTONE_JOURNAL", raising=False)
-    monkeypatch.setattr(service, "_up", lambda port=5015: 0)
+    monkeypatch.setattr(service, "_up", lambda port=5015: 7)
     journal = tmp_path / "journal"
     write_clean_prior_manifest(journal)
     calls = patch_subprocess(monkeypatch)
@@ -1063,6 +1131,32 @@ def test_resumption_wedged_service_falls_through_when_restart_fails(
     assert_command(calls, 0, expected_service_restart_command())
     assert_command(calls, 1, expected_service_install_command())
     assert len(calls) == 2
+
+
+def test_step_service_failure_message(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    patch_home(monkeypatch, tmp_path)
+    patch_source_checkout(monkeypatch, tmp_path)
+    monkeypatch.delenv("SOLSTONE_JOURNAL", raising=False)
+    argv = ["--yes", "--journal", str(tmp_path / "journal")]
+    ctx = setup.resolve_context(setup.build_parser().parse_args(argv), argv)
+    monkeypatch.setattr(setup, "run_inherited", lambda command: 0)
+    artifact = setup.service_artifact_path()
+    expected_paths = [setup.absolute_string(artifact)] if artifact is not None else []
+
+    monkeypatch.setattr(service, "_up", lambda port=5015: 7)
+    result = setup.step_service(ctx, 6)
+
+    assert result.status == "failed"
+    assert result.paths == expected_paths
+    assert result.error == {
+        "code": "service_up_failed",
+        "message": "service up failed (exit 7)",
+        "details": "",
+        "exit_code": 1,
+    }
 
 
 def test_force_skips_resumption(

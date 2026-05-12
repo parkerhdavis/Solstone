@@ -541,8 +541,8 @@ def _run_transcriber_mode(args: argparse.Namespace) -> int:
 
     # Lazy imports — observe.transcribe pulls heavy deps that aren't
     # needed for the LLM benchmark modes.
-    from observe.transcribe import transcribe as stt_transcribe
-    from observe.utils import SAMPLE_RATE, load_audio
+    from solstone.observe.transcribe import transcribe as stt_transcribe
+    from solstone.observe.utils import SAMPLE_RATE, load_audio
     from solstone.think.utils import get_config
 
     audio = load_audio(audio_path, sample_rate=SAMPLE_RATE)

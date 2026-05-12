@@ -147,6 +147,9 @@ def check_alias(curdir: Path) -> tuple[AliasState, Path | None]:
             return AliasState.DANGLING, target
         if target == expected_target(curdir).resolve():
             return AliasState.OWNED, target
+        packaged_target = (Path(sys.executable).parent / "sol").resolve()
+        if target == packaged_target:
+            return AliasState.OWNED, target
         return AliasState.CROSS_REPO, target
 
     try:
@@ -167,11 +170,12 @@ def check_alias(curdir: Path) -> tuple[AliasState, Path | None]:
 def _current_journal_for_alias() -> str:
     """Return the journal path a wrapper install would embed right now."""
     from solstone.think import utils as think_utils
+    from solstone.think.user_config import default_journal
 
     try:
         path, _ = think_utils.get_journal_info()
     except getattr(think_utils, "SolstoneNotConfigured", RuntimeError):
-        path = str(Path.home() / "Documents" / "journal")
+        path = default_journal()
     return path
 
 

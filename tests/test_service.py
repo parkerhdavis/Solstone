@@ -428,9 +428,11 @@ class TestRestart:
         assert "not installed" in capsys.readouterr().err
 
     def test_linux_happy_path_narrates(self, capsys, monkeypatch):
-        """_restart prints stopping-old + new-process-started narration on the Linux happy path."""
+        """_restart prints stopping-old + restarted narration on the Linux happy path."""
         monkeypatch.setattr(service, "_platform", lambda: "linux")
         monkeypatch.setattr(service, "service_is_installed", lambda: True)
+        monkeypatch.setattr(service, "clear_ready", MagicMock())
+        monkeypatch.setattr(service, "wait_ready", MagicMock(return_value={}))
         monkeypatch.setattr(
             "subprocess.run",
             lambda *a, **kw: subprocess.CompletedProcess(
@@ -441,38 +443,111 @@ class TestRestart:
         assert result == 0
         out = capsys.readouterr().out
         assert "Stopping old supervisor" in out
-        assert "New supervisor process started" in out
+        assert "Service restarted." in out
+
+    def test_restart_darwin_waits_for_readiness(self, monkeypatch):
+        monkeypatch.setattr(service, "_platform", lambda: "darwin")
+        monkeypatch.setattr(service, "service_is_installed", lambda: True)
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda *a, **kw: subprocess.CompletedProcess(
+                args=a, returncode=0, stdout="", stderr=""
+            ),
+        )
+        clear_ready = MagicMock()
+        wait_ready = MagicMock(return_value={"pid": 123})
+        monkeypatch.setattr(service, "clear_ready", clear_ready)
+        monkeypatch.setattr(service, "wait_ready", wait_ready)
+
+        assert service._restart() == 0
+        clear_ready.assert_called_once_with()
+        wait_ready.assert_called_once_with(timeout=service.READY_TIMEOUT_SECONDS)
+
+    def test_restart_linux_waits_for_readiness(self, monkeypatch):
+        monkeypatch.setattr(service, "_platform", lambda: "linux")
+        monkeypatch.setattr(service, "service_is_installed", lambda: True)
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda *a, **kw: subprocess.CompletedProcess(
+                args=a, returncode=0, stdout="", stderr=""
+            ),
+        )
+        clear_ready = MagicMock()
+        wait_ready = MagicMock(return_value={"pid": 123})
+        monkeypatch.setattr(service, "clear_ready", clear_ready)
+        monkeypatch.setattr(service, "wait_ready", wait_ready)
+
+        assert service._restart() == 0
+        clear_ready.assert_called_once_with()
+        wait_ready.assert_called_once_with(timeout=service.READY_TIMEOUT_SECONDS)
 
 
 class TestUp:
-    def test_up_darwin_polls_health_until_ready(self, monkeypatch):
+    def test_up_waits_for_readiness_after_start(self, monkeypatch):
         monkeypatch.setattr(service, "_platform", lambda: "darwin")
         monkeypatch.setattr(service, "service_is_installed", lambda: True)
-        monkeypatch.setattr(service, "service_is_running", lambda: True)
-        health_check = MagicMock(side_effect=[1, 1, 0, 0])
-        sleep = MagicMock()
-        monkeypatch.setattr("solstone.think.health_cli.health_check", health_check)
-        monkeypatch.setattr(service.time, "sleep", sleep)
+        monkeypatch.setattr(service, "service_is_running", lambda: False)
+        start = MagicMock(return_value=0)
+        clear_ready = MagicMock()
+        wait_ready = MagicMock(return_value={"pid": 123})
+        status = MagicMock(return_value=0)
+        monkeypatch.setattr(service, "_start", start)
+        monkeypatch.setattr(service, "clear_ready", clear_ready)
+        monkeypatch.setattr(service, "wait_ready", wait_ready)
+        monkeypatch.setattr(service, "_status", status)
 
         assert service._up(port=5015) == 0
-        assert health_check.call_count == 4
-        assert sleep.call_count == 2
+        start.assert_called_once_with()
+        clear_ready.assert_called_once_with()
+        wait_ready.assert_called_once_with(timeout=service.READY_TIMEOUT_SECONDS)
+        status.assert_called_once_with()
 
-    def test_up_linux_does_not_poll_health(self, monkeypatch):
+    def test_up_already_running_waits_for_readiness(self, monkeypatch):
         monkeypatch.setattr(service, "_platform", lambda: "linux")
         monkeypatch.setattr(service, "service_is_installed", lambda: True)
         monkeypatch.setattr(service, "service_is_running", lambda: True)
-        health_check = MagicMock(return_value=0)
-        sleep = MagicMock()
-        monkeypatch.setattr("solstone.think.health_cli.health_check", health_check)
-        monkeypatch.setattr(service.time, "sleep", sleep)
+        clear_ready = MagicMock()
+        wait_ready = MagicMock(return_value={"pid": 123})
+        status = MagicMock(return_value=0)
+        monkeypatch.setattr(service, "clear_ready", clear_ready)
+        monkeypatch.setattr(service, "wait_ready", wait_ready)
+        monkeypatch.setattr(service, "_status", status)
 
         assert service._up(port=5015) == 0
-        health_check.assert_called_once_with()
-        sleep.assert_not_called()
+        clear_ready.assert_not_called()
+        wait_ready.assert_called_once_with(timeout=service.READY_TIMEOUT_SECONDS)
+        status.assert_called_once_with()
 
 
 class TestInstall:
+    def test_darwin_clears_readiness_before_bootstrap(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(service, "_platform", lambda: "darwin")
+        monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+        monkeypatch.setattr(
+            service,
+            "_plist_path",
+            lambda: tmp_path / "LaunchAgents" / "org.solpbc.solstone.plist",
+        )
+        monkeypatch.setattr(service, "remove_stale_plists", MagicMock())
+        calls = []
+
+        def clear_ready():
+            calls.append("clear_ready")
+
+        def run(command, **kwargs):
+            del kwargs
+            if command[:2] == ["launchctl", "bootstrap"]:
+                calls.append("bootstrap")
+            return subprocess.CompletedProcess(
+                args=command, returncode=0, stdout="", stderr=""
+            )
+
+        monkeypatch.setattr(service, "clear_ready", clear_ready)
+        monkeypatch.setattr("subprocess.run", run)
+
+        assert service._install() == 0
+        assert calls.index("clear_ready") < calls.index("bootstrap")
+
     def test_linux_idempotent(self, monkeypatch, tmp_path, capsys):
         monkeypatch.setattr(sys, "platform", "linux")
         monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))

@@ -7,24 +7,34 @@ from __future__ import annotations
 
 import json
 import os
+import queue
+import time
 from datetime import date
 from pathlib import Path
 from typing import Any
 
 from flask import (
     Blueprint,
+    Response,
+    g,
     jsonify,
     redirect,
     render_template,
     request,
     send_from_directory,
     session,
+    stream_with_context,
     url_for,
 )
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from solstone.think.cluster import cluster_segments
 from solstone.think.utils import day_dirs, get_config, get_journal, get_project_root
+
+from . import bridge as convey_bridge
+from .reasons import INVALID_CONFIG_VALUE, PL_REVOKED
+from .secure_listener import get_authorized_clients
+from .utils import error_response, error_response_with_reason
 
 
 def _get_password_hash() -> str:
@@ -113,6 +123,17 @@ def require_login() -> Any:
     }:
         return None
 
+    identity = getattr(g, "identity", None)
+    if identity is not None and identity.mode in {"pl-direct", "pl-via-spl"}:
+        if identity.fingerprint and get_authorized_clients().is_authorized(
+            identity.fingerprint
+        ):
+            return None
+        return error_response_with_reason(
+            PL_REVOKED,
+            detail="paired device revoked",
+        )
+
     # Session cookie
     if session.get("logged_in"):
         return None
@@ -142,6 +163,55 @@ def require_login() -> Any:
     if not setup_complete:
         return redirect(url_for("root.init"))
     return redirect(url_for("root.login"))
+
+
+@bp.route("/sse/events", methods=["GET"], endpoint="callosum_sse")
+def callosum_sse() -> Response:
+    def generate():
+        handle = convey_bridge.register_sse_subscriber("convey-ui")
+        disconnect_event = request.environ.get("pl.disconnect_event")
+
+        def disconnected() -> bool:
+            is_set = getattr(disconnect_event, "is_set", None)
+            return bool(is_set is not None and is_set())
+
+        try:
+            yield ": heartbeat\n\n"
+            next_heartbeat_at = time.monotonic() + convey_bridge._SSE_HEARTBEAT_SECONDS
+            while True:
+                if disconnected():
+                    break
+                timeout = max(0.0, next_heartbeat_at - time.monotonic())
+                if disconnect_event is not None:
+                    timeout = min(timeout, 0.1)
+                try:
+                    message = handle.queue.get(timeout=timeout)
+                except queue.Empty:
+                    if disconnected():
+                        break
+                    if time.monotonic() < next_heartbeat_at:
+                        continue
+                    if handle.dropped.is_set():
+                        break
+                    yield ": heartbeat\n\n"
+                    next_heartbeat_at = (
+                        time.monotonic() + convey_bridge._SSE_HEARTBEAT_SECONDS
+                    )
+                    continue
+                if handle.dropped.is_set() or disconnected():
+                    break
+                yield f"data: {message}\n\n"
+                next_heartbeat_at = (
+                    time.monotonic() + convey_bridge._SSE_HEARTBEAT_SECONDS
+                )
+        finally:
+            convey_bridge.unregister_sse_subscriber(handle)
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @bp.route("/login", methods=["GET", "POST"])
@@ -228,7 +298,10 @@ def init_finalize() -> Any:
 
     password = data.get("password", "")
     if len(password) < 8:
-        return jsonify({"error": "Password must be at least 8 characters"}), 400
+        return error_response(
+            INVALID_CONFIG_VALUE,
+            detail="Password must be at least 8 characters",
+        )
 
     from solstone.think.utils import now_ms
 
@@ -262,7 +335,10 @@ def init_finalize() -> Any:
     if retention_mode == "days" and (
         not isinstance(retention_days, int) or retention_days < 1
     ):
-        return jsonify({"error": "retention_days must be a positive integer"}), 400
+        return error_response(
+            INVALID_CONFIG_VALUE,
+            detail="retention_days must be a positive integer",
+        )
     config.setdefault("retention", {}).update(
         {
             "raw_media": retention_mode,

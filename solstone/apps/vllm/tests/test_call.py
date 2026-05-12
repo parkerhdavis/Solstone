@@ -11,7 +11,7 @@ from unittest.mock import patch
 import pytest
 from typer.testing import CliRunner
 
-from apps.vllm import call as vllm_call
+from solstone.apps.vllm import call as vllm_call
 
 runner = CliRunner()
 

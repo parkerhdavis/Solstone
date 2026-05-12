@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from convey import create_app
+from solstone.convey import create_app
 
 
 def _settings_client(journal_dir: Path):

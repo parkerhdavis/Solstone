@@ -47,7 +47,10 @@ def test_badge_count_disabled_returns_403(support_client, monkeypatch):
     resp = support_client.get("/app/support/api/badge-count")
 
     assert resp.status_code == 403
-    assert resp.get_json() == {"error": "Support is not enabled"}
+    payload = resp.get_json()
+    assert payload["error"] == "I couldn't use that feature because it isn't enabled."
+    assert payload["reason_code"] == "feature_unavailable"
+    assert payload["detail"] == "Support is not enabled"
 
 
 def test_badge_count_error_returns_500(support_client, monkeypatch):
@@ -61,6 +64,53 @@ def test_badge_count_error_returns_500(support_client, monkeypatch):
 
     assert resp.status_code == 500
     assert "error" in resp.get_json()
+
+
+def test_create_ticket_accepts_error_report_contract(support_client, monkeypatch):
+    captured: list[dict] = []
+
+    def recorder(**kwargs):
+        captured.append(kwargs)
+        return {"id": 123, "subject": kwargs["subject"]}
+
+    monkeypatch.setattr("solstone.apps.support.routes._enabled", lambda: True)
+    monkeypatch.setattr("solstone.apps.support.tools.support_create", recorder)
+
+    resp = support_client.post(
+        "/app/support/api/tickets",
+        json={
+            "subject": "I couldn't refresh vitals",
+            "description": "owner-visible report body",
+            "category": "error_report",
+            "severity": "low",
+            "anonymous": False,
+            "auto_context": True,
+            "user_context": {
+                "url": "/app/home/",
+                "correlation_id": "test-cid",
+            },
+        },
+    )
+
+    assert resp.status_code == 201
+    payload = resp.get_json()
+    assert isinstance(payload, dict)
+    assert payload.get("id") or payload.get("ticket_id")
+    assert captured == [
+        {
+            "subject": "I couldn't refresh vitals",
+            "description": "owner-visible report body",
+            "product": "solstone",
+            "severity": "low",
+            "category": "error_report",
+            "user_context": {
+                "url": "/app/home/",
+                "correlation_id": "test-cid",
+            },
+            "auto_context": True,
+            "anonymous": False,
+        }
+    ]
 
 
 def test_feedback_anonymous_no_email_kwarg(support_client, monkeypatch):

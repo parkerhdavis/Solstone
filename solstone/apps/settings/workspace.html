@@ -5491,10 +5491,11 @@ async function loadTranscribeBackends() {
     if (select) {
       select.disabled = true;
     }
-    setLoadState('transcriptionLoadState', window.SurfaceState.errorCard({
+    setLoadState('transcriptionLoadState', window.SurfaceState.error({
       heading: "Couldn't load transcription settings",
-      desc: 'Reload to try again.',
-      serverMessage: err?.serverMessage
+      desc: window.CONVEY_COPY.RELOAD_HINT,
+      serverMessage: err?.serverMessage,
+      detail: err,
     }));
     window.logError(err, { context: 'settings: loadTranscribeBackends failed' });
     return null;
@@ -5735,10 +5736,11 @@ async function loadObserve() {
     populateObserve(observeData);
   } catch (err) {
     setObserveControlsDisabled(true);
-    setLoadState('observerLoadState', window.SurfaceState.errorCard({
+    setLoadState('observerLoadState', window.SurfaceState.error({
       heading: "Couldn't load observer settings",
-      desc: 'Reload to try again.',
-      serverMessage: err?.serverMessage
+      desc: window.CONVEY_COPY.RELOAD_HINT,
+      serverMessage: err?.serverMessage,
+      detail: err,
     }));
     window.logError(err, { context: 'settings: loadObserve failed' });
   }
@@ -5826,10 +5828,11 @@ async function loadSync() {
     populateSync(data);
   } catch (err) {
     setSyncControlsDisabled(true);
-    setLoadState('syncLoadState', window.SurfaceState.errorCard({
+    setLoadState('syncLoadState', window.SurfaceState.error({
       heading: "Couldn't load sync settings",
-      desc: 'Reload to try again.',
-      serverMessage: err?.serverMessage
+      desc: window.CONVEY_COPY.RELOAD_HINT,
+      serverMessage: err?.serverMessage,
+      detail: err,
     }));
     window.logError(err, { context: 'settings: loadSync failed' });
   }
@@ -6882,10 +6885,11 @@ async function loadStorage() {
     setStorageControlsDisabled(true);
     setLoadState('storageLoadState', storageLoadedOnce
       ? renderRefreshLoadState("Couldn't refresh storage settings — showing last known state.", err?.serverMessage)
-      : window.SurfaceState.errorCard({
+      : window.SurfaceState.error({
         heading: "Couldn't load storage settings",
-        desc: 'Reload to try again.',
-        serverMessage: err?.serverMessage
+        desc: window.CONVEY_COPY.RELOAD_HINT,
+        serverMessage: err?.serverMessage,
+        detail: err,
       }));
     window.logError(err, { context: 'settings: loadStorage failed' });
   }
