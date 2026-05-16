@@ -6,19 +6,17 @@ from __future__ import annotations
 import os
 import shutil
 import sys
-from importlib import resources
 from pathlib import Path
 
 import pytest
 
 from solstone.think import skills_cli
 from solstone.think.skills_cli import (
-    GLOBAL_SKIP_MESSAGE,
-    discover_user_bundles,
     install_project,
     install_user,
     list_project_status,
     list_user_status,
+    resolve_user_skill,
     uninstall_user,
 )
 
@@ -29,9 +27,9 @@ def _write_skill(path: Path, content: bytes | None = None) -> None:
 
 
 def _mini_user_repo(tmp_path: Path, content: bytes | None = None) -> Path:
-    bundle_dir = tmp_path / "bundles"
-    _write_skill(bundle_dir / "solstone", content)
-    return bundle_dir
+    skill_dir = tmp_path / "solstone"
+    _write_skill(skill_dir, content)
+    return skill_dir
 
 
 def _mini_project_repo(tmp_path: Path) -> Path:
@@ -57,64 +55,78 @@ def test_install_user_creates_targets_for_present_agents(tmp_path):
     report = install_user(repo, home, ["all"])
 
     assert report.error_count == 0
-    source = repo / "solstone" / "SKILL.md"
+    source = repo / "SKILL.md"
     assert (
         home / ".claude" / "skills" / "solstone" / "SKILL.md"
     ).read_bytes() == source.read_bytes()
     assert (
         home / ".codex" / "skills" / "solstone" / "SKILL.md"
     ).read_bytes() == source.read_bytes()
+    assert {path.name for path in (home / ".claude" / "skills").iterdir()} == {
+        "solstone"
+    }
+    assert {path.name for path in (home / ".codex" / "skills").iterdir()} == {
+        "solstone"
+    }
 
 
-def test_install_user_skips_codex_when_parent_absent(tmp_path):
+def test_install_user_creates_missing_codex_parent_dir(tmp_path):
     repo = _mini_user_repo(tmp_path)
-    home = _home(tmp_path, ".claude")
+    home = _home(tmp_path)
 
-    report = install_user(repo, home, ["all"])
+    report = install_user(repo, home, ["codex"])
 
     assert report.error_count == 0
-    assert any(
-        row.agent == "claude" and row.action == "installed" for row in report.rows
-    )
-    assert any(row.agent == "codex" and row.action == "skipped" for row in report.rows)
-
-
-def test_install_user_skips_gemini_silently_in_default_all(tmp_path):
-    repo = _mini_user_repo(tmp_path)
-    home = _home(tmp_path, ".claude")
-
-    default_report = install_user(repo, home, ["all"])
-    explicit_report = install_user(repo, home, ["gemini"])
-
-    assert all(row.agent != "gemini" for row in default_report.rows)
-    assert explicit_report.rows == [
+    assert (home / ".codex" / "skills" / "solstone" / "SKILL.md").exists()
+    assert report.rows == [
         skills_cli.ActionRow(
-            "gemini",
-            "",
-            "skipped",
-            home / ".gemini",
-            reason=f"config dir absent at {home / '.gemini'}",
+            "codex",
+            "solstone",
+            "installed",
+            home / ".codex" / "skills" / "solstone",
         )
     ]
 
 
-def test_install_user_all_skipped_prints_global_message(tmp_path, capsys):
+def test_install_user_creates_missing_gemini_parent_dir(tmp_path):
+    repo = _mini_user_repo(tmp_path)
+    home = _home(tmp_path)
+
+    report = install_user(repo, home, ["gemini"])
+
+    assert report.error_count == 0
+    assert (home / ".gemini" / "skills" / "solstone" / "SKILL.md").exists()
+    assert report.rows == [
+        skills_cli.ActionRow(
+            "gemini",
+            "solstone",
+            "installed",
+            home / ".gemini" / "skills" / "solstone",
+        )
+    ]
+
+
+def test_install_user_creates_all_three_when_none_exist(tmp_path):
     repo = _mini_user_repo(tmp_path)
     home = _home(tmp_path)
 
     report = install_user(repo, home, ["all"])
-    skills_cli._print_report(report, "install")
 
-    captured = capsys.readouterr()
     assert report.error_count == 0
-    assert GLOBAL_SKIP_MESSAGE in captured.out
+    for agent in [".claude", ".codex", ".gemini"]:
+        assert (home / agent / "skills" / "solstone" / "SKILL.md").exists()
+    assert [row.action for row in report.rows] == [
+        "installed",
+        "installed",
+        "installed",
+    ]
 
 
 def test_install_user_replaces_modified_source(tmp_path):
     repo = _mini_user_repo(tmp_path, b"first")
     home = _home(tmp_path, ".claude")
     install_user(repo, home, ["claude"])
-    (repo / "solstone" / "SKILL.md").write_bytes(b"second")
+    (repo / "SKILL.md").write_bytes(b"second")
 
     report = install_user(repo, home, ["claude"])
 
@@ -137,21 +149,22 @@ def test_install_user_replaces_existing_regular_file_target(tmp_path):
     assert (target / "SKILL.md").read_bytes() == b"fresh"
 
 
-def test_install_user_refuses_symlink_target(tmp_path):
+def test_install_user_replaces_stray_symlink_target(tmp_path):
     repo = _mini_user_repo(tmp_path)
     home = _home(tmp_path, ".claude")
     target = home / ".claude" / "skills" / "solstone"
     target.parent.mkdir(parents=True)
-    target.symlink_to(tmp_path)
+    target.symlink_to(tmp_path / "whatever")
 
     report = install_user(repo, home, ["claude"])
 
-    assert report.error_count == 1
-    assert target.is_symlink()
-    assert report.rows[0].reason == "refusing to overwrite symlink"
+    assert report.error_count == 0
+    assert target.is_dir()
+    assert (target / "SKILL.md").exists()
+    assert report.rows[0].action == "replaced"
 
 
-def test_install_user_refuses_regular_file_target(tmp_path):
+def test_install_user_replaces_stray_regular_file_target(tmp_path):
     repo = _mini_user_repo(tmp_path)
     home = _home(tmp_path, ".claude")
     target = home / ".claude" / "skills" / "solstone"
@@ -160,9 +173,10 @@ def test_install_user_refuses_regular_file_target(tmp_path):
 
     report = install_user(repo, home, ["claude"])
 
-    assert report.error_count == 1
-    assert target.is_file()
-    assert report.rows[0].reason == "refusing to overwrite non-directory"
+    assert report.error_count == 0
+    assert target.is_dir()
+    assert (target / "SKILL.md").exists()
+    assert report.rows[0].action == "replaced"
 
 
 def test_install_user_permission_error_prints_clean_message(tmp_path, capsys):
@@ -320,6 +334,49 @@ def test_install_project_relative_target_outside_repo(tmp_path):
     )
 
 
+def test_install_project_emits_warning_for_user_content_at_target(tmp_path, capsys):
+    repo = _mini_project_repo(tmp_path)
+    target = tmp_path / "work"
+    link = target / ".claude" / "skills" / "journal"
+    link.parent.mkdir(parents=True)
+    link.write_bytes(b"user-content")
+
+    report = install_project(repo, target, ["all"])
+
+    assert link.read_bytes() == b"user-content"
+    assert report.error_count == 0
+    assert report.warning_count == 1
+    warning = next(row for row in report.rows if row.action == "warning")
+    assert warning.agent == "claude"
+    assert warning.skill == "journal"
+    assert warning.path == link
+    assert warning.reason == "user content at target preserved"
+    assert (
+        skills_cli._run_report("install", lambda *_args: report, repo, target, ["all"])
+        == 0
+    )
+    assert "Warnings:" in capsys.readouterr().out
+
+
+def test_install_project_emits_warning_for_user_directory_at_target(tmp_path):
+    repo = _mini_project_repo(tmp_path)
+    target = tmp_path / "work"
+    link = target / ".claude" / "skills" / "journal"
+    link.mkdir(parents=True)
+    (link / "SKILL.md").write_bytes(b"user-content")
+
+    report = install_project(repo, target, ["all"])
+
+    assert (link / "SKILL.md").read_bytes() == b"user-content"
+    assert report.error_count == 0
+    assert report.warning_count == 1
+    warning = next(row for row in report.rows if row.action == "warning")
+    assert warning.agent == "claude"
+    assert warning.skill == "journal"
+    assert warning.path == link
+    assert warning.reason == "user content at target preserved"
+
+
 def test_list_status_reports_installed_and_not_installed(tmp_path):
     user_repo = _mini_user_repo(tmp_path)
     home = _home(tmp_path, ".claude", ".codex")
@@ -355,6 +412,7 @@ def test_main_install_user_default(monkeypatch, tmp_path, capsys):
     home = _home(tmp_path, ".claude")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(skills_cli, "get_project_root", lambda: str(repo))
+    monkeypatch.setattr(skills_cli, "resolve_user_skill", lambda: repo)
     monkeypatch.setattr(sys, "argv", ["sol skills", "install"])
 
     exit_code = skills_cli.main()
@@ -381,8 +439,32 @@ def test_main_install_project_no_dir_uses_cwd(monkeypatch, tmp_path):
 
 def test_repo_root_resolution_works_from_arbitrary_cwd(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-    bundle_dir = Path(str(resources.files("solstone") / "_user_bundles"))
 
-    bundles = discover_user_bundles(bundle_dir)
+    result = resolve_user_skill()
 
-    assert [bundle.name for bundle in bundles] == ["solstone"]
+    assert result.name == "solstone"
+    assert (result / "SKILL.md").is_file()
+
+
+def test_user_skill_missing_file_fails_loudly(monkeypatch, tmp_path, capsys):
+    fake_talent = tmp_path / "talent"
+    fake_talent.mkdir()
+    home = _home(tmp_path, ".claude")
+    monkeypatch.setattr(skills_cli.resources, "files", lambda _package: fake_talent)
+
+    with pytest.raises(FileNotFoundError) as exc_info:
+        resolve_user_skill()
+
+    assert "solstone/talent/solstone/SKILL.md" in str(exc_info.value)
+
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(skills_cli, "get_project_root", lambda: str(tmp_path))
+    monkeypatch.setattr(sys, "argv", ["sol skills", "install"])
+
+    exit_code = skills_cli.main()
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "error:" in captured.err
+    assert "solstone/talent/solstone/SKILL.md" in captured.err
+    assert "Traceback" not in captured.err

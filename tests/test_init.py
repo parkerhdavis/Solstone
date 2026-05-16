@@ -1,16 +1,30 @@
 import base64
 import json
+from pathlib import Path
 
 import pytest
 
 from solstone.apps.observer.routes import ACTIVE_THRESHOLD_MS, STALE_THRESHOLD_MS
 from solstone.apps.observer.utils import save_observer
 from solstone.convey import create_app
-from solstone.think.utils import now_ms
+from solstone.think.utils import get_journal, now_ms
 
 
 def _read_config(journal_dir):
     return json.loads((journal_dir / "config" / "journal.json").read_text())
+
+
+def _make_empty_client(tmp_path, monkeypatch, *, timezone="America/Denver"):
+    journal = tmp_path / "journal"
+    journal.mkdir()
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(journal))
+    monkeypatch.setattr(
+        "solstone.think.utils._resolve_os_identity", lambda: ("OS User", "osuser")
+    )
+    monkeypatch.setattr("solstone.think.utils._resolve_os_timezone", lambda: timezone)
+    app = create_app(str(journal))
+    app.config["TESTING"] = True
+    return app.test_client(), journal
 
 
 def _remove_password(journal_dir):
@@ -77,12 +91,160 @@ class TestInitDetection:
         resp = fresh_client.get("/init")
         assert resp.status_code == 200
         assert b"set up solstone" in resp.data
+        assert b'value="Test User"' in resp.data
+        assert b'value="Tester"' in resp.data
         assert b'id="section-password"' not in resp.data
         assert b'id="password"' not in resp.data
+
+    def test_init_title_is_welcome_setup(self, fresh_client):
+        resp = fresh_client.get("/init")
+        assert b"<title>solstone welcome setup</title>" in resp.data
+
+    def test_init_renders_version(self, fresh_client):
+        try:
+            from importlib.metadata import version as _v
+
+            expected = _v("solstone")
+        except Exception:
+            expected = "dev"
+
+        resp = fresh_client.get("/init")
+        assert (
+            f"journal version {expected}".encode() in resp.data
+            or b"journal version dev" in resp.data
+        )
+
+    def test_init_renders_journal_path_in_welcome(self, fresh_client):
+        journal_path = str(Path(get_journal()))
+
+        resp = fresh_client.get("/init")
+
+        assert f"<code>{journal_path}</code>".encode() in resp.data
+        assert b"solstone is three things working together" not in resp.data
+
+    def test_init_sol_agent_section_renders(self, fresh_client):
+        resp = fresh_client.get("/init")
+        assert b">sol agent<" in resp.data
+        assert b"the sol agent curates your journal" in resp.data
+
+    def test_init_sol_agent_paragraphs(self, fresh_client):
+        resp = fresh_client.get("/init")
+        assert b"the sol agent curates your journal" in resp.data
+        assert b"the fastest way to get started" in resp.data
+
+    def test_init_no_legacy_trust_note(self, fresh_client):
+        resp = fresh_client.get("/init")
+        assert b"your key is stored locally" not in resp.data
+
+    def test_init_gemini_label_lowercase(self, fresh_client):
+        resp = fresh_client.get("/init")
+        assert b">gemini api key<" in resp.data
+        assert b"Gemini API key" not in resp.data
+
+    def test_init_validate_button_present(self, fresh_client):
+        resp = fresh_client.get("/init")
+        assert b'id="gemini-validate"' in resp.data
+
+    def test_init_retention_radios_present(self, fresh_client):
+        resp = fresh_client.get("/init")
+        assert resp.data.count(b'<input type="radio" name="retention_mode"') == 3
+        assert b'name="retention_mode" value="keep" checked' in resp.data
+        assert b'name="retention_mode" value="days"' in resp.data
+        assert b'name="retention_mode" value="processed"' in resp.data
+
+    def test_init_retention_reflects_persisted_state(self, journal_copy):
+        config = _read_config(journal_copy)
+        config.pop("setup", None)
+        config["convey"].pop("password_hash", None)
+        config["retention"] = {"raw_media": "days", "raw_media_days": 14}
+        (journal_copy / "config" / "journal.json").write_text(
+            json.dumps(config, indent=2)
+        )
+        app = create_app(str(journal_copy))
+        app.config["TESTING"] = True
+
+        resp = app.test_client().get("/init")
+
+        assert b'name="retention_mode" value="days" checked' in resp.data
+        assert b'id="retention-days-input" min="1" value="14"' in resp.data
+
+    def test_init_observed_media_copy_updated(self, fresh_client):
+        resp = fresh_client.get("/init")
+        assert b"so you can access it again later" in resp.data
+        assert b"re-derive insights" not in resp.data
+        assert b"we recommend leaving this on" not in resp.data
+
+    def test_init_observers_section_removed(self, fresh_client):
+        resp = fresh_client.get("/init")
+        assert b'id="section-observers"' not in resp.data
+
+    def test_init_get_started_section_removed(self, fresh_client):
+        resp = fresh_client.get("/init")
+        assert b'id="section-finalize"' not in resp.data
+
+    def test_init_finalize_button_text(self, fresh_client):
+        resp = fresh_client.get("/init")
+        assert b"finish welcome setup" in resp.data
+        assert b'type="submit"' in resp.data
+        body = resp.data.decode()
+        form_start = body.index("<form ")
+        button = body.index("finish welcome setup")
+        form_end = body.index("</form>")
+        assert form_start < button < form_end
 
     def test_init_redirects_when_configured(self, configured_client):
         resp = configured_client.get("/init")
         assert resp.status_code == 302
+
+    def test_init_empty_journal_materializes_config(self, tmp_path, monkeypatch):
+        client, journal = _make_empty_client(tmp_path, monkeypatch)
+
+        resp = client.get("/init")
+
+        assert resp.status_code == 200
+        config = _read_config(journal)
+        assert config["identity"]["name"] == "OS User"
+        assert config["identity"]["preferred"] == "osuser"
+        assert config["identity"]["timezone"] == "America/Denver"
+        assert config["convey"]["secret"]
+        assert b'value="OS User"' in resp.data
+        assert b'value="osuser"' in resp.data
+
+    def test_init_escapes_identity_values(self, journal_copy):
+        config = _read_config(journal_copy)
+        config.pop("setup", None)
+        config["convey"].pop("password_hash", None)
+        config["identity"]["name"] = "<script>alert(1)</script>"
+        (journal_copy / "config" / "journal.json").write_text(
+            json.dumps(config, indent=2)
+        )
+        app = create_app(str(journal_copy))
+        app.config["TESTING"] = True
+
+        resp = app.test_client().get("/init")
+
+        assert b"&lt;script&gt;alert(1)&lt;/script&gt;" in resp.data
+        assert b"<script>alert(1)</script>" not in resp.data
+
+    def test_init_does_not_overwrite_existing_identity(self, journal_copy):
+        config = _read_config(journal_copy)
+        config.pop("setup", None)
+        config["convey"].pop("password_hash", None)
+        config["identity"]["name"] = "Existing User"
+        config["identity"]["preferred"] = "Existing"
+        config["identity"]["timezone"] = "UTC"
+        (journal_copy / "config" / "journal.json").write_text(
+            json.dumps(config, indent=2)
+        )
+        before = _read_config(journal_copy)
+        app = create_app(str(journal_copy))
+        app.config["TESTING"] = True
+
+        resp = app.test_client().get("/init")
+        after = _read_config(journal_copy)
+
+        assert resp.status_code == 200
+        assert after == before
 
 
 class TestInitValidateProvider:
@@ -330,6 +492,50 @@ class TestInitFinalize:
         assert "completed_at" in config["setup"]
         # No gemini key written
         assert "GOOGLE_API_KEY" not in config.get("env", {})
+
+    def test_finalize_form_timezone_overrides_os_default(self, tmp_path, monkeypatch):
+        client, journal = _make_empty_client(
+            tmp_path, monkeypatch, timezone="America/Denver"
+        )
+        client.get("/init")
+
+        resp = client.post(
+            "/init/finalize",
+            json={
+                "name": "Form User",
+                "preferred": "Form",
+                "timezone": "America/New_York",
+            },
+            content_type="application/json",
+        )
+
+        assert resp.status_code == 200
+        config = _read_config(journal)
+        assert config["identity"]["name"] == "Form User"
+        assert config["identity"]["preferred"] == "Form"
+        assert config["identity"]["timezone"] == "America/New_York"
+        assert "completed_at" in config["setup"]
+
+    def test_finalize_without_timezone_preserves_os_default(
+        self, tmp_path, monkeypatch
+    ):
+        client, journal = _make_empty_client(
+            tmp_path, monkeypatch, timezone="America/Denver"
+        )
+        client.get("/init")
+
+        resp = client.post(
+            "/init/finalize",
+            json={"name": "Form User", "preferred": "Form"},
+            content_type="application/json",
+        )
+
+        assert resp.status_code == 200
+        config = _read_config(journal)
+        assert config["identity"]["name"] == "Form User"
+        assert config["identity"]["preferred"] == "Form"
+        assert config["identity"]["timezone"] == "America/Denver"
+        assert "completed_at" in config["setup"]
 
     def test_finalize_auto_login(self, fresh_client, journal_copy):
         fresh_client.post(

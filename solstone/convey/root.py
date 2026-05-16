@@ -10,6 +10,8 @@ import os
 import queue
 import time
 from datetime import date
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +31,12 @@ from flask import (
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from solstone.think.cluster import cluster_segments
-from solstone.think.utils import day_dirs, get_config, get_journal, get_project_root
+from solstone.think.utils import (
+    day_dirs,
+    ensure_journal_config,
+    get_config,
+    get_journal,
+)
 
 from . import bridge as convey_bridge
 from .copy import LOGIN_NO_PASSWORD_CONFIGURED
@@ -100,6 +107,7 @@ def require_login() -> Any:
         "root.init_observers",
         "root.init_finalize",
         "root.login",
+        "static",
         "root.static",
         "root.favicon",
         # Observer ingest endpoints use key-based auth, not session
@@ -240,12 +248,26 @@ def init() -> Any:
     if _is_setup_complete():
         return redirect(url_for("root.index"))
 
-    config_path = str(Path(get_journal()) / "config" / "journal.json")
-    repo_path = str(Path(get_project_root()))
+    config = ensure_journal_config()
+    identity = config.get("identity", {})
+    identity_name = identity.get("name", "") or ""
+    identity_preferred = identity.get("preferred", "") or ""
+    retention = config.get("retention", {})
+    retention_mode = retention.get("raw_media") or "keep"
+    retention_days = retention.get("raw_media_days")
+    try:
+        version = _pkg_version("solstone")
+    except PackageNotFoundError:
+        version = "dev"
+    journal_path = str(Path(get_journal()))
     return render_template(
         "init.html",
-        config_path=config_path,
-        repo_path=repo_path,
+        version=version,
+        journal_path=journal_path,
+        identity_name=identity_name,
+        identity_preferred=identity_preferred,
+        retention_mode=retention_mode,
+        retention_days=retention_days,
     )
 
 

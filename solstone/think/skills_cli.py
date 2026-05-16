@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2026 sol pbc
 
-"""sol skills — install, uninstall, and inspect coding-agent skill bundles.
+"""sol skills — install, uninstall, and inspect coding-agent skills.
 
 Two install modes:
 
-- User mode (default): copies bundled solstone/_user_bundles/<name>/ into
-  per-agent user config directories (~/.claude/skills/, ~/.codex/skills/,
-  optionally ~/.gemini/skills/).
-- Project mode (--project [DIR]): symlinks talent/ and apps/*/talent/
-  SKILL.md sources into <DIR>/.claude/skills/ and <DIR>/.agents/skills/.
+- User mode (default): copies the bundled umbrella skill
+  solstone/talent/solstone/ into per-agent user config directories
+  (~/.claude/skills/, ~/.codex/skills/, ~/.gemini/skills/).
+- Project mode (--project [DIR]): symlinks every talent/ and apps/*/talent/
+  SKILL.md source into <DIR>/.claude/skills/ and <DIR>/.agents/skills/.
 
 Subcommands: install, uninstall, list.
 
@@ -38,12 +38,10 @@ PROJECT_AGENTS_SKILLS_REL = ".agents/skills"
 GLOBAL_SKIP_MESSAGE = (
     "no AI coding agent config directories found — skipping skill registration"
 )
-SUBCOMMAND_DESCRIPTION = """User mode: copies/removes bundled solstone/_user_bundles/* in per-agent user config dirs.
-Project mode: symlinks/removes talent and apps/*/talent skills under DIR.
-User-mode install refuses symlink bundle targets; regular files inside bundle
-dirs are replaced atomically.
-Gemini is skipped silently in default --agent all when ~/.gemini/skills/ is
-absent; explicit --agent gemini prints a skip line.
+SUBCOMMAND_DESCRIPTION = """User mode: copies/removes the bundled umbrella skill solstone/talent/solstone/ in per-agent user config dirs.
+Project mode: symlinks/removes every talent/ and apps/*/talent/ skill under DIR.
+User-mode install creates missing agent config dirs and atomically replaces a
+changed skill target.
 This is separate from `sol call skills`, which manages owner-wide journal
 skill patterns."""
 
@@ -73,6 +71,10 @@ class InstallReport:
     @property
     def error_count(self) -> int:
         return sum(1 for row in self.rows if row.action == "error")
+
+    @property
+    def warning_count(self) -> int:
+        return sum(1 for row in self.rows if row.action == "warning")
 
     @property
     def all_skipped(self) -> bool:
@@ -117,17 +119,16 @@ AGENTS: dict[str, AgentSpec] = {
 }
 
 
-def discover_user_bundles(bundle_dir: Path) -> list[Path]:
-    """Return public user skill bundle directories."""
-    if not bundle_dir.is_dir():
-        return []
-    return sorted(
-        path
-        for path in bundle_dir.iterdir()
-        if path.is_dir()
-        and not path.name.startswith(".")
-        and (path / "SKILL.md").is_file()
-    )
+def resolve_user_skill() -> Path:
+    """Return the bundled umbrella user skill source directory."""
+    skill_dir = Path(str(resources.files("solstone.talent") / "solstone"))
+    skill_file = skill_dir / "SKILL.md"
+    if not skill_file.is_file():
+        raise FileNotFoundError(
+            "expected bundled umbrella skill at "
+            f"solstone/talent/solstone/SKILL.md ({skill_file})"
+        )
+    return skill_dir
 
 
 def discover_project_sources(repo_root: Path) -> list[Path]:
@@ -170,6 +171,21 @@ def _copy_tree_atomically(src_dir: Path, dst_dir: Path) -> str:
     for src in sorted(path for path in src_dir.rglob("*") if path.is_file()):
         _atomic_copy_file(src, dst_dir / src.relative_to(src_dir))
     return "replaced" if existed else "installed"
+
+
+def _tree_matches(src_dir: Path, dst_dir: Path) -> bool:
+    src_files = sorted(
+        path.relative_to(src_dir) for path in src_dir.rglob("*") if path.is_file()
+    )
+    dst_files = sorted(
+        path.relative_to(dst_dir) for path in dst_dir.rglob("*") if path.is_file()
+    )
+    if src_files != dst_files:
+        return False
+    return all(
+        (src_dir / rel).read_bytes() == (dst_dir / rel).read_bytes()
+        for rel in src_files
+    )
 
 
 def _expand_user_agents(agents: list[str]) -> tuple[list[AgentSpec], bool]:
@@ -219,19 +235,11 @@ def _append_write_error(
     rows.append(ActionRow(agent, skill, "error", path, reason=str(exc)))
 
 
-def install_user(bundle_dir: Path, home: Path, agents: list[str]) -> InstallReport:
-    bundles = discover_user_bundles(bundle_dir)
-    selected, default_all = _expand_user_agents(agents)
+def install_user(skill_dir: Path, home: Path, agents: list[str]) -> InstallReport:
+    selected, _default_all = _expand_user_agents(agents)
     rows: list[ActionRow] = []
 
     for spec in selected:
-        skip = _missing_config_row(spec, home, default_all)
-        if skip is True:
-            continue
-        if isinstance(skip, ActionRow):
-            rows.append(skip)
-            continue
-
         skills_root = home / spec.skills_dir
         try:
             skills_root.mkdir(parents=True, exist_ok=True)
@@ -239,42 +247,34 @@ def install_user(bundle_dir: Path, home: Path, agents: list[str]) -> InstallRepo
             _append_write_error(rows, spec.name, "", skills_root, exc)
             continue
 
-        for bundle in bundles:
-            target = skills_root / bundle.name
+        target = skills_root / skill_dir.name
+        try:
             if target.is_symlink():
-                rows.append(
-                    ActionRow(
-                        spec.name,
-                        bundle.name,
-                        "error",
-                        target,
-                        reason="refusing to overwrite symlink",
-                    )
-                )
-                continue
-            if target.exists() and not target.is_dir():
-                rows.append(
-                    ActionRow(
-                        spec.name,
-                        bundle.name,
-                        "error",
-                        target,
-                        reason="refusing to overwrite non-directory",
-                    )
-                )
-                continue
-            try:
-                action = _copy_tree_atomically(bundle, target)
-            except OSError as exc:
-                _append_write_error(rows, spec.name, bundle.name, target, exc)
-                continue
-            rows.append(ActionRow(spec.name, bundle.name, action, target))
+                target.unlink()
+                action = "replaced"
+            elif target.exists() and not target.is_dir():
+                target.unlink()
+                action = "replaced"
+            elif target.is_dir():
+                if _tree_matches(skill_dir, target):
+                    rows.append(ActionRow(spec.name, skill_dir.name, "noop", target))
+                    continue
+                if not os.access(target, os.W_OK):
+                    raise PermissionError(f"permission denied: {target}")
+                shutil.rmtree(target)
+                action = "replaced"
+            else:
+                action = "installed"
+            _copy_tree_atomically(skill_dir, target)
+        except OSError as exc:
+            _append_write_error(rows, spec.name, skill_dir.name, target, exc)
+            continue
+        rows.append(ActionRow(spec.name, skill_dir.name, action, target))
 
     return InstallReport(rows)
 
 
-def uninstall_user(bundle_dir: Path, home: Path, agents: list[str]) -> InstallReport:
-    bundles = discover_user_bundles(bundle_dir)
+def uninstall_user(skill_dir: Path, home: Path, agents: list[str]) -> InstallReport:
     selected, default_all = _expand_user_agents(agents)
     rows: list[ActionRow] = []
 
@@ -287,36 +287,35 @@ def uninstall_user(bundle_dir: Path, home: Path, agents: list[str]) -> InstallRe
             continue
 
         skills_root = home / spec.skills_dir
-        for bundle in bundles:
-            target = skills_root / bundle.name
-            if not target.exists() and not target.is_symlink():
-                rows.append(
-                    ActionRow(
-                        spec.name,
-                        bundle.name,
-                        "skipped",
-                        target,
-                        reason="nothing to remove",
-                    )
+        target = skills_root / skill_dir.name
+        if not target.exists() and not target.is_symlink():
+            rows.append(
+                ActionRow(
+                    spec.name,
+                    skill_dir.name,
+                    "skipped",
+                    target,
+                    reason="nothing to remove",
                 )
-                continue
-            if target.is_symlink() or not target.is_dir():
-                rows.append(
-                    ActionRow(
-                        spec.name,
-                        bundle.name,
-                        "error",
-                        target,
-                        reason="refusing to remove non-directory",
-                    )
+            )
+            continue
+        if target.is_symlink() or not target.is_dir():
+            rows.append(
+                ActionRow(
+                    spec.name,
+                    skill_dir.name,
+                    "error",
+                    target,
+                    reason="refusing to remove non-directory",
                 )
-                continue
-            try:
-                shutil.rmtree(target)
-            except OSError as exc:
-                _append_write_error(rows, spec.name, bundle.name, target, exc)
-                continue
-            rows.append(ActionRow(spec.name, bundle.name, "removed", target))
+            )
+            continue
+        try:
+            shutil.rmtree(target)
+        except OSError as exc:
+            _append_write_error(rows, spec.name, skill_dir.name, target, exc)
+            continue
+        rows.append(ActionRow(spec.name, skill_dir.name, "removed", target))
 
     return InstallReport(rows)
 
@@ -348,9 +347,9 @@ def _install_project_source(
             ActionRow(
                 agent,
                 source.name,
-                "error",
+                "warning",
                 link,
-                reason="refusing to overwrite non-symlink",
+                reason="user content at target preserved",
             )
         )
         return
@@ -441,18 +440,14 @@ def uninstall_project(
     return InstallReport(rows)
 
 
-def list_user_status(
-    bundle_dir: Path, home: Path, agents: list[str]
-) -> list[StatusRow]:
-    bundles = discover_user_bundles(bundle_dir)
+def list_user_status(skill_dir: Path, home: Path, agents: list[str]) -> list[StatusRow]:
     selected, _default_all = _expand_user_agents(agents)
     rows: list[StatusRow] = []
 
     for spec in selected:
-        for bundle in bundles:
-            target = home / spec.skills_dir / bundle.name
-            state = "installed" if (target / "SKILL.md").is_file() else "not installed"
-            rows.append(StatusRow(spec.name, bundle.name, state, target))
+        target = home / spec.skills_dir / skill_dir.name
+        state = "installed" if (target / "SKILL.md").is_file() else "not installed"
+        rows.append(StatusRow(spec.name, skill_dir.name, state, target))
 
     return rows
 
@@ -478,8 +473,12 @@ def list_project_status(
 
 
 def _print_report(report: InstallReport, operation: str) -> None:
+    warnings: list[ActionRow] = []
     for row in report.rows:
         if row.action == "noop":
+            continue
+        if row.action == "warning":
+            warnings.append(row)
             continue
         if row.action == "error":
             print(f"error: {operation} {row.path}: {row.reason}", file=sys.stderr)
@@ -490,6 +489,11 @@ def _print_report(report: InstallReport, operation: str) -> None:
             print(f"removed {row.agent} {row.skill} ({row.reason}) -> {row.path}")
         else:
             print(f"{row.action} {row.agent} {row.skill} -> {row.path}")
+
+    if warnings:
+        print("Warnings:")
+        for row in warnings:
+            print(f"warning {row.agent} {row.skill} -> {row.path} ({row.reason})")
 
     if report.all_skipped:
         print(GLOBAL_SKIP_MESSAGE)
@@ -524,17 +528,20 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sol skills",
         description=(
-            "Install, uninstall, and inspect coding-agent skill bundles. "
+            "Install, uninstall, and inspect coding-agent skills. "
+            "User mode copies the bundled umbrella skill solstone/talent/solstone/ "
+            "into per-agent user config dirs. Project mode symlinks every talent/ "
+            "and apps/*/talent/ SKILL.md source into the selected project directory. "
             "This is separate from `sol call skills`, which manages owner-wide "
-            "journal skill patterns. User mode refuses symlink bundle targets; "
-            "gemini is skipped silently in --agent all when ~/.gemini is absent."
+            "journal skill patterns. User-mode install creates missing agent config "
+            "dirs and atomically replaces a changed skill target."
         ),
     )
     subparsers = parser.add_subparsers(dest="cmd", required=True)
 
     install_parser = subparsers.add_parser(
         "install",
-        help="install skill bundles",
+        help="install skills",
         description=SUBCOMMAND_DESCRIPTION,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -543,7 +550,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     uninstall_parser = subparsers.add_parser(
         "uninstall",
-        help="uninstall skill bundles",
+        help="uninstall skills",
         description=SUBCOMMAND_DESCRIPTION,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -578,14 +585,14 @@ def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
     repo_root = Path(get_project_root())
-    bundle_dir = Path(str(resources.files("solstone") / "_user_bundles"))
     target = _resolve_project_target(args.project)
 
     try:
         if args.cmd == "install":
             if target is None:
+                skill_dir = resolve_user_skill()
                 return _run_report(
-                    "install", install_user, bundle_dir, Path.home(), [args.agent]
+                    "install", install_user, skill_dir, Path.home(), [args.agent]
                 )
             return _run_report(
                 "install", install_project, repo_root, target, [args.agent]
@@ -593,8 +600,9 @@ def main() -> int:
 
         if args.cmd == "uninstall":
             if target is None:
+                skill_dir = resolve_user_skill()
                 return _run_report(
-                    "uninstall", uninstall_user, bundle_dir, Path.home(), [args.agent]
+                    "uninstall", uninstall_user, skill_dir, Path.home(), [args.agent]
                 )
             return _run_report(
                 "uninstall", uninstall_project, repo_root, target, [args.agent]
@@ -602,7 +610,8 @@ def main() -> int:
 
         if args.cmd == "list":
             if target is None:
-                _print_status(list_user_status(bundle_dir, Path.home(), [ALL_AGENTS]))
+                skill_dir = resolve_user_skill()
+                _print_status(list_user_status(skill_dir, Path.home(), [ALL_AGENTS]))
             else:
                 _print_status(list_project_status(repo_root, target, [ALL_AGENTS]))
             return 0
