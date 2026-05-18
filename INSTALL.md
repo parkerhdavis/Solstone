@@ -47,9 +47,20 @@ if a step has missing system libraries or python extras, `sol doctor` will tell 
 
 if the service fails to start, check `sol service logs`.
 
+## choosing how to power sol
+
+the sol agent is powered by an AI model, and you choose which. the choice has real privacy and hardware trade-offs worth understanding before you invest time in a path.
+
+- **a hosted provider key is the recommended way to start.** point solstone at Google (Gemini), OpenAI, or Anthropic with **your own developer API key**, created in that provider's developer console — *not* the consumer chat product (gemini.google.com / chatgpt.com / claude.ai). this is the fastest path to a working co-brain and what the first-run wizard sets up.
+- **a local model via Ollama is a real, supported goal, but not the default daily experience yet.** running the sol agent fully locally means nothing leaves your machine. it's the maximum-privacy path, but it needs capable hardware and a local model with strong "thinking" support; smaller models on constrained machines (for example a base Mac mini) struggle on the reasoning-heavy work. treat local as a goal to grow into, not the recommended starting point.
+
+a hardware heads-up: local transcription alone installs a ~2.5 GB model, and a capable local *thinking* model needs meaningfully more memory and compute on top of that. if your machine is constrained, start with a hosted key and revisit local later; you can switch any time in settings → providers.
+
+what actually leaves your machine differs sharply between these paths: with a local model, nothing leaves; with a hosted provider, only that task's prompt plus the relevant journal context goes, directly to that provider under your own key. solstone is never a proxy, and sol pbc is never in that path and never sees it. for the full picture of what's sent, to whom, and under whose terms, see [what solstone sends](DATA-FLOW.md).
+
 ## install an observer
 
-solstone needs a platform observer alongside the server.
+solstone needs a platform observer alongside your journal.
 
 ```bash
 sol observer install                    # uses hostname as stream name
@@ -75,5 +86,9 @@ once the observer is running, your observers experience your day along with you,
 
 source code: https://github.com/solpbc/solstone
 company: https://solpbc.org
+
+## feedback
+
+questions, feedback, or a bug? **follow and tag [@solstone.app](https://bsky.app/profile/solstone.app) on Bluesky** for discussion and updates, open an issue at https://github.com/solpbc/solstone/issues for bugs, or reach support at https://support.solstone.app. you don't need to know anyone — those are the front doors.
 
 (running into trouble or want to develop on solstone yourself? see [CONTRIBUTING.md](CONTRIBUTING.md).)

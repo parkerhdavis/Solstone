@@ -36,6 +36,7 @@ from solstone.observe.extract import (
 )
 from solstone.observe.utils import get_segment_key
 from solstone.think.callosum import callosum_send
+from solstone.think.markdown import bound_extraction_markdown
 from solstone.think.prompts import load_prompt
 from solstone.think.utils import (
     day_from_path,
@@ -112,6 +113,7 @@ def _discover_categories() -> dict[str, dict]:
             if prompt_content.text.strip():
                 metadata["prompt"] = prompt_content.text
 
+            # Per-category output contract from <category>.schema.json; e.g. meeting.schema.json: Source of truth for the shape is observe/categories/meeting.md
             schema_path = md_path.with_suffix(".schema.json")
             if schema_path.exists():
                 metadata["json_schema"] = json.loads(schema_path.read_text("utf-8"))
@@ -180,6 +182,7 @@ CATEGORIES = _discover_categories()
 # Build categorization prompt from template
 CATEGORIZATION_PROMPT = _build_categorization_prompt()
 
+# The enums in `primary` and `secondary` MUST match the filenames under observe/categories/*.md.
 _SCHEMA = json.loads(
     (Path(__file__).parent / "describe.schema.json").read_text(encoding="utf-8")
 )
@@ -205,10 +208,6 @@ class VideoProcessor:
         self.height: Optional[int] = None
         # Store qualified frames as simple list
         self.qualified_frames: List[dict] = []
-        # Load entity names for vision analysis context
-        from solstone.think.entities import load_entity_names
-
-        self.entity_names = load_entity_names()
 
     def process(self) -> List[dict]:
         """
@@ -399,16 +398,9 @@ class VideoProcessor:
             return cat_meta
         return None
 
-    def _user_contents(self, prompt: str, image, entities: bool = False) -> list:
-        """Build contents list with optional entity context."""
-        contents = [prompt]
-        if entities and self.entity_names:
-            contents.append(
-                f"These are some frequently used names that you may encounter "
-                f"and can be helpful when transcribing for accuracy: {self.entity_names}"
-            )
-        contents.append(image)
-        return contents
+    def _user_contents(self, prompt: str, image) -> list:
+        """Build the vision request user-content list: instruction then image."""
+        return [prompt, image]
 
     async def process_with_vision(
         self,
@@ -766,7 +758,6 @@ class VideoProcessor:
                         contents=self._user_contents(
                             f"Analyze this {category} screenshot.",
                             full_img,
-                            entities=True,
                         ),
                         model=cat_model,
                         system_instruction=cat_meta["prompt"] + redact_instruction,
@@ -801,8 +792,10 @@ class VideoProcessor:
                             has_error = True
                             error_msg = f"Invalid JSON response for {category}: {e}"
                     else:
-                        # Markdown output - store as-is
-                        req.category_results[category] = req.response
+                        # Markdown output - bound before journaling
+                        req.category_results[category] = bound_extraction_markdown(
+                            req.response
+                        )
 
                 # Retry logic
                 if has_error and req.retry_count < 4:

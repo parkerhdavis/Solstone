@@ -107,6 +107,7 @@ Run `sol help` for the full command reference.
 | Agent runtime | [docs/CORTEX.md](docs/CORTEX.md) |
 | Message bus | [docs/CALLOSUM.md](docs/CALLOSUM.md) |
 | AI provider configuration | [docs/PROVIDERS.md](docs/PROVIDERS.md) |
+| What solstone sends to your AI provider | [DATA-FLOW.md](DATA-FLOW.md) |
 | Troubleshooting | [docs/DOCTOR.md](docs/DOCTOR.md) |
 | Project direction | [docs/ROADMAP.md](docs/ROADMAP.md) |
 
@@ -115,6 +116,10 @@ Run `sol help` for the full command reference.
 See [AGENTS.md](AGENTS.md) for development guidelines, coding standards, and testing instructions.
 
 Use `make dev` to run the full stack against test fixtures and `make ci` for pre-commit checks.
+
+## feedback
+
+Questions, feedback, or a bug? **Follow and tag [@solstone.app](https://bsky.app/profile/solstone.app) on Bluesky** for discussion and updates, open an issue at [github.com/solpbc/solstone/issues](https://github.com/solpbc/solstone/issues) for bugs, or reach support at [support.solstone.app](https://support.solstone.app). You don't need to know anyone — those are the front doors.
 
 ## contributing
 

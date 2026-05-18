@@ -2,14 +2,23 @@
 # Copyright (c) 2026 sol pbc
 
 import asyncio
+import base64
 import importlib
+import io
 import json
 import sys
 import types
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-from solstone.think.models import CLAUDE_SONNET_4
+import pytest
+from PIL import Image
+
+from solstone.think.models import (
+    CLAUDE_SONNET_4,
+    IncompleteJSONError,
+    _validate_json_response,
+)
 
 
 async def run_main(mod, argv, stdin_data=None):
@@ -19,6 +28,17 @@ async def run_main(mod, argv, stdin_data=None):
 
         sys.stdin = io.StringIO(stdin_data)
     await mod.main_async()
+
+
+def _png_bytes(size: tuple[int, int] = (4, 3)) -> bytes:
+    image = Image.new("RGB", size, color="red")
+    buf = io.BytesIO()
+    image.save(buf, format="PNG", compress_level=1)
+    return buf.getvalue()
+
+
+def _decoded_image(b64: str) -> Image.Image:
+    return Image.open(io.BytesIO(base64.b64decode(b64)))
 
 
 class DummyMessages:
@@ -452,6 +472,83 @@ class TestRunGenerateJsonSchema:
         assert call_kwargs["messages"] == messages
         assert call_kwargs["system"] == "base"
 
+    def test_image_parts_build_anthropic_blocks(self, monkeypatch):
+        provider = importlib.reload(
+            importlib.import_module("solstone.think.providers.anthropic")
+        )
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = [SimpleNamespace(type="text", text="ok")]
+        mock_response.usage = None
+        mock_response.stop_reason = "end_turn"
+        mock_client.messages.create.return_value = mock_response
+        monkeypatch.setattr(provider, "_get_anthropic_client", lambda: mock_client)
+        image = Image.new("RGB", (5, 4), color="blue")
+
+        provider.run_generate(["before", image, "after"])
+
+        content = mock_client.messages.create.call_args.kwargs["messages"][0]["content"]
+        assert [block["type"] for block in content] == ["text", "image", "text"]
+        assert content[0]["text"] == "before"
+        assert content[2]["text"] == "after"
+        source = content[1]["source"]
+        assert source["type"] == "base64"
+        assert source["media_type"] == "image/png"
+        decoded = _decoded_image(source["data"])
+        assert decoded.size == image.size
+        assert decoded.format == "PNG"
+
+    def test_png_bytes_part_builds_anthropic_image_block(self, monkeypatch):
+        provider = importlib.reload(
+            importlib.import_module("solstone.think.providers.anthropic")
+        )
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = [SimpleNamespace(type="text", text="ok")]
+        mock_response.usage = None
+        mock_response.stop_reason = "end_turn"
+        mock_client.messages.create.return_value = mock_response
+        monkeypatch.setattr(provider, "_get_anthropic_client", lambda: mock_client)
+        data = _png_bytes((6, 3))
+
+        provider.run_generate(["prompt", data])
+
+        content = mock_client.messages.create.call_args.kwargs["messages"][0]["content"]
+        source = content[1]["source"]
+        assert source["media_type"] == "image/png"
+        decoded = _decoded_image(source["data"])
+        assert decoded.size == (6, 3)
+        assert decoded.format == "PNG"
+
+    def test_bad_bytes_raise_before_create(self, monkeypatch):
+        provider = importlib.reload(
+            importlib.import_module("solstone.think.providers.anthropic")
+        )
+        mock_client = MagicMock()
+        monkeypatch.setattr(provider, "_get_anthropic_client", lambda: mock_client)
+
+        with pytest.raises(ValueError) as exc_info:
+            provider.run_generate(["prompt", b"not-an-image"])
+
+        assert "bytes" in str(exc_info.value)
+        assert "not-an-image" in str(exc_info.value)
+        assert mock_client.messages.create.call_count == 0
+
+    def test_cmyk_image_raises_before_create(self, monkeypatch):
+        provider = importlib.reload(
+            importlib.import_module("solstone.think.providers.anthropic")
+        )
+        mock_client = MagicMock()
+        monkeypatch.setattr(provider, "_get_anthropic_client", lambda: mock_client)
+        image = Image.new("CMYK", (2, 2))
+
+        with pytest.raises(ValueError) as exc_info:
+            provider.run_generate(["prompt", image])
+
+        assert "Image" in str(exc_info.value)
+        assert "CMYK" in str(exc_info.value)
+        assert mock_client.messages.create.call_count == 0
+
     def test_no_schema_keeps_prompt_append(self, monkeypatch):
         provider = importlib.reload(
             importlib.import_module("solstone.think.providers.anthropic")
@@ -498,6 +595,8 @@ class TestRunGenerateJsonSchema:
         assert call_kwargs["output_config"] == {
             "format": {"type": "json_schema", "schema": schema}
         }
+        assert "tools" not in call_kwargs
+        assert "tool_choice" not in call_kwargs
         assert call_kwargs["system"] == "base"
 
     def test_structured_messages_with_schema_uses_output_config(self, monkeypatch):
@@ -529,86 +628,9 @@ class TestRunGenerateJsonSchema:
         assert call_kwargs["output_config"] == {
             "format": {"type": "json_schema", "schema": schema}
         }
+        assert "tools" not in call_kwargs
+        assert "tool_choice" not in call_kwargs
         assert call_kwargs["system"] == "base"
-
-    def test_fallback_on_bad_request(self, monkeypatch):
-        provider = importlib.reload(
-            importlib.import_module("solstone.think.providers.anthropic")
-        )
-        mock_client = MagicMock()
-
-        class DummyBadRequestError(Exception):
-            pass
-
-        fallback_response = MagicMock()
-        fallback_response.content = [
-            SimpleNamespace(type="tool_use", input={"key": "value"}),
-        ]
-        fallback_response.usage = None
-        fallback_response.stop_reason = "end_turn"
-        mock_client.messages.create.side_effect = [
-            DummyBadRequestError("bad schema"),
-            fallback_response,
-        ]
-
-        monkeypatch.setattr(provider, "BadRequestError", DummyBadRequestError)
-        monkeypatch.setattr(provider, "_get_anthropic_client", lambda: mock_client)
-        schema = {"type": "object"}
-
-        result = provider.run_generate("hello", json_schema=schema)
-
-        assert mock_client.messages.create.call_count == 2
-        retry_kwargs = mock_client.messages.create.call_args_list[1].kwargs
-        assert retry_kwargs["tools"] == [
-            {
-                "name": "response",
-                "description": "Generate the requested JSON response.",
-                "input_schema": schema,
-            }
-        ]
-        assert retry_kwargs["tool_choice"] == {"type": "tool", "name": "response"}
-        assert "output_config" not in retry_kwargs
-        assert result["text"] == json.dumps({"key": "value"})
-
-    def test_fallback_drops_thinking_when_forcing_tool_use(self, monkeypatch):
-        # Anthropic rejects `tool_choice` forcing combined with `thinking`.
-        # Verify the fallback strips thinking and restores temperature.
-        provider = importlib.reload(
-            importlib.import_module("solstone.think.providers.anthropic")
-        )
-        mock_client = MagicMock()
-
-        class DummyBadRequestError(Exception):
-            pass
-
-        fallback_response = MagicMock()
-        fallback_response.content = [
-            SimpleNamespace(type="tool_use", input={"key": "value"}),
-        ]
-        fallback_response.usage = None
-        fallback_response.stop_reason = "end_turn"
-        mock_client.messages.create.side_effect = [
-            DummyBadRequestError("bad schema"),
-            fallback_response,
-        ]
-
-        monkeypatch.setattr(provider, "BadRequestError", DummyBadRequestError)
-        monkeypatch.setattr(provider, "_get_anthropic_client", lambda: mock_client)
-        schema = {"type": "object"}
-
-        provider.run_generate(
-            "hello", json_schema=schema, thinking_budget=4096, temperature=0.5
-        )
-
-        primary_kwargs = mock_client.messages.create.call_args_list[0].kwargs
-        assert primary_kwargs.get("thinking") == {
-            "type": "enabled",
-            "budget_tokens": 4096,
-        }
-        retry_kwargs = mock_client.messages.create.call_args_list[1].kwargs
-        assert "thinking" not in retry_kwargs
-        assert retry_kwargs.get("temperature") == 0.5
-        assert retry_kwargs["tool_choice"] == {"type": "tool", "name": "response"}
 
     def test_async_with_schema_uses_output_config(self, monkeypatch):
         provider = importlib.reload(
@@ -638,7 +660,60 @@ class TestRunGenerateJsonSchema:
         assert call_kwargs["output_config"] == {
             "format": {"type": "json_schema", "schema": schema}
         }
+        assert "tools" not in call_kwargs
+        assert "tool_choice" not in call_kwargs
         assert call_kwargs["system"] == "base"
+
+    def test_schema_max_tokens_still_surfaces_incomplete_json(self, monkeypatch):
+        provider = importlib.reload(
+            importlib.import_module("solstone.think.providers.anthropic")
+        )
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = [SimpleNamespace(type="text", text="{}")]
+        mock_response.usage = None
+        mock_response.stop_reason = "max_tokens"
+        mock_client.messages.create.return_value = mock_response
+        monkeypatch.setattr(provider, "_get_anthropic_client", lambda: mock_client)
+
+        result = provider.run_generate("hello", json_schema={"type": "object"})
+
+        assert result["finish_reason"] == "max_tokens"
+        with pytest.raises(IncompleteJSONError):
+            _validate_json_response(result, True)
+
+    def test_async_multi_image_parts_preserve_order(self, monkeypatch):
+        provider = importlib.reload(
+            importlib.import_module("solstone.think.providers.anthropic")
+        )
+        mock_client = MagicMock()
+        mock_client.messages.create = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.content = [SimpleNamespace(type="text", text="ok")]
+        mock_response.usage = None
+        mock_response.stop_reason = "end_turn"
+        mock_client.messages.create.return_value = mock_response
+        monkeypatch.setattr(
+            provider, "_get_async_anthropic_client", lambda: mock_client
+        )
+        first = Image.new("RGB", (3, 2), color="red")
+        second = Image.new("RGB", (4, 5), color="green")
+
+        asyncio.run(provider.run_agenerate(["prompt", first, second]))
+
+        content = mock_client.messages.create.call_args.kwargs["messages"][0]["content"]
+        assert [block["type"] for block in content] == ["text", "image", "image"]
+        assert content[0]["text"] == "prompt"
+        first_source = content[1]["source"]
+        second_source = content[2]["source"]
+        assert first_source["media_type"] == "image/png"
+        assert second_source["media_type"] == "image/png"
+        first_decoded = _decoded_image(first_source["data"])
+        second_decoded = _decoded_image(second_source["data"])
+        assert first_decoded.size == first.size
+        assert second_decoded.size == second.size
+        assert first_decoded.format == "PNG"
+        assert second_decoded.format == "PNG"
 
 
 def _make_response(content=None, stop_reason="end_turn"):
@@ -844,42 +919,6 @@ class TestStreamingDispatch:
 
         assert mock_client.messages.create.call_count == 1
         assert mock_client.messages.stream.call_count == 0
-
-    def test_streams_tool_use_fallback_extracts_json(self, monkeypatch):
-        provider = importlib.reload(
-            importlib.import_module("solstone.think.providers.anthropic")
-        )
-        mock_client = MagicMock()
-
-        class DummyBadRequestError(Exception):
-            pass
-
-        fallback_response = _make_response(
-            content=[SimpleNamespace(type="tool_use", input={"key": "value"})]
-        )
-        # Raising from __enter__ is a sufficient stand-in for the SDK surfacing
-        # the BadRequestError before a streaming response is available.
-        mock_client.messages.stream.side_effect = [
-            _make_stream_cm(
-                None,
-                enter_side_effect=DummyBadRequestError("bad schema"),
-            ),
-            _make_stream_cm(fallback_response),
-        ]
-
-        monkeypatch.setattr(provider, "BadRequestError", DummyBadRequestError)
-        monkeypatch.setattr(provider, "_get_anthropic_client", lambda: mock_client)
-
-        result = provider.run_generate(
-            "hello",
-            model="claude-sonnet-4-5",
-            json_schema={"type": "object"},
-            max_output_tokens=49152,
-        )
-
-        assert mock_client.messages.stream.call_count == 2
-        assert mock_client.messages.create.call_count == 0
-        assert json.loads(result["text"]) == {"key": "value"}
 
     def test_interaction_thinking_and_streaming(self, monkeypatch):
         provider = importlib.reload(
