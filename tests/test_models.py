@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import solstone.think.models as models_module
 from solstone.think.models import (
     CLAUDE_HAIKU_4,
     CLAUDE_OPUS_4,
@@ -17,6 +18,7 @@ from solstone.think.models import (
     GEMINI_FLASH,
     GEMINI_LITE,
     GEMINI_PRO,
+    GEMMA4_26B_A4B_4BIT,
     GPT_5,
     GPT_5_MINI,
     GPT_5_NANO,
@@ -27,12 +29,19 @@ from solstone.think.models import (
     TIER_PRO,
     TYPE_DEFAULTS,
     IncompleteJSONError,
+    _Family,
+    _find_pricing_fallback,
+    _parse_family_anthropic,
+    _parse_family_gemini,
+    _parse_family_openai,
     _validate_schema,
     agenerate,
+    calc_agent_cost,
     calc_token_cost,
     generate,
     generate_with_result,
     get_context_registry,
+    get_model_provider,
     get_usage_cost,
     iter_token_log,
     request_health_recheck,
@@ -84,6 +93,18 @@ def test_calc_token_cost_with_cache():
     assert result["input_cost"] >= 0
 
 
+def test_calc_agent_cost_uses_resolved_model_version_from_usage():
+    usage = {
+        "input_tokens": 1000,
+        "output_tokens": 500,
+        "model_version": "gemini-2.5-flash",
+    }
+
+    cost = calc_agent_cost("gemini-flash-latest", usage)
+
+    assert cost is not None and cost > 0
+
+
 def test_calc_token_cost_unknown_model():
     """Test that unknown models return None."""
     token_data = {
@@ -96,6 +117,27 @@ def test_calc_token_cost_unknown_model():
 
     result = calc_token_cost(token_data)
     assert result is None
+
+
+def test_get_model_provider_gemma4_is_mlx():
+    assert get_model_provider(GEMMA4_26B_A4B_4BIT) == "mlx"
+
+
+def test_calc_token_cost_gemma4_zero_cost():
+    token_data = {
+        "model": GEMMA4_26B_A4B_4BIT,
+        "usage": {
+            "input_tokens": 1000,
+            "output_tokens": 100,
+        },
+    }
+
+    assert calc_token_cost(token_data) == {
+        "total_cost": 0.0,
+        "input_cost": 0.0,
+        "output_cost": 0.0,
+        "currency": "USD",
+    }
 
 
 def test_calc_token_cost_missing_data():
@@ -167,12 +209,12 @@ def test_resolve_provider_glob_match(use_fixtures_journal):
     # observe.* pattern should match
     provider, model = resolve_provider("observe.describe.frame", "generate")
     assert provider == "google"
-    assert model == "gemini-2.5-flash-lite"
+    assert model == GEMINI_LITE
 
     # Also matches with other suffixes
     provider, model = resolve_provider("observe.enrich", "generate")
     assert provider == "google"
-    assert model == "gemini-2.5-flash-lite"
+    assert model == GEMINI_LITE
 
 
 def test_resolve_provider_anthropic(use_fixtures_journal):
@@ -564,6 +606,205 @@ def test_all_default_models_have_pricing():
             "Run 'make update-prices' and re-test. "
             "If still failing, model may be too new for genai-prices."
         )
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("gpt-5.5", _Family(("openai", None), (5, 5))),
+        ("gpt-5", _Family(("openai", None), (5, 0))),
+        ("gpt-5.5-mini", _Family(("openai", "mini"), (5, 5))),
+        ("gpt-5.4-nano", _Family(("openai", "nano"), (5, 4))),
+        ("gpt-5.2-pro", _Family(("openai", "pro"), (5, 2))),
+    ],
+)
+def test_parse_family_openai(model, expected):
+    assert _parse_family_openai(model) == expected
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "ft:gpt-5",
+        "gpt-5-image",
+        "gpt-5-image-mini",
+        "gpt-5.1-codex-mini",
+        "gpt-4o",
+        "o3",
+        "text-embedding-3-small",
+    ],
+)
+def test_parse_family_openai_rejects_unsupported_models(model):
+    assert _parse_family_openai(model) is None
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("claude-opus-4", _Family(("anthropic", "opus"), (4, 0))),
+        ("claude-opus-4-7", _Family(("anthropic", "opus"), (4, 7))),
+        ("claude-sonnet-4-6", _Family(("anthropic", "sonnet"), (4, 6))),
+        ("claude-haiku-5", _Family(("anthropic", "haiku"), (5, 0))),
+    ],
+)
+def test_parse_family_anthropic(model, expected):
+    assert _parse_family_anthropic(model) == expected
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "claude-3-opus-latest",
+        "claude-3-5-haiku-latest",
+        "claude-v2",
+        "claude-2",
+        "claude-sonnet-4-6-latest",
+    ],
+)
+def test_parse_family_anthropic_rejects_unsupported_models(model):
+    assert _parse_family_anthropic(model) is None
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("gemini-3.5-flash", _Family(("gemini", "flash"), (3, 5))),
+        ("gemini-3-flash", _Family(("gemini", "flash"), (3, 0))),
+        ("gemini-3.1-flash-lite", _Family(("gemini", "flash-lite"), (3, 1))),
+        ("gemini-2.5-pro-preview", _Family(("gemini", "pro"), (2, 5))),
+        ("gemini-flash-latest", _Family(("gemini", "flash"), (0, 0))),
+        ("gemini-pro-latest", _Family(("gemini", "pro"), (0, 0))),
+        ("gemini-flash-lite-latest", _Family(("gemini", "flash-lite"), (0, 0))),
+    ],
+)
+def test_parse_family_gemini(model, expected):
+    assert _parse_family_gemini(model) == expected
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "gemini-3-pro-image-preview",
+        "gemini-2.5-flash-image",
+        "gemini-pro",
+        "gemini-embedding-001",
+        "gemini-live-2.5-flash-preview",
+        "gemini-flash-1.5",
+        "gemma-3",
+    ],
+)
+def test_parse_family_gemini_rejects_unsupported_models(model):
+    assert _parse_family_gemini(model) is None
+
+
+@pytest.mark.parametrize(
+    ("model", "provider_id", "expected"),
+    [
+        ("gemini-3.5-flash", "google", "gemini-3-flash-preview"),
+        ("gemini-3.1-flash-lite", "google", "gemini-2.5-flash-lite"),
+        ("gemini-flash-latest", "google", "gemini-3-flash-preview"),
+        ("gemini-pro-latest", "google", "gemini-3.1-pro-preview"),
+        ("gemini-flash-lite-latest", "google", "gemini-2.5-flash-lite"),
+        ("claude-opus-4-7", "anthropic", "claude-opus-4-6"),
+        ("claude-sonnet-4-6", "anthropic", "claude-sonnet-4-6"),
+        ("claude-haiku-5", "anthropic", "claude-haiku-4-5"),
+        ("gpt-5.5", "openai", "gpt-5.2"),
+        ("gpt-5.5-mini", "openai", "gpt-5-mini"),
+        ("totally-fake-model", "openai", None),
+        ("text-embedding-3-small", "openai", None),
+    ],
+)
+def test_find_pricing_fallback(model, provider_id, expected):
+    _find_pricing_fallback.cache_clear()
+
+    assert _find_pricing_fallback(model, provider_id) == expected
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "gemini-3.5-flash",
+        "gemini-3.1-flash-lite",
+        "claude-opus-4-7",
+        "gpt-5.5",
+    ],
+)
+def test_calc_token_cost_fallback(model):
+    result = calc_token_cost(
+        {"model": model, "usage": {"input_tokens": 1000, "output_tokens": 100}}
+    )
+
+    assert result is not None
+    assert result["total_cost"] > 0
+
+
+def test_calc_token_cost_fallback_returns_none_for_unknown_model():
+    assert (
+        calc_token_cost(
+            {
+                "model": "totally-fake-model",
+                "usage": {"input_tokens": 1000, "output_tokens": 100},
+            }
+        )
+        is None
+    )
+
+
+def test_calc_token_cost_fallback_keeps_local_free():
+    assert (
+        calc_token_cost(
+            {
+                "model": "local/qwen2.5-coder-7b",
+                "usage": {"input_tokens": 1000, "output_tokens": 100},
+            }
+        )["total_cost"]
+        == 0.0
+    )
+
+
+def test_fallback_logging(caplog):
+    models_module._LOGGED_FALLBACKS.clear()
+
+    with caplog.at_level(logging.INFO, logger="solstone.think.models"):
+        calc_token_cost(
+            {
+                "model": "gemini-3.5-flash",
+                "usage": {"input_tokens": 1000, "output_tokens": 100},
+            }
+        )
+        calc_token_cost(
+            {
+                "model": "gemini-3.5-flash",
+                "usage": {"input_tokens": 1000, "output_tokens": 100},
+            }
+        )
+
+    fallback_logs = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("pricing: family-fallback")
+    ]
+    assert fallback_logs == [
+        "pricing: family-fallback gemini-3.5-flash -> gemini-3-flash-preview"
+    ]
+
+    with caplog.at_level(logging.INFO, logger="solstone.think.models"):
+        calc_token_cost(
+            {
+                "model": "claude-opus-4-7",
+                "usage": {"input_tokens": 1000, "output_tokens": 100},
+            }
+        )
+
+    fallback_logs = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("pricing: family-fallback")
+    ]
+    assert fallback_logs == [
+        "pricing: family-fallback gemini-3.5-flash -> gemini-3-flash-preview",
+        "pricing: family-fallback claude-opus-4-7 -> claude-opus-4-6",
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -32,35 +32,17 @@ Note: GPT-5+ reasoning models don't support custom temperature (fixed at 1.0).
 
 from __future__ import annotations
 
-import functools
-import logging
 import os
 import re
-import traceback
-from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from solstone.think.models import GPT_5, OPENAI_EFFORT_SUFFIXES
 from solstone.think.providers._image import encode_image_part, is_image_part
-from solstone.think.providers.cli import (
-    CLIRunner,
-    QuotaExhaustedError,
-    ThinkingAggregator,
-    assemble_prompt,
-    build_cogitate_env,
-)
-from solstone.think.utils import now_ms
 
-from .shared import (
-    GenerateResult,
-    JSONEventCallback,
-    classify_provider_error,
-    safe_raw,
-)
+from .shared import GenerateResult
 
 # Agent configuration is now loaded via get_talent() in cortex.py
 
-LOG = logging.getLogger("solstone.think.providers.openai")
 _SCHEMA_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 
@@ -74,190 +56,6 @@ def _parse_model_effort(model: str) -> tuple[str, str | None]:
         if model.endswith(suffix):
             return model[: -len(suffix)], suffix[1:]
     return model, None
-
-
-def _translate_codex(
-    event: dict[str, Any],
-    aggregator: ThinkingAggregator,
-    callback: JSONEventCallback,
-    usage_holder: list[dict[str, Any]] | None = None,
-) -> str | None:
-    """Translate a Codex JSONL event into our standard Event format.
-
-    Returns the thread_id from ``thread.started`` events so CLIRunner can
-    capture it as ``cli_session_id``.  All other events return ``None``.
-    """
-    event_type = event.get("type", "")
-    item = event.get("item") or {}
-    item_type = item.get("type", "")
-
-    # -- thread.started: capture session ID --------------------------------
-    if event_type == "thread.started":
-        return event.get("thread_id")
-
-    # -- turn.started: no-op -----------------------------------------------
-    if event_type == "turn.started":
-        return None
-
-    # -- item.started: command_execution → tool_start ----------------------
-    if event_type == "item.started" and item_type == "command_execution":
-        aggregator.flush_as_thinking(raw_events=[event])
-        callback.emit(
-            {
-                "event": "tool_start",
-                "tool": "bash",
-                "args": {"command": item.get("command", "")},
-                "call_id": item.get("id", ""),
-                "raw": safe_raw([event]),
-            }
-        )
-        return None
-
-    # -- item.completed ----------------------------------------------------
-    if event_type == "item.completed":
-        if item_type == "reasoning":
-            thinking_event: dict[str, Any] = {
-                "event": "thinking",
-                "summary": item.get("text", ""),
-                "raw": safe_raw([event]),
-                "ts": now_ms(),
-            }
-            if aggregator._model:
-                thinking_event["model"] = aggregator._model
-            callback.emit(thinking_event)
-            return None
-
-        if item_type == "agent_message":
-            aggregator.accumulate(item.get("text", ""))
-            return None
-
-        if item_type == "command_execution":
-            callback.emit(
-                {
-                    "event": "tool_end",
-                    "tool": "bash",
-                    "args": {"command": item.get("command", "")},
-                    "result": item.get("aggregated_output", ""),
-                    "call_id": item.get("id", ""),
-                    "raw": safe_raw([event]),
-                }
-            )
-            return None
-
-    # -- turn.completed: capture usage -------------------------------------
-    if event_type == "turn.completed":
-        if usage_holder is not None and event.get("usage"):
-            usage_holder[0] = event["usage"]
-        return None
-
-    return None
-
-
-async def run_cogitate(
-    config: dict[str, Any],
-    on_event: Callable[[dict], None] | None = None,
-) -> str:
-    """Run a prompt with Codex CLI subprocess tool-calling support.
-
-    Uses streaming and emits JSON events.
-
-    Args:
-        config: Complete configuration dictionary including prompt, system_instruction,
-            user_instruction, extra_context, model, etc.
-        on_event: Optional event callback
-    """
-    raw_model = config.get("model") or GPT_5
-    model, effort = _parse_model_effort(raw_model)  # strip suffix for CLI
-    LOG.info("Running agent with model %s", model)
-    cb = JSONEventCallback(on_event)
-
-    # Note: Start event is emitted by agents.py (unified event ownership)
-
-    # Assemble prompt — Codex has no --system-prompt flag, so prepend it
-    prompt_body, system_instruction = assemble_prompt(
-        config,
-        sol_tool_name="bash" if not config.get("write") else None,
-    )
-    if system_instruction:
-        prompt_text = system_instruction + "\n\n" + prompt_body
-    else:
-        prompt_text = prompt_body
-
-    # Build command — sandbox is read-only; "sol" commands bypass
-    # the sandbox via exec-policy rules in .codex/rules/solstone.rules
-    # Write-enabled agents get full sandbox access
-    sandbox = "workspace-write" if config.get("write") else "read-only"
-
-    session_id = config.get("session_id")
-    sandbox = "workspace-write" if config.get("write") else "read-only"
-    if session_id:
-        cmd = [
-            "codex",
-            "exec",
-            "resume",
-            session_id,
-            "--json",
-            "-s",
-            sandbox,
-            "-m",
-            model,
-        ]
-    else:
-        cmd = ["codex", "exec", "--json", "-s", sandbox, "-m", model]
-
-    if effort:
-        cmd.extend(["-c", f'model_reasoning_effort="{effort}"'])
-
-    cmd.append("-")  # read prompt from stdin
-
-    # Create runner
-    usage_holder: list[dict[str, Any]] = [{}]
-    aggregator = ThinkingAggregator(cb, model)
-    translate = functools.partial(_translate_codex, usage_holder=usage_holder)
-    cwd_value = config.get("cwd")
-    runner = CLIRunner(
-        cmd=cmd,
-        prompt_text=prompt_text,
-        translate=translate,
-        callback=cb,
-        aggregator=aggregator,
-        cwd=Path(cwd_value) if cwd_value else None,
-        env=build_cogitate_env("openai"),
-    )
-    runner.provider = "openai"
-
-    try:
-        result = await runner.run()
-    except QuotaExhaustedError:
-        raise
-    except Exception as exc:
-        if not getattr(exc, "_evented", False):
-            cb.emit(
-                {
-                    "event": "error",
-                    "error": str(exc),
-                    "reason_code": classify_provider_error(exc, "openai"),
-                    "provider": "openai",
-                    "trace": traceback.format_exc(),
-                }
-            )
-            setattr(exc, "_evented", True)
-        raise
-
-    # Emit finish event
-    finish_event: dict[str, Any] = {
-        "event": "finish",
-        "result": result,
-    }
-    if runner.cli_session_id:
-        finish_event["cli_session_id"] = runner.cli_session_id
-    if usage_holder[0]:
-        finish_event["usage"] = usage_holder[0]
-    else:
-        LOG.warning("No usage data captured from Codex CLI for model %s", raw_model)
-    cb.emit(finish_event)
-
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -377,12 +175,20 @@ def _extract_thinking(response: Any) -> list | None:
     return thinking_blocks if thinking_blocks else None
 
 
+def _resolved_model(response: Any, requested: str) -> str:
+    """Return resolved response.model when it is a non-empty string, else requested."""
+    resolved = getattr(response, "model", None)
+    if isinstance(resolved, str) and resolved:
+        return resolved
+    return requested
+
+
 def _extract_usage(response: Any) -> dict | None:
     """Extract normalized usage dict from OpenAI response."""
     if not response.usage:
         return None
 
-    usage: dict[str, int] = {
+    usage: dict[str, Any] = {
         "input_tokens": response.usage.input_tokens,
         "output_tokens": response.usage.output_tokens,
         "total_tokens": response.usage.total_tokens,
@@ -398,6 +204,9 @@ def _extract_usage(response: Any) -> dict | None:
         reasoning = getattr(output_details, "reasoning_tokens", 0)
         if reasoning:
             usage["reasoning_tokens"] = reasoning
+    model_version = getattr(response, "model", None)
+    if isinstance(model_version, str) and model_version:
+        usage["model_version"] = model_version
     return usage
 
 
@@ -451,6 +260,7 @@ def run_generate(
     response = client.responses.create(**request_kwargs)
     return GenerateResult(
         text=response.output_text or "",
+        model=_resolved_model(response, model),
         usage=_extract_usage(response),
         finish_reason=_normalize_finish_reason(response),
         thinking=_extract_thinking(response),
@@ -507,6 +317,7 @@ async def run_agenerate(
     response = await client.responses.create(**request_kwargs)
     return GenerateResult(
         text=response.output_text or "",
+        model=_resolved_model(response, model),
         usage=_extract_usage(response),
         finish_reason=_normalize_finish_reason(response),
         thinking=_extract_thinking(response),
@@ -544,7 +355,6 @@ def validate_key(api_key: str) -> dict:
 
 
 __all__ = [
-    "run_cogitate",
     "run_generate",
     "run_agenerate",
     "list_models",

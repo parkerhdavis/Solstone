@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import platform
+import queue
 import socket
 import threading
 import time
@@ -15,8 +16,13 @@ from typing import Any, Callable, NamedTuple
 from urllib.parse import quote
 
 import requests
+from urllib3.filepost import encode_multipart_formdata
 
 from solstone.apps.observer.routes import OBSERVER_CALLOSUM_SSE_ROUTE
+from solstone.think.link.bundle import load_client_identity
+from solstone.think.link.client import StreamResetError
+from solstone.think.link.dialer import TunnelClient, TunnelRequestError
+from solstone.think.link.tls import TlsError
 from solstone.think.utils import get_config, get_journal, read_service_port
 
 logger = logging.getLogger(__name__)
@@ -32,6 +38,18 @@ CALLOSUM_RECONNECT_BACKOFF = [1, 2, 4, 8, 16, 30]
 class UploadResult(NamedTuple):
     success: bool
     duplicate: bool = False
+
+
+class PlRequestResult(NamedTuple):
+    status: int
+    headers: dict[str, str]
+    body: bytes
+
+
+def _spl_bundle_dir(label: str) -> Path:
+    config_home = os.environ.get("XDG_CONFIG_HOME")
+    root = Path(config_home) if config_home else Path.home() / ".config"
+    return root / "solstone-observer" / "spl" / label
 
 
 def cleanup_draft(draft_dir: str) -> None:
@@ -80,6 +98,9 @@ class ObserverClient:
     ):
         config = get_config()
         observer_cfg = config.get("observe", {}).get("observer", {})
+        self._pair_mode = observer_cfg.get("pair_mode", "dl")
+        if self._pair_mode not in {"dl", "pl"}:
+            raise ValueError("observe.observer.pair_mode must be 'dl' or 'pl'")
         self._url = observer_cfg.get("url", "").rstrip("/")
         if not self._url:
             # Discover local convey port from health directory
@@ -102,6 +123,30 @@ class ObserverClient:
         self._callosum_stop = threading.Event()
         self._callosum_response: requests.Response | None = None
         self._callosum_error: Exception | None = None
+        self._tunnel: TunnelClient | None = None
+        self._spl_label: str | None = None
+        self._spl_relay_url: str | None = None
+        self._pl_fingerprint_prefix: str | None = None
+
+        if self._pair_mode == "pl":
+            if self._key:
+                raise ValueError(
+                    "observe.observer.pair_mode=pl cannot be combined with "
+                    "observe.observer.key"
+                )
+            spl_label = str(observer_cfg.get("spl_label") or "").strip()
+            if not spl_label:
+                raise ValueError(
+                    "observe.observer.spl_label is required when pair_mode=pl"
+                )
+            spl_relay_url = str(observer_cfg.get("spl_relay_url") or "").strip()
+            if not spl_relay_url:
+                raise ValueError(
+                    "observe.observer.spl_relay_url is required when pair_mode=pl"
+                )
+            self._spl_label = spl_label
+            self._spl_relay_url = spl_relay_url.rstrip("/")
+            self._auto_register = False
 
     def _persist_key(self, key: str) -> None:
         journal = get_journal()
@@ -129,6 +174,8 @@ class ObserverClient:
         logger.info(f"Persisted observer key to {config_path}")
 
     def _ensure_registered(self) -> None:
+        if self._pair_mode == "pl":
+            return
         if self._key:
             return
         if not self._url:
@@ -170,6 +217,35 @@ class ObserverClient:
                 time.sleep(delay)
         logger.error(f"Registration failed after {MAX_RETRIES} attempts")
 
+    def _pl_tunnel(self) -> TunnelClient:
+        if self._tunnel is not None:
+            return self._tunnel
+        if self._spl_label is None or self._spl_relay_url is None:
+            raise TlsError("PL identity not configured")
+        identity = load_client_identity(_spl_bundle_dir(self._spl_label))
+        self._pl_fingerprint_prefix = identity.fingerprint.replace("sha256:", "")[:16]
+        self._tunnel = TunnelClient(identity, self._spl_relay_url)
+        return self._tunnel
+
+    def _pl_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        headers: dict[str, str] | None = None,
+        body: bytes = b"",
+    ) -> PlRequestResult:
+        try:
+            status, response_headers, response_body = self._pl_tunnel().request(
+                method,
+                path,
+                headers=headers,
+                body=body,
+            )
+            return PlRequestResult(status, response_headers, response_body)
+        except TunnelRequestError:
+            raise
+
     def upload_segment(
         self,
         day: str,
@@ -180,6 +256,9 @@ class ObserverClient:
         if self._revoked:
             logger.warning("Client revoked, skipping upload")
             return UploadResult(False)
+
+        if self._pair_mode == "pl":
+            return self._upload_segment_pl(day, segment, files, meta)
 
         self._ensure_registered()
         if not self._key:
@@ -258,9 +337,88 @@ class ObserverClient:
         logger.error(f"Upload failed after {MAX_RETRIES} attempts: {day}/{segment}")
         return UploadResult(False)
 
+    def _upload_segment_pl(
+        self,
+        day: str,
+        segment: str,
+        files: list[Path],
+        meta: dict[str, Any] | None,
+    ) -> UploadResult:
+        for attempt, delay in enumerate(RETRY_BACKOFF):
+            try:
+                fields: list[tuple[str, Any]] = [
+                    ("day", day),
+                    ("segment", segment),
+                ]
+                if not meta or "host" not in meta:
+                    fields.append(("host", self._host))
+                if not meta or "platform" not in meta:
+                    fields.append(("platform", self._platform))
+                if meta:
+                    fields.append(("meta", json.dumps(meta)))
+
+                for path in files:
+                    if not path.exists():
+                        logger.warning(f"File not found, skipping: {path}")
+                        continue
+                    fields.append(
+                        (
+                            "files",
+                            (
+                                path.name,
+                                path.read_bytes(),
+                                "application/octet-stream",
+                            ),
+                        )
+                    )
+
+                if not any(field[0] == "files" for field in fields):
+                    logger.error("No valid files to upload")
+                    return UploadResult(False)
+
+                body, content_type = encode_multipart_formdata(fields)
+                result = self._pl_request(
+                    "POST",
+                    "/app/observer/ingest",
+                    headers={"Content-Type": content_type},
+                    body=body,
+                )
+
+                if result.status == 200:
+                    resp_data = json.loads(result.body.decode("utf-8") or "{}")
+                    is_duplicate = resp_data.get("status") == "duplicate"
+                    return UploadResult(True, duplicate=is_duplicate)
+                if result.status == 403:
+                    self._revoked = True
+                    logger.error("Upload rejected (403)")
+                    return UploadResult(False)
+
+                logger.warning(
+                    "PL upload attempt %s failed: %s %s",
+                    attempt + 1,
+                    result.status,
+                    result.body.decode("utf-8", errors="replace"),
+                )
+            except (
+                ConnectionError,
+                OSError,
+                StreamResetError,
+                TlsError,
+                TunnelRequestError,
+            ) as exc:
+                logger.warning("PL upload attempt %s failed: %s", attempt + 1, exc)
+            if attempt < len(RETRY_BACKOFF) - 1:
+                time.sleep(delay)
+
+        logger.error(f"PL upload failed after {MAX_RETRIES} attempts: {day}/{segment}")
+        return UploadResult(False)
+
     def relay_event(self, tract: str, event: str, **fields: Any) -> bool:
         if self._revoked:
             return False
+
+        if self._pair_mode == "pl":
+            return self._relay_event_pl(tract, event, **fields)
 
         self._ensure_registered()
         if not self._key:
@@ -282,6 +440,38 @@ class ObserverClient:
             logger.debug(f"Event relay failed: {e}")
             return False
 
+    def _relay_event_pl(self, tract: str, event: str, **fields: Any) -> bool:
+        payload = {"tract": tract, "event": event, **fields}
+        body = json.dumps(payload).encode("utf-8")
+        try:
+            result = self._pl_request(
+                "POST",
+                "/app/observer/ingest/event",
+                headers={"Content-Type": "application/json"},
+                body=body,
+            )
+            if result.status == 200:
+                return True
+            if result.status == 403:
+                self._revoked = True
+                logger.error("Event relay rejected (403)")
+                return False
+            logger.warning(
+                "PL event relay failed: %s %s",
+                result.status,
+                result.body.decode("utf-8", errors="replace"),
+            )
+            return False
+        except (
+            ConnectionError,
+            OSError,
+            StreamResetError,
+            TlsError,
+            TunnelRequestError,
+        ) as exc:
+            logger.debug("PL event relay failed: %s", exc)
+            return False
+
     def subscribe_callosum(self, callback: Callable[[dict], None]) -> None:
         if self._callosum_thread is not None and self._callosum_thread.is_alive():
             raise RuntimeError("subscribe_callosum already active")
@@ -296,6 +486,10 @@ class ObserverClient:
         self._callosum_thread.start()
 
     def _callosum_loop(self, callback: Callable[[dict], None]) -> None:
+        if self._pair_mode == "pl":
+            self._callosum_loop_pl(callback)
+            return
+
         if self._revoked:
             return
 
@@ -366,6 +560,74 @@ class ObserverClient:
             if backoff_index < len(CALLOSUM_RECONNECT_BACKOFF) - 1:
                 backoff_index += 1
 
+    def _callosum_loop_pl(self, callback: Callable[[dict], None]) -> None:
+        if self._revoked:
+            return
+        try:
+            tunnel = self._pl_tunnel()
+        except Exception as exc:
+            self._callosum_error = exc
+            logger.debug("PL callosum tunnel setup failed: %s", exc)
+            return
+        if not self._pl_fingerprint_prefix:
+            self._callosum_error = RuntimeError("PL identity fingerprint not loaded")
+            return
+
+        path = OBSERVER_CALLOSUM_SSE_ROUTE.replace(
+            "<key>",
+            quote(self._pl_fingerprint_prefix, safe=""),
+        )
+        backoff_index = 0
+
+        while not self._callosum_stop.is_set():
+            chunks: queue.Queue[bytes | Exception | None] = queue.Queue()
+            future = tunnel.stream_request(
+                "GET",
+                path,
+                headers={"Accept": "text/event-stream"},
+                chunks=chunks,
+            )
+            data_lines: list[str] = []
+            text_buffer = ""
+            while not self._callosum_stop.is_set():
+                try:
+                    item = chunks.get(timeout=0.1)
+                except queue.Empty:
+                    if future.done():
+                        break
+                    continue
+
+                if item is None:
+                    break
+                if isinstance(item, Exception):
+                    self._callosum_error = item
+                    if isinstance(item, PermissionError):
+                        self._revoked = True
+                    if self._revoked:
+                        return
+                    break
+                text_buffer = self._consume_callosum_text(
+                    text_buffer,
+                    item,
+                    data_lines,
+                    callback,
+                )
+
+            if self._callosum_stop.is_set():
+                future.cancel()
+                return
+
+            if text_buffer:
+                self._dispatch_callosum_frame(data_lines, callback)
+
+            delay = CALLOSUM_RECONNECT_BACKOFF[
+                min(backoff_index, len(CALLOSUM_RECONNECT_BACKOFF) - 1)
+            ]
+            if self._callosum_stop.wait(delay):
+                return
+            if backoff_index < len(CALLOSUM_RECONNECT_BACKOFF) - 1:
+                backoff_index += 1
+
     def _consume_callosum_response(
         self,
         response: requests.Response,
@@ -388,6 +650,29 @@ class ObserverClient:
                 data_lines.append(data)
 
         self._dispatch_callosum_frame(data_lines, callback)
+
+    def _consume_callosum_text(
+        self,
+        buffer: str,
+        chunk: bytes,
+        data_lines: list[str],
+        callback: Callable[[dict], None],
+    ) -> str:
+        text = buffer + chunk.decode("utf-8", errors="replace")
+        while "\n" in text:
+            line, text = text.split("\n", 1)
+            line = line.rstrip("\r")
+            if line == "":
+                self._dispatch_callosum_frame(data_lines, callback)
+                data_lines.clear()
+            elif line.startswith(":"):
+                continue
+            elif line.startswith("data:"):
+                data = line[5:]
+                if data.startswith(" "):
+                    data = data[1:]
+                data_lines.append(data)
+        return text
 
     def _dispatch_callosum_frame(
         self,
@@ -437,4 +722,7 @@ class ObserverClient:
             and self._callosum_thread is not threading.current_thread()
         ):
             self._callosum_thread.join(timeout=5.0)
+        if self._tunnel is not None:
+            self._tunnel.close()
+            self._tunnel = None
         self._session.close()

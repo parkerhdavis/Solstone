@@ -24,7 +24,7 @@ DISPLAY_NAMES: dict[str, str] = {
     "google": "Gemini",
     "openai": "OpenAI",
     "anthropic": "Anthropic",
-    "ollama": "Ollama",
+    "local": "Local",
 }
 
 CHAT_REASONS: dict[str, ChatReason] = {
@@ -51,6 +51,11 @@ CHAT_REASONS: dict[str, ChatReason] = {
     "provider_unavailable": ChatReason(
         code="provider_unavailable",
         template="{provider} is having trouble — try again",
+        action=None,
+    ),
+    "chat_pipeline_unavailable": ChatReason(
+        code="chat_pipeline_unavailable",
+        template="the chat pipeline isn't ready yet — try again in a moment",
         action=None,
     ),
     "chat_timeout": ChatReason(

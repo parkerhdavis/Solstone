@@ -6,9 +6,11 @@ This document tracks significant changes made on this fork of Solstone.
 
 ![AI Providers settings tab showing Generate routed to vLLM (Local) at the Fast/Lightweight tier with Ollama as backup. Benchmark card reads "Qwen 3.5 2B (AWQ-Int4) — vLLM-served (LITE-tier promotable)" with a "not installed" badge and "98 tok/s measured" — the same per-tier details panel that was previously Ollama-only.](../.github/vllm-provider-add-2026-04-30.png)
 
-**Files:** `solstone/think/providers/vllm.py`, `solstone/apps/vllm/` (CLI app + tests), `solstone/think/providers/__init__.py`, `solstone/think/providers/ollama.py` (content-block intake), `solstone/think/providers/shared.py`, `solstone/think/benchmark/harness.py`, `solstone/think/benchmark/models.json` (vllm-local entries), `solstone/think/models.py` (`VLLM_PRO/FLASH/LITE`), `solstone/think/supervisor.py` (`start_vllm_servers`), `solstone/think/doctor_vllm.py` + `solstone/think/doctor.py` (advisory checks + registry wire-in), `solstone/apps/benchmark/call.py` (provider-aware `_list_installed_models`), `solstone/apps/settings/workspace.html` + `solstone/apps/settings/routes.py` (UI parity)
+**Files:** `solstone/think/providers/vllm.py`, `solstone/apps/vllm/` (CLI app + tests), `solstone/think/providers/__init__.py`, `solstone/think/providers/shared.py`, `solstone/think/benchmark/harness.py`, `solstone/think/benchmark/models.json` (vllm-local entries), `solstone/think/models.py` (`VLLM_PRO/FLASH/LITE`), `solstone/think/supervisor.py` (`start_vllm_servers`), `solstone/think/doctor_vllm.py` + `solstone/think/doctor.py` (advisory checks + registry wire-in), `solstone/apps/benchmark/call.py` (provider-aware `_list_installed_models`), `solstone/apps/settings/workspace.html` + `solstone/apps/settings/routes.py` (UI parity)
 
-Added vLLM as a peer local provider alongside Ollama, scoped to the multimodal-omni capabilities Ollama can't serve at all — most importantly, audio input. Ollama's GGUF-only stack doesn't accept audio content blocks; vLLM's HuggingFace path does. The integration was sequenced as Phases 0-4 (spike → provider → benchmark → tier promotion → server lifecycle) and is now operationally durable on the DGX Spark.
+Added vLLM as a peer local provider alongside upstream's bundled `local` (llama-server) and `mlx` providers, scoped to the multimodal-omni capabilities those backends can't serve at all — most importantly, audio input. The bundled llama-server path is GGUF-only and ships no `aarch64-unknown-linux-gnu` binary (so it can't run on the fork's DGX Spark at all); vLLM's HuggingFace path serves audio content blocks and runs on the Spark. The integration was sequenced as Phases 0-4 (spike → provider → benchmark → tier promotion → server lifecycle) and is now operationally durable on the DGX Spark.
+
+> **Provider-layer note (PR #44 upstream merge, 2026-05-25):** upstream replaced its `ollama` provider with a bundled `local` (llama-server) backend plus an `mlx` (Apple Silicon) provider and an `openhands` cogitate façade for the cloud providers. This fork dropped `ollama` entirely to follow upstream, kept vLLM as its aarch64-Linux local backend, and registers `vllm` alongside `local`/`mlx` in `PROVIDER_REGISTRY`. The fork's benchmark harness and `list_installed_local_models()` now query vLLM only.
 
 **Provider module (`solstone/think/providers/vllm.py`).** OpenAI-compatible client speaking to a local vLLM server over `/v1/chat/completions`. Consumes text + image + audio content blocks. Multi-server config schema in `journal.json → providers.vllm.servers` lets a single Solstone instance route to multiple vLLM processes — necessary because vLLM pins one model per process and has no hot-swap. `run_generate`, `run_agenerate`, `bench_run_once`, `bench_ensure_installed`, `validate_key`, `list_models` are implemented; `run_cogitate` is deferred to Phase 5.
 
@@ -31,7 +33,7 @@ Added vLLM as a peer local provider alongside Ollama, scoped to the multimodal-o
 
 **Files:** `solstone/think/providers/shared.py`, `solstone/think/providers/ollama.py`, `solstone/think/providers/vllm.py`, `solstone/think/benchmark/harness.py`, `solstone/think/benchmark/tasks.json`, `solstone/think/benchmark/fixtures/audio_30s.wav`, `solstone/think/benchmark/fixtures/README.md`, `solstone/think/benchmark/estimate.py`
 
-Replaced the harness's string-only `messages` payload with content-block lists (`TextBlock`, `ImageBlock`, `AudioBlock` TypedDicts in `solstone/think/providers/shared.py`). Providers consume the blocks in their native shapes — Ollama maps `ImageBlock` to its `images: [...]` field and raises `NotImplementedError` on `AudioBlock`; vLLM emits OpenAI-style `image_url` and `input_audio` blocks. The harness auto-detects audio mode from the task spec and base64-encodes audio fixtures via `_load_audio_b64`. `audio_transcribe` and `audio_summarize` task entries reference `solstone/think/benchmark/fixtures/audio_30s.wav` — the first audio benchmark fixture, a public-domain LibriVox clip (Tom Sawyer chapter 1) with provenance documented in `fixtures/README.md`. The estimator's `_task_applies_to_model` now gates audio tasks on the model's `audio` capability.
+Replaced the harness's string-only `messages` payload with content-block lists (`TextBlock`, `ImageBlock`, `AudioBlock` TypedDicts in `solstone/think/providers/shared.py`). Providers consume the blocks in their native shapes — vLLM emits OpenAI-style `image_url` and `input_audio` blocks. (Before the PR #44 merge the fork's Ollama provider also mapped `ImageBlock` to its `images: [...]` field and raised `NotImplementedError` on `AudioBlock`; Ollama has since been dropped — see the vLLM section above.) The harness auto-detects audio mode from the task spec and base64-encodes audio fixtures via `_load_audio_b64`. `audio_transcribe` and `audio_summarize` task entries reference `solstone/think/benchmark/fixtures/audio_30s.wav` — the first audio benchmark fixture, a public-domain LibriVox clip (Tom Sawyer chapter 1) with provenance documented in `fixtures/README.md`. The estimator's `_task_applies_to_model` now gates audio tasks on the model's `audio` capability.
 
 
 ## 📊 Provider Matrix Reference
@@ -47,7 +49,7 @@ New top-level reference doc capturing the per-provider × per-capability routing
 
 **Files:** `solstone/apps/benchmark/`, `solstone/think/benchmark/`, `tests/test_benchmark_estimate.py`
 
-Added a `benchmark` app and supporting `solstone/think/benchmark/` module that estimates expected output tok/s for pre-vetted Ollama models on the user's hardware without requiring the models to be pulled. A reference table of measured tok/s per canonical hardware class (see `solstone/think/benchmark/reference.json`) is interpolated by FP16 throughput × memory bandwidth when the exact hardware isn't listed. The registry (`models.json`) covers text and vision models across tiers, with direct wall-clock measurements taken on DGX Spark used to ground the task-time heuristics.
+Added a `benchmark` app and supporting `solstone/think/benchmark/` module that estimates expected output tok/s for pre-vetted local models on the user's hardware without requiring the models to be pulled. (The estimator is prefix-agnostic — it reads `models.json` metadata and interpolates hardware tok/s, so it still works on the historical `ollama-local/` reference rows even though the Ollama provider itself was dropped in the PR #44 merge.) A reference table of measured tok/s per canonical hardware class (see `solstone/think/benchmark/reference.json`) is interpolated by FP16 throughput × memory bandwidth when the exact hardware isn't listed. The registry (`models.json`) covers text and vision models across tiers, with direct wall-clock measurements taken on DGX Spark used to ground the task-time heuristics.
 
 The `sol call benchmark` CLI exposes `profile` (probe + cache host hardware), `list-models` (pre-vetted + installed models with tok/s and task-time estimates), `estimate <model-id>` (single-model estimate, optionally `--task <task_id>` for a wall-clock estimate against a reference workload), and `tasks` (show the reference-task catalog). A harness (`solstone/think/benchmark/harness.py`) runs the fixture-backed reference tasks (`fixtures/*.txt`) to produce new measurements that feed back into the registry. The settings UI surfaces per-model tok/s alongside the cogitate details panel, with generic tier labels and a recommended-models section for quick orientation. The same details panel renders for both Ollama and vLLM provider selections (see vLLM section above).
 
@@ -171,22 +173,31 @@ CTranslate2 on the Spark, so the in-process whisper backend is GPU
 accelerated by default rather than CPU-bound.
 
 
+---
+
+*The following changes originated on this fork and have since been merged upstream — or converged with upstream's own implementation.*
+
+
 ## 📓 Field Journal Test Content
+
+> **Converged upstream (PR #44, 2026-05-25).** Upstream independently added an
+> equivalent `setup_field_journal.sh` + `docs/FIELD_JOURNAL.md`. The merge took
+> upstream's (now-canonical) versions, so this tooling is no longer fork-divergent.
+> The fork still *uses* field_journal as its journal content; that stance is a
+> deployment choice, not a code difference.
 
 **Files:** `setup_field_journal.sh`, `docs/FIELD_JOURNAL.md`
 
 This fork uses [solpbc/field_journal](https://github.com/solpbc/field_journal) — a public-domain media corpus — as its journal content, making this instance a dedicated testing and development environment rather than a personal capture one. `setup_field_journal.sh` at the repo root copies days from a local field_journal clone (default `~/Field_Journal/`) into `journal/chronicle/`. Setup lives in a standalone script rather than the `Makefile` so shared files stay convergent with upstream. See `docs/FIELD_JOURNAL.md` for the full workflow.
 
 
----
-
-*The following changes originated on this fork and have since been merged upstream.*
-
-
 ## Ollama (Local) Provider
 
-> **Merged upstream.** The `solstone/think/providers/ollama.py` provider, tests, and
-> associated config/docs changes are now part of upstream Solstone.
+> **Merged upstream, then superseded.** The fork's `ollama` provider was merged
+> into upstream Solstone. Upstream has since (PR #44, 2026-05-25) replaced
+> `ollama` with a bundled `local` (llama-server) backend plus an `mlx` provider;
+> this fork followed suit and dropped `ollama` entirely (see the vLLM section
+> above for what the fork kept).
 
 Added a new `ollama` provider that routes text generation requests to a local
 Ollama instance via its native `/api/chat` endpoint, removing the hard

@@ -31,12 +31,12 @@ Three modes:
 Usage::
 
     # Synthetic tok/s benchmark
-    python -m solstone.think.benchmark.harness --model ollama-local/qwen3.5:9b \\
-        --class rtx-4090
+    python -m solstone.think.benchmark.harness --model vllm-local/qwen3.5:9b-awq \\
+        --class dgx-spark
 
     # Task-time benchmark (vision flag auto-applied when task.mode=vision)
-    python -m solstone.think.benchmark.harness --model ollama-local/qwen3.5:9b \\
-        --class rtx-4090 --task chat_reply
+    python -m solstone.think.benchmark.harness --model vllm-local/qwen3.5:9b-awq \\
+        --class dgx-spark --task chat_reply
 
     # Transcriber RTF (point at any mono 16kHz audio file)
     python -m solstone.think.benchmark.harness --transcriber whisper \\
@@ -147,19 +147,16 @@ def _resolve_provider(model: str) -> ModuleType:
     """Resolve the provider module for a given model id.
 
     Routes by prefix:
-        ``ollama-local/...`` -> ``solstone.think.providers.ollama``
-        ``vllm-local/...``   -> ``solstone.think.providers.vllm`` (Phase 2)
+        ``vllm-local/...`` -> ``solstone.think.providers.vllm``
 
     Raises SystemExit with a clear message for unknown prefixes so the
     harness fails fast rather than reaching some half-implemented path.
     """
-    if model.startswith("ollama-local/"):
-        return importlib.import_module("solstone.think.providers.ollama")
     if model.startswith("vllm-local/"):
         return importlib.import_module("solstone.think.providers.vllm")
     raise SystemExit(
         f"Cannot resolve benchmark provider for model id: {model!r}. "
-        f"Expected an 'ollama-local/' or 'vllm-local/' prefix."
+        f"Expected a 'vllm-local/' prefix."
     )
 
 
@@ -258,10 +255,10 @@ def ensure_installed(model: str, *, allow_pull: bool) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Benchmark a local Ollama model.")
+    parser = argparse.ArgumentParser(description="Benchmark a local vLLM-served model.")
     parser.add_argument(
         "--model",
-        help="Model ID, e.g. ollama-local/qwen3.5:9b. Required unless --transcriber is set.",
+        help="Model ID, e.g. vllm-local/qwen3.5:9b-awq. Required unless --transcriber is set.",
     )
     parser.add_argument(
         "--class",
@@ -272,7 +269,10 @@ def main() -> int:
     parser.add_argument(
         "--pull",
         action="store_true",
-        help="Pull the model via Ollama API if not already installed.",
+        help=(
+            "Request an install if the model is not already available. "
+            "No-op for vLLM, which pins one model per server at startup."
+        ),
     )
     parser.add_argument(
         "--vision",
@@ -337,13 +337,13 @@ def main() -> int:
 def _bench_tok_s(result: BenchmarkResult) -> tuple[float, float]:
     """Extract (output_tok_s, prompt_tok_s) from a BenchmarkResult.
 
-    Prefers the provider's native server-side counters when available
-    (Ollama reports nanosecond eval durations). Falls back to wall-clock
-    output rate (output_tokens / elapsed_s) when native is missing — and
-    leaves prompt_tok_s at 0.0 in that case, since wall-clock prompt-eval
-    rate would conflate prefill with decode and report a misleading
-    number. Providers that lack native prompt-eval timing (e.g. vLLM)
-    will need a separate measurement pass for prompt rate.
+    Prefers the provider's native server-side counters when available.
+    Falls back to wall-clock output rate (output_tokens / elapsed_s) when
+    native is missing — and leaves prompt_tok_s at 0.0 in that case, since
+    wall-clock prompt-eval rate would conflate prefill with decode and
+    report a misleading number. Providers that lack native prompt-eval
+    timing (e.g. vLLM) will need a separate measurement pass for prompt
+    rate.
     """
     elapsed = result.get("elapsed_s") or 0.0
     output_tokens = result.get("output_tokens") or 0

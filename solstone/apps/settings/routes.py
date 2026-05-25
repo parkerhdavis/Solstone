@@ -14,9 +14,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, abort, jsonify, render_template, request
 
 from solstone.apps.settings import copy as settings_copy
+from solstone.apps.settings import install_copy, local_bootstrap, mlx_bootstrap
 from solstone.apps.settings.copy import (
     CONVEY_REFUSE_NO_PASSWORD_NETWORK,
     CONVEY_REFUSE_NO_PASSWORD_TRUST,
@@ -52,8 +53,11 @@ from solstone.convey.sol_initiated.settings import (
     save_settings as save_sol_voice_settings,
 )
 from solstone.convey.utils import error_response
+from solstone.think.models import LOCAL_FLASH, QWEN_35_9B
 from solstone.think.pairing.config import get_host_url
 from solstone.think.providers.google import validate_vertex_credentials
+from solstone.think.providers.local import LOCAL_MODEL_SPECS
+from solstone.think.providers.mlx import _MLX_MODEL_REGISTRY
 from solstone.think.retention import (
     _human_bytes,
     check_storage_health,
@@ -98,6 +102,16 @@ GENERIC_SETTINGS_ERROR = (
 
 def _settings_operation_failed(detail: str = GENERIC_SETTINGS_ERROR) -> Any:
     return error_response(SETTINGS_OPERATION_FAILED, detail=detail)
+
+
+def _public_facet_record(name: str, data: dict[str, object]) -> dict[str, object]:
+    return {
+        "name": name,
+        "title": str(data.get("title") or name),
+        "color": str(data.get("color") or ""),
+        "emoji": str(data.get("emoji") or ""),
+        "muted": bool(data.get("muted", False)),
+    }
 
 
 # API keys that can be configured in the env section
@@ -154,9 +168,40 @@ def _project_public_config(config: dict[str, Any]) -> dict[str, Any]:
 def _inject_settings_copy() -> dict[str, Any]:
     return {
         "convey_copy": convey_copy,
+        "install_copy": {
+            name: getattr(install_copy, name) for name in install_copy.__all__
+        },
         "settings_copy": settings_copy,
         "sol_voice_copy": sol_voice_copy,
     }
+
+
+@settings_bp.route("/facets/<slug>")
+def view_facet_detail(slug: str) -> str:
+    from solstone.think.facets import get_facets
+
+    facets = get_facets()
+    facet = facets.get(slug)
+    if facet is None:
+        abort(404)
+
+    title = str(facet.get("title") or slug)
+    color = str(facet.get("color") or "")
+    emoji = str(facet.get("emoji") or "")
+    return render_template(
+        "settings/facet_detail.html",
+        app="settings",
+        slug=slug,
+        title=title,
+        color=color,
+        emoji=emoji,
+        muted=bool(facet.get("muted", False)),
+        primary_cta=settings_copy.FACET_DETAIL_PRIMARY_CTA.format(title=title),
+        secondary_cta=settings_copy.FACET_DETAIL_SECONDARY_CTA,
+        tertiary_cta=settings_copy.FACET_DETAIL_TERTIARY_ESCAPE,
+        success_heading=settings_copy.FACET_DETAIL_SUCCESS_HEADING.format(title=title),
+        value_framing=settings_copy.FACET_DETAIL_VALUE_FRAMING.format(title=title),
+    )
 
 
 @settings_bp.route("/api/config")
@@ -660,6 +705,175 @@ def _sol_voice_response(settings: SolVoiceSettings) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 VALID_TIERS = {1, 2, 3}
+MLX_MODEL_LABELS = {
+    QWEN_35_9B: "qwen 3.5 — 16 GB Mac",
+    "gemma-4-26b-a4b-it-mlx-4bit": "gemma 4 (26B) — 24 GB Mac",
+}
+LOCAL_MODEL_LABELS = {
+    LOCAL_FLASH: "qwen 2.5 coder 7B — 12 GB",
+    "local/qwen3-coder-30b-a3b-q4_k_m": "qwen3 coder 30B — 32 GB",
+}
+
+
+def _mlx_model_error(model: str) -> Any:
+    return error_response(
+        INVALID_REQUEST_VALUE,
+        detail=(
+            f"Unknown MLX model: {model}. "
+            f"Must be one of: {', '.join(_MLX_MODEL_REGISTRY.keys())}"
+        ),
+    )
+
+
+def _mlx_model_from_request() -> tuple[str | None, Any | None]:
+    model = request.args.get("model") or QWEN_35_9B
+    if model not in _MLX_MODEL_REGISTRY:
+        return None, _mlx_model_error(model)
+    return model, None
+
+
+def _local_model_error(model: str) -> Any:
+    return error_response(
+        INVALID_REQUEST_VALUE,
+        detail=(
+            f"Unknown local model: {model}. "
+            f"Must be one of: {', '.join(LOCAL_MODEL_SPECS.keys())}"
+        ),
+    )
+
+
+def _local_model_from_request() -> tuple[str | None, Any | None]:
+    model = request.args.get("model") or LOCAL_FLASH
+    if model not in LOCAL_MODEL_SPECS:
+        return None, _local_model_error(model)
+    return model, None
+
+
+@settings_bp.route("/api/mlx/availability")
+def get_mlx_availability() -> Any:
+    try:
+        model, error = _mlx_model_from_request()
+        if error is not None:
+            return error
+        assert model is not None
+        return jsonify(mlx_bootstrap.get_availability_payload(model))
+    except Exception:
+        logger.exception("error loading MLX availability")
+        return _settings_operation_failed()
+
+
+@settings_bp.route("/api/mlx/bootstrap", methods=["POST"])
+def start_mlx_bootstrap() -> Any:
+    try:
+        model, error = _mlx_model_from_request()
+        if error is not None:
+            return error
+        assert model is not None
+        payload, status = mlx_bootstrap.start_bootstrap(model)
+        return jsonify(payload), status
+    except mlx_bootstrap.MlxBootstrapUnavailableError as exc:
+        return error_response(INVALID_REQUEST_VALUE, detail=str(exc))
+    except mlx_bootstrap.MlxBootstrapStartError as exc:
+        logger.exception("error starting MLX bootstrap")
+        return _settings_operation_failed(str(exc))
+    except Exception:
+        logger.exception("error starting MLX bootstrap")
+        return _settings_operation_failed()
+
+
+@settings_bp.route("/api/mlx/bootstrap/status")
+def get_mlx_bootstrap_status() -> Any:
+    try:
+        model, error = _mlx_model_from_request()
+        if error is not None:
+            return error
+        assert model is not None
+        return jsonify(mlx_bootstrap.get_state(model))
+    except Exception:
+        logger.exception("error loading MLX bootstrap status")
+        return _settings_operation_failed()
+
+
+@settings_bp.route("/api/mlx/models")
+def get_mlx_models() -> Any:
+    try:
+        return jsonify(
+            [
+                {
+                    "name": name,
+                    "label": MLX_MODEL_LABELS[name],
+                    "min_ram_gb": spec.min_ram_bytes // 1024**3,
+                }
+                for name, spec in _MLX_MODEL_REGISTRY.items()
+            ]
+        )
+    except Exception:
+        logger.exception("error loading MLX models")
+        return _settings_operation_failed()
+
+
+@settings_bp.route("/api/local/availability")
+def get_local_availability() -> Any:
+    try:
+        model, error = _local_model_from_request()
+        if error is not None:
+            return error
+        assert model is not None
+        return jsonify(local_bootstrap.get_availability_payload(model))
+    except Exception:
+        logger.exception("error loading local provider availability")
+        return _settings_operation_failed()
+
+
+@settings_bp.route("/api/local/bootstrap", methods=["POST"])
+def start_local_bootstrap() -> Any:
+    try:
+        model, error = _local_model_from_request()
+        if error is not None:
+            return error
+        assert model is not None
+        payload, status = local_bootstrap.start_bootstrap(model)
+        return jsonify(payload), status
+    except local_bootstrap.LocalBootstrapUnavailableError as exc:
+        return error_response(INVALID_REQUEST_VALUE, detail=str(exc))
+    except local_bootstrap.LocalBootstrapStartError as exc:
+        logger.exception("error starting local provider bootstrap")
+        return _settings_operation_failed(str(exc))
+    except Exception:
+        logger.exception("error starting local provider bootstrap")
+        return _settings_operation_failed()
+
+
+@settings_bp.route("/api/local/bootstrap/status")
+def get_local_bootstrap_status() -> Any:
+    try:
+        model, error = _local_model_from_request()
+        if error is not None:
+            return error
+        assert model is not None
+        return jsonify(local_bootstrap.get_state(model))
+    except Exception:
+        logger.exception("error loading local provider bootstrap status")
+        return _settings_operation_failed()
+
+
+@settings_bp.route("/api/local/models")
+def get_local_models() -> Any:
+    try:
+        return jsonify(
+            [
+                {
+                    "name": name,
+                    "label": LOCAL_MODEL_LABELS[name],
+                    "min_ram_gb": spec.min_ram_bytes // 1024**3,
+                    "size_bytes": spec.size_bytes,
+                }
+                for name, spec in LOCAL_MODEL_SPECS.items()
+            ]
+        )
+    except Exception:
+        logger.exception("error loading local provider models")
+        return _settings_operation_failed()
 
 
 @settings_bp.route("/api/providers")
@@ -681,7 +895,11 @@ def get_providers() -> Any:
             TYPE_DEFAULTS,
             get_context_registry,
         )
-        from solstone.think.providers import build_provider_status, get_provider_list
+        from solstone.think.providers import (
+            build_provider_status,
+            bundled,
+            get_provider_list,
+        )
         from solstone.think.talent import get_talent_configs
 
         config = get_journal_config()
@@ -758,6 +976,20 @@ def get_providers() -> Any:
                 pass
 
         provider_status = build_provider_status(providers_list, vertex_creds_configured)
+        bundled_status = {
+            provider: bundled.get_provider_state(provider)
+            for provider in ("anthropic", "openai", "openhands")
+        }
+        local_model_id = request.args.get("local_model") or LOCAL_FLASH
+        if local_model_id not in LOCAL_MODEL_SPECS:
+            return _local_model_error(local_model_id)
+        local_status = local_bootstrap.get_state(local_model_id)
+
+        mlx_config = providers_config.get("mlx", {})
+        mlx_active_model = (
+            mlx_config.get("active_model") if isinstance(mlx_config, dict) else None
+        ) or QWEN_35_9B
+        mlx_status = mlx_bootstrap.get_state(mlx_active_model)
 
         return jsonify(
             {
@@ -770,6 +1002,9 @@ def get_providers() -> Any:
                 "api_keys": api_keys,
                 "auth": auth,
                 "key_validation": key_validation,
+                "bundled": bundled_status,
+                "local": local_status,
+                "mlx": {"active_model": mlx_active_model, **mlx_status},
                 "google_backend": providers_config.get("google_backend", "auto"),
                 "vertex_credentials_configured": vertex_creds_configured,
                 "vertex_credentials_email": vertex_creds_email,
@@ -782,10 +1017,10 @@ def get_providers() -> Any:
 
 @settings_bp.route("/api/benchmark/models")
 def get_benchmark_models() -> Any:
-    """Return pre-vetted Ollama models with task-time estimates.
+    """Return pre-vetted local models with task-time estimates.
 
-    Powers the Ollama tier annotations + "recommended models you don't
-    have yet" section in the providers UI.
+    Powers the local-model tier annotations + "recommended models you
+    don't have yet" section in the providers UI.
 
     Response shape::
 
@@ -815,8 +1050,8 @@ def get_benchmark_models() -> Any:
 
     rows = list_prevetted_models(hardware)
 
-    # Attach installed flag. Queries Ollama /api/tags and vLLM /v1/models;
-    # unreachable providers contribute nothing (their rows stay installed=False).
+    # Attach installed flag. Queries vLLM /v1/models; an unreachable
+    # provider contributes nothing (its rows stay installed=False).
     from solstone.think.providers import list_installed_local_models
 
     installed_ids = list_installed_local_models()
@@ -960,6 +1195,99 @@ def _configured_transcriber() -> str | None:
     if isinstance(backend, str) and backend:
         return backend
     return "parakeet"
+
+
+@settings_bp.route("/api/providers/bundled")
+def get_bundled_providers() -> Any:
+    """Return bundled cogitate provider status."""
+
+    try:
+        from solstone.think.providers import bundled
+
+        return jsonify(
+            {
+                provider: bundled.get_provider_state(provider)
+                for provider in ("anthropic", "openai", "openhands")
+            }
+        )
+    except Exception:
+        logger.exception("error loading bundled providers")
+        return _settings_operation_failed()
+
+
+@settings_bp.route("/api/providers/local/status")
+def get_local_provider_status() -> Any:
+    """Return local provider readiness status."""
+
+    try:
+        from solstone.think.providers import build_provider_status, get_provider_list
+
+        providers_list = get_provider_list()
+        local_provider = next(
+            provider for provider in providers_list if provider["name"] == "local"
+        )
+        provider_status = build_provider_status([local_provider], False)
+        return jsonify(provider_status["local"])
+    except Exception:
+        logger.exception("error loading local provider status")
+        return _settings_operation_failed()
+
+
+def _bundled_action_response(name: str, action: str) -> Any:
+    from solstone.think.providers import bundled
+
+    actions = {
+        "install": bundled.install_provider,
+        "uninstall": bundled.uninstall_provider,
+        "disable": bundled.disable_provider,
+        "enable": bundled.enable_provider,
+        "validate-key": bundled.validate_key,
+    }
+    try:
+        return jsonify(actions[action](name))
+    except bundled.CogitateProviderInstallInFlight:
+        return jsonify(
+            {"error": "install in flight", "install_state": "installing"}
+        ), 409
+    except bundled.UnsupportedBundledProvider as exc:
+        return error_response(INVALID_CONFIG_VALUE, detail=str(exc))
+    except bundled.BundledProviderError as exc:
+        return _settings_operation_failed(str(exc))
+
+
+@settings_bp.route("/api/providers/<name>/install", methods=["POST"])
+def install_bundled_provider(name: str) -> Any:
+    """Install or retry a bundled cogitate provider."""
+
+    return _bundled_action_response(name, "install")
+
+
+@settings_bp.route("/api/providers/<name>/uninstall", methods=["POST"])
+def uninstall_bundled_provider(name: str) -> Any:
+    """Uninstall a bundled cogitate provider."""
+
+    return _bundled_action_response(name, "uninstall")
+
+
+@settings_bp.route("/api/providers/<name>/disable", methods=["POST"])
+def disable_bundled_provider(name: str) -> Any:
+    """Disable a bundled cogitate provider."""
+
+    return _bundled_action_response(name, "disable")
+
+
+@settings_bp.route("/api/providers/<name>/enable", methods=["POST"])
+def enable_bundled_provider(name: str) -> Any:
+    """Enable a bundled cogitate provider."""
+
+    return _bundled_action_response(name, "enable")
+
+
+@settings_bp.route("/api/providers/<name>/validate-key", methods=["POST"])
+def validate_bundled_provider_key(name: str) -> Any:
+    """Validate a bundled provider API key."""
+
+    return _bundled_action_response(name, "validate-key")
 
 
 @settings_bp.route("/api/validate-keys", methods=["POST"])
@@ -1233,6 +1561,48 @@ def update_providers() -> Any:
                             "new": ctx_config,
                         }
                     config["providers"]["contexts"][pattern] = ctx_config
+
+        # Handle MLX model selection
+        if "mlx" in request_data:
+            mlx_data = request_data["mlx"]
+            if not isinstance(mlx_data, dict):
+                return error_response(
+                    INVALID_CONFIG_VALUE,
+                    detail="mlx must be an object",
+                )
+            unknown_fields = sorted(set(mlx_data) - {"active_model"})
+            if unknown_fields:
+                return error_response(
+                    INVALID_CONFIG_VALUE,
+                    detail=f"Invalid mlx field: {unknown_fields[0]}",
+                )
+            if "active_model" in mlx_data:
+                active_model = mlx_data["active_model"]
+                if not isinstance(active_model, str):
+                    return error_response(
+                        INVALID_CONFIG_VALUE,
+                        detail="mlx.active_model must be a string",
+                    )
+                if active_model not in _MLX_MODEL_REGISTRY:
+                    return error_response(
+                        INVALID_CONFIG_VALUE,
+                        detail=(
+                            f"Invalid MLX model: {active_model}. "
+                            f"Must be one of: {', '.join(_MLX_MODEL_REGISTRY.keys())}"
+                        ),
+                    )
+                if "mlx" not in config["providers"]:
+                    config["providers"]["mlx"] = {}
+                old_mlx = old_providers.get("mlx", {})
+                old_model = (
+                    old_mlx.get("active_model") if isinstance(old_mlx, dict) else None
+                )
+                if old_model != active_model:
+                    changed_fields["mlx.active_model"] = {
+                        "old": old_model,
+                        "new": active_model,
+                    }
+                config["providers"]["mlx"]["active_model"] = active_model
 
         # Handle Google backend settings
         if "google_backend" in request_data:
@@ -1859,6 +2229,25 @@ def update_observe() -> Any:
         return _settings_operation_failed()
 
 
+@settings_bp.route("/api/facets")
+def list_facets() -> Any:
+    """List all facets."""
+    try:
+        from solstone.think.facets import get_facets
+
+        facets = [
+            _public_facet_record(name, data)
+            for name, data in sorted(
+                get_facets().items(),
+                key=lambda item: str(item[1].get("title") or item[0]).lower(),
+            )
+        ]
+        return jsonify({"facets": facets})
+    except Exception:
+        logger.exception("error loading facets")
+        return _settings_operation_failed()
+
+
 @settings_bp.route("/api/facets/muted")
 def get_muted_facets() -> Any:
     """List muted facets."""
@@ -1867,12 +2256,7 @@ def get_muted_facets() -> Any:
 
         facets = get_facets()
         muted = [
-            {
-                "name": name,
-                "title": data.get("title", name),
-                "color": data.get("color", ""),
-                "emoji": data.get("emoji", ""),
-            }
+            _public_facet_record(name, data)
             for name, data in facets.items()
             if data.get("muted", False)
         ]

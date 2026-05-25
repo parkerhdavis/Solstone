@@ -3,198 +3,44 @@
 
 """Tests for cogitate coder mode: write flag, coder agent."""
 
-import asyncio
-import importlib
-from unittest.mock import AsyncMock, patch
-
-# ---------------------------------------------------------------------------
-# Write flag — Anthropic provider
-# ---------------------------------------------------------------------------
-
-
-class TestAnthropicWriteFlag:
-    """Verify --allowedTools is controlled by config write flag."""
-
-    def _provider(self):
-        return importlib.import_module("solstone.think.providers.anthropic")
-
-    @patch("solstone.think.providers.anthropic.check_cli_binary")
-    @patch("solstone.think.providers.anthropic.CLIRunner")
-    def test_no_write_restricts_tools(self, mock_runner_cls, mock_check):
-        """Without write flag, --allowedTools restricts to sol."""
-        provider = self._provider()
-        mock_instance = AsyncMock()
-        mock_instance.run = AsyncMock(return_value="result")
-        mock_instance.cli_session_id = None
-        mock_runner_cls.return_value = mock_instance
-
-        config = {"prompt": "test", "model": "claude-sonnet-4-20250514"}
-        asyncio.run(provider.run_cogitate(config))
-
-        cmd = mock_runner_cls.call_args.kwargs["cmd"]
-        assert "--allowedTools" in cmd
-        assert "Bash(sol *)" in cmd
-
-    @patch("solstone.think.providers.anthropic.check_cli_binary")
-    @patch("solstone.think.providers.anthropic.CLIRunner")
-    def test_write_true_grants_full_access(self, mock_runner_cls, mock_check):
-        """With write=True, --allowedTools is omitted for full tool access."""
-        provider = self._provider()
-        mock_instance = AsyncMock()
-        mock_instance.run = AsyncMock(return_value="result")
-        mock_instance.cli_session_id = None
-        mock_runner_cls.return_value = mock_instance
-
-        config = {"prompt": "test", "model": "claude-sonnet-4-20250514", "write": True}
-        asyncio.run(provider.run_cogitate(config))
-
-        cmd = mock_runner_cls.call_args.kwargs["cmd"]
-        assert "--allowedTools" not in cmd
-
-    @patch("solstone.think.providers.anthropic.check_cli_binary")
-    @patch("solstone.think.providers.anthropic.CLIRunner")
-    def test_write_false_restricts_tools(self, mock_runner_cls, mock_check):
-        """Explicit write=False keeps restriction."""
-        provider = self._provider()
-        mock_instance = AsyncMock()
-        mock_instance.run = AsyncMock(return_value="result")
-        mock_instance.cli_session_id = None
-        mock_runner_cls.return_value = mock_instance
-
-        config = {"prompt": "test", "model": "claude-sonnet-4-20250514", "write": False}
-        asyncio.run(provider.run_cogitate(config))
-
-        cmd = mock_runner_cls.call_args.kwargs["cmd"]
-        assert "--allowedTools" in cmd
-
-
-# ---------------------------------------------------------------------------
-# Write flag — OpenAI provider
-# ---------------------------------------------------------------------------
-
-
-class TestOpenAIWriteFlag:
-    """Verify sandbox mode is controlled by config write flag."""
-
-    def _provider(self):
-        return importlib.import_module("solstone.think.providers.openai")
-
-    @patch("solstone.think.providers.openai.CLIRunner")
-    def test_no_write_uses_readonly_sandbox(self, mock_runner_cls):
-        """Without write flag, sandbox is read-only."""
-        provider = self._provider()
-        mock_instance = AsyncMock()
-        mock_instance.run = AsyncMock(return_value="result")
-        mock_instance.cli_session_id = None
-        mock_runner_cls.return_value = mock_instance
-
-        config = {"prompt": "test", "model": "gpt-5.2"}
-        asyncio.run(provider.run_cogitate(config))
-
-        cmd = mock_runner_cls.call_args.kwargs["cmd"]
-        # Find the -s flag and its value
-        s_idx = cmd.index("-s")
-        assert cmd[s_idx + 1] == "read-only"
-
-    @patch("solstone.think.providers.openai.CLIRunner")
-    def test_write_true_uses_write_sandbox(self, mock_runner_cls):
-        """With write=True, sandbox is write."""
-        provider = self._provider()
-        mock_instance = AsyncMock()
-        mock_instance.run = AsyncMock(return_value="result")
-        mock_instance.cli_session_id = None
-        mock_runner_cls.return_value = mock_instance
-
-        config = {"prompt": "test", "model": "gpt-5.2", "write": True}
-        asyncio.run(provider.run_cogitate(config))
-
-        cmd = mock_runner_cls.call_args.kwargs["cmd"]
-        s_idx = cmd.index("-s")
-        assert cmd[s_idx + 1] == "workspace-write"
-
-    @patch("solstone.think.providers.openai.CLIRunner")
-    def test_write_true_with_session_resume(self, mock_runner_cls):
-        """Write flag works correctly with session resume path."""
-        provider = self._provider()
-        mock_instance = AsyncMock()
-        mock_instance.run = AsyncMock(return_value="result")
-        mock_instance.cli_session_id = None
-        mock_runner_cls.return_value = mock_instance
-
-        config = {
-            "prompt": "test",
-            "model": "gpt-5.2",
-            "write": True,
-            "session_id": "sess-123",
-        }
-        asyncio.run(provider.run_cogitate(config))
-
-        cmd = mock_runner_cls.call_args.kwargs["cmd"]
-        s_idx = cmd.index("-s")
-        assert cmd[s_idx + 1] == "workspace-write"
-        assert "resume" in cmd
-
-
 # ---------------------------------------------------------------------------
 # Write flag — Google provider
 # ---------------------------------------------------------------------------
 
 
 class TestGoogleWriteFlag:
-    """Verify --approval-mode is controlled by config write flag."""
+    """Verify Google SDK policy behavior is controlled by config write flag."""
 
-    def _provider(self):
-        return importlib.import_module("solstone.think.providers.google")
+    def test_no_write_uses_yolo_with_policy(self, tmp_path):
+        """Without write flag, policy denies writes and non-sol shell commands."""
+        from solstone.think.cogitate_policy import CogitatePolicy
 
-    @patch("solstone.think.providers.google.CLIRunner")
-    def test_no_write_uses_yolo_with_policy(self, mock_runner_cls, tmp_path):
-        """Without write flag, approval-mode is yolo with scoped policy."""
-        provider = self._provider()
-        mock_instance = AsyncMock()
-        mock_instance.run = AsyncMock(return_value="result")
-        mock_instance.cli_session_id = None
-        mock_runner_cls.return_value = mock_instance
+        policy = CogitatePolicy(write=False, allowed_roots=[tmp_path])
 
-        policy_path = tmp_path / "policy.toml"
-        policy_path.write_text("# generated\n", encoding="utf-8")
-        config = {"prompt": "test", "model": "gemini-2.5-flash"}
-        with patch(
-            "solstone.think.providers.google.build_per_task_policy",
-            return_value=policy_path,
-        ) as build_policy:
-            asyncio.run(provider.run_cogitate(config))
+        allowed, reason = policy.check("write_file", {"file_path": "x"})
+        assert allowed is False
+        assert reason.startswith("policy_deny:")
+        assert policy.check("run_shell_command", {"command": "rm -rf /tmp/x"})[0] is (
+            False
+        )
+        assert policy.check(
+            "run_shell_command", {"command": "sol call activities list"}
+        ) == (True, "ok")
+        assert policy.check("read_file", {"file_path": str(tmp_path / "x")}) == (
+            True,
+            "ok",
+        )
 
-        cmd = mock_runner_cls.call_args.kwargs["cmd"]
-        idx = cmd.index("--approval-mode")
-        assert cmd[idx + 1] == "yolo"
-        policy_idx = cmd.index("--policy")
-        assert cmd[policy_idx + 1] == str(policy_path)
-        build_policy.assert_called_once()
-        assert not policy_path.exists()
+    def test_write_true_uses_yolo_mode(self, tmp_path):
+        """With write=True, policy allows all tool calls."""
+        from solstone.think.cogitate_policy import CogitatePolicy
 
-    @patch("solstone.think.providers.google.CLIRunner")
-    def test_write_true_uses_yolo_mode(self, mock_runner_cls):
-        """With write=True, approval-mode is yolo (full access)."""
-        provider = self._provider()
-        mock_instance = AsyncMock()
-        mock_instance.run = AsyncMock(return_value="result")
-        mock_instance.cli_session_id = None
-        mock_runner_cls.return_value = mock_instance
+        policy = CogitatePolicy(write=True, allowed_roots=[tmp_path])
 
-        config = {"prompt": "test", "model": "gemini-2.5-flash", "write": True}
-        asyncio.run(provider.run_cogitate(config))
-
-        cmd = mock_runner_cls.call_args.kwargs["cmd"]
-        idx = cmd.index("--approval-mode")
-        assert cmd[idx + 1] == "yolo"
-        assert "--policy" not in cmd
-
-    def test_cogitate_base_policy_file_exists_on_disk(self):
-        """The per-task policy generator's base policy must exist."""
-        from solstone.think.cogitate_policy import _BASE_POLICY_PATH
-
-        assert _BASE_POLICY_PATH.is_file(), (
-            f"Expected policy file at {_BASE_POLICY_PATH}"
+        assert policy.check("write_file", {"file_path": "x"}) == (True, "ok")
+        assert policy.check("run_shell_command", {"command": "rm -rf /tmp/x"}) == (
+            True,
+            "ok",
         )
 
 

@@ -11,6 +11,9 @@ import logging
 import os
 import re
 import shutil
+import subprocess
+import sys
+import threading
 import time
 import uuid
 from datetime import date, datetime
@@ -23,31 +26,47 @@ from flask import (
     jsonify,
     redirect,
     render_template,
+    request,
     send_file,
     url_for,
 )
 
 import solstone.think.deferred_deletes as deferred_deletes
 from solstone.apps.utils import log_app_action
-from solstone.convey import emit, state
+from solstone.convey import emit
 from solstone.convey.reasons import (
     FILE_NOT_FOUND,
     FILE_READ_FAILED,
     INVALID_DAY,
     INVALID_MONTH,
+    INVALID_OPERATION_FOR_STATE,
     INVALID_PATH,
+    INVALID_REQUEST_VALUE,
     INVALID_SEGMENT_OR_STREAM,
     OPERATION_NO_LONGER_AVAILABLE,
+    RAW_MEDIA_NOT_AVAILABLE,
 )
 from solstone.convey.utils import DATE_RE, error_response, format_date, success_response
 from solstone.observe.hear import format_audio
 from solstone.observe.screen import format_screen
 from solstone.observe.utils import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS
 from solstone.think.cluster import cluster_scan, cluster_segments, scan_day
+from solstone.think.data_state import (
+    DataState,
+    create_analyzing_marker,
+    derive_modality_state,
+)
 from solstone.think.entities.journal import get_journal_principal, load_journal_entity
+from solstone.think.media import MIME_TYPES
 from solstone.think.models import get_usage_cost
 from solstone.think.supervisor import is_supervisor_up
-from solstone.think.utils import STREAM_RE, day_dirs, day_path, segment_path
+from solstone.think.utils import (
+    STREAM_RE,
+    day_dirs,
+    day_path,
+    segment_parse,
+    segment_path,
+)
 from solstone.think.utils import segment_key as validate_segment_key
 
 logger = logging.getLogger(__name__)
@@ -111,6 +130,7 @@ def _attach_streams_to_ranges(
 
     A segment contributes to a range when its half-open span overlaps the range
     and its types include ``content_type``. Streams are sorted and de-duped.
+    Range state uses best-state-wins: analyzed, then analyzing, otherwise pending.
     """
 
     def _to_min(hhmm: str) -> int:
@@ -122,6 +142,7 @@ def _attach_streams_to_ranges(
         range_start = _to_min(start)
         range_end = _to_min(end)
         streams: set[str] = set()
+        state = DataState.PENDING.value
         for seg in segments:
             if content_type not in seg.get("types", ()):
                 continue
@@ -129,7 +150,17 @@ def _attach_streams_to_ranges(
             seg_end = _to_min(seg["end"])
             if seg_start < range_end and seg_end > range_start:
                 streams.add(seg["stream"])
-        out.append({"start": start, "end": end, "streams": sorted(streams)})
+                modality_state = seg.get("data_state", {}).get(content_type)
+                if modality_state == DataState.ANALYZED.value:
+                    state = DataState.ANALYZED.value
+                elif (
+                    modality_state == DataState.ANALYZING.value
+                    and state != DataState.ANALYZED.value
+                ):
+                    state = DataState.ANALYZING.value
+        out.append(
+            {"start": start, "end": end, "streams": sorted(streams), "state": state}
+        )
     return out
 
 
@@ -205,11 +236,11 @@ def serve_file(day: str, rel_path: str) -> Any:
         return error_response(INVALID_DAY, status=404, detail="Day not found")
 
     try:
-        full_path = os.path.join(state.journal_root, day, rel_path)
-        day_dir = str(day_path(day, create=False))
-        if not os.path.commonpath([full_path, day_dir]) == day_dir:
+        day_dir = day_path(day, create=False).resolve()
+        full_path = (day_dir / rel_path).resolve()
+        if os.path.commonpath([str(full_path), str(day_dir)]) != str(day_dir):
             return error_response(INVALID_PATH, status=403, detail="Invalid file path")
-        if not os.path.isfile(full_path):
+        if not full_path.is_file():
             return error_response(FILE_NOT_FOUND, detail="File not found")
     except (OSError, ValueError):
         logger.warning(
@@ -222,7 +253,12 @@ def serve_file(day: str, rel_path: str) -> Any:
             FILE_READ_FAILED, status=404, detail="Failed to serve file"
         )
 
-    return send_file(full_path, conditional=True)
+    mimetype = MIME_TYPES.get(full_path.suffix.lower())
+    if mimetype is None:
+        raise ValueError(
+            f"unregistered media extension for serve_file: {full_path.suffix}"
+        )
+    return send_file(full_path, conditional=True, mimetype=mimetype)
 
 
 @transcripts_bp.route("/api/stats/<month>")
@@ -266,8 +302,6 @@ def _load_jsonl(path: str) -> list[dict]:
 
 def _format_time_from_offset(segment_key: str, offset_sec: float) -> str:
     """Convert segment start + offset to HH:MM:SS format."""
-    from solstone.think.utils import segment_parse
-
     start_time, _ = segment_parse(segment_key)
     if not start_time:
         return ""
@@ -279,6 +313,183 @@ def _format_time_from_offset(segment_key: str, offset_sec: float) -> str:
     m = (total_sec % 3600) // 60
     s = total_sec % 60
     return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def _read_audio_duration_seconds(entries: list[dict], segment_key: str) -> float:
+    """Best-effort segment audio duration in seconds (read-only).
+
+    Prefers the transcribe-time `duration` from the audio header entry (the
+    metadata entry without a `start`); falls back to the segment-key window
+    length (HHMMSS_LEN). Returns 0.0 if neither is available.
+    """
+    for entry in entries:
+        if "start" in entry:
+            continue
+        duration = entry.get("duration")
+        try:
+            duration_seconds = float(duration)
+        except (TypeError, ValueError):
+            continue
+        if duration_seconds > 0:
+            return duration_seconds
+
+    start_time, end_time = segment_parse(segment_key)
+    if not start_time or not end_time:
+        return 0.0
+
+    start_seconds = start_time.hour * 3600 + start_time.minute * 60 + start_time.second
+    end_seconds = end_time.hour * 3600 + end_time.minute * 60 + end_time.second
+    window_seconds = end_seconds - start_seconds
+    if window_seconds > 0:
+        return float(window_seconds)
+    return 0.0
+
+
+def _analyzing_marker_path(segment_dir_path: Path, modality: str) -> Path:
+    return segment_dir_path / f".analyzing_{modality}"
+
+
+def _analyze_failed_marker_path(segment_dir_path: Path, modality: str) -> Path:
+    return segment_dir_path / f".analyze_failed_{modality}"
+
+
+def _read_marker_payload(marker_path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _segment_modality_signals(
+    segment_dir_path: Path, modality: str
+) -> dict[str, bool | str]:
+    extensions = AUDIO_EXTENSIONS if modality == "audio" else VIDEO_EXTENSIONS
+    has_raw_present = any(
+        path.is_file() and path.suffix.lower() in extensions
+        for path in segment_dir_path.iterdir()
+    )
+    has_raw_reference = False
+    has_raw_file = False
+    has_jsonl = False
+    has_chunks = False
+    warning = False
+
+    patterns = ("*audio.jsonl",) if modality == "audio" else ("*screen.jsonl",)
+    for pattern in patterns:
+        for jsonl_path in sorted(segment_dir_path.glob(pattern)):
+            if not jsonl_path.is_file():
+                continue
+            has_jsonl = True
+            try:
+                entries = _load_jsonl(str(jsonl_path))
+                if modality == "audio":
+                    formatted_chunks, _meta = format_audio(
+                        entries, {"file_path": str(jsonl_path)}
+                    )
+                    for entry in entries:
+                        if "start" not in entry and "raw" in entry:
+                            raw_name = entry["raw"]
+                            if raw_name.endswith(AUDIO_EXTENSIONS):
+                                has_raw_reference = True
+                                has_raw_file = (segment_dir_path / raw_name).is_file()
+                            break
+                else:
+                    formatted_chunks, _meta = format_screen(
+                        entries, {"file_path": str(jsonl_path)}
+                    )
+                    for entry in entries:
+                        if "frame_id" not in entry and "raw" in entry:
+                            raw_name = entry["raw"]
+                            if raw_name.endswith(VIDEO_EXTENSIONS):
+                                has_raw_reference = True
+                                has_raw_file = (segment_dir_path / raw_name).is_file()
+                            break
+                has_chunks = has_chunks or bool(formatted_chunks)
+            except Exception:
+                warning = True
+
+    media_purged = has_raw_reference and not has_raw_file
+    if has_chunks:
+        state = derive_modality_state(
+            segment_dir_path,
+            modality,
+            has_chunks=True,
+            has_jsonl=has_jsonl,
+            has_raw=has_raw_present,
+        )
+    elif media_purged:
+        state = DataState.PURGED.value
+    else:
+        state = derive_modality_state(
+            segment_dir_path,
+            modality,
+            has_chunks=False,
+            has_jsonl=has_jsonl,
+            has_raw=has_raw_present,
+        )
+        if warning and state == DataState.PENDING.value:
+            state = DataState.FAILED.value
+
+    return {
+        "state": state,
+        "has_raw": has_raw_present,
+        "has_jsonl": has_jsonl,
+        "has_chunks": has_chunks,
+        "media_purged": media_purged,
+    }
+
+
+def _segment_data_state(segment_dir_path: Path) -> dict[str, str]:
+    data_state: dict[str, str] = {}
+    for modality in ("audio", "screen"):
+        state = str(_segment_modality_signals(segment_dir_path, modality)["state"])
+        if state != DataState.ABSENT.value:
+            data_state[modality] = state
+    return data_state
+
+
+def _write_failed_reprocess_marker(
+    marker_path: Path,
+    failed_path: Path,
+    reason: str,
+    detail: str,
+) -> None:
+    marker_payload = _read_marker_payload(marker_path)
+    payload = {
+        "started_at": marker_payload.get("started_at", ""),
+        "modality": marker_payload.get("modality", ""),
+        "reason": reason,
+        "failed_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "detail": detail,
+    }
+    tmp = failed_path.with_suffix(failed_path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(failed_path)
+    marker_path.unlink(missing_ok=True)
+
+
+def _watch_reprocess_completion(
+    proc: subprocess.Popen,
+    marker_path: Path,
+    failed_path: Path,
+) -> None:
+    try:
+        rc = proc.wait()
+        stderr_tail = ""
+        if proc.stderr:
+            stderr_tail = (proc.stderr.read() or b"")[-512:].decode("utf-8", "replace")
+        if rc == 0:
+            marker_path.unlink(missing_ok=True)
+            return
+        _write_failed_reprocess_marker(
+            marker_path,
+            failed_path,
+            f"exit_{rc}",
+            stderr_tail,
+        )
+    except Exception:
+        logger.exception("reprocess watcher failed")
 
 
 @transcripts_bp.route("/api/segment/<day>/<stream>/<segment_key>")
@@ -300,6 +511,8 @@ def segment_content(day: str, stream: str, segment_key: str) -> Any:
         - segment_key: segment directory name
         - cost: processing cost in USD (float, 0.0 if no data)
         - media_sizes: dict with audio/screen byte counts for raw media files
+        - media_purged: dict with audio/screen raw-reference purge flags
+        - data_state: dict of advertised modality states
     """
     if not DATE_RE.fullmatch(day):
         return error_response(INVALID_DAY, status=404, detail="Invalid day format")
@@ -318,8 +531,9 @@ def segment_content(day: str, stream: str, segment_key: str) -> Any:
             detail="Invalid segment key format",
         )
 
-    segment_dir = str(segment_path(day, segment_key, stream, create=False))
-    if not os.path.isdir(segment_dir):
+    segment_dir_path = segment_path(day, segment_key, stream, create=False)
+    segment_dir = str(segment_dir_path)
+    if not segment_dir_path.is_dir():
         return error_response(
             INVALID_SEGMENT_OR_STREAM,
             status=404,
@@ -328,14 +542,31 @@ def segment_content(day: str, stream: str, segment_key: str) -> Any:
 
     chunks: list[dict] = []
     audio_file_url = None
+    audio_duration = 0.0
     video_files: dict[str, str] = {}  # jsonl filename -> video URL
     media_sizes: dict[str, int] = {"audio": 0, "screen": 0}
-    has_raw_reference = False
-    has_raw_file = False
+    has_raw_reference = {"audio": False, "screen": False}
+    has_raw_file = {"audio": False, "screen": False}
+    has_raw_present = {"audio": False, "screen": False}
+    has_jsonl = {"audio": False, "screen": False}
+    counted_media_paths: set[Path] = set()
     warning_details: list[dict[str, str]] = []
 
+    for raw_media in sorted(segment_dir_path.iterdir()):
+        if not raw_media.is_file():
+            continue
+        suffix = raw_media.suffix.lower()
+        if suffix in AUDIO_EXTENSIONS:
+            has_raw_present["audio"] = True
+            counted_media_paths.add(raw_media.resolve())
+            media_sizes["audio"] += raw_media.stat().st_size
+        elif suffix in VIDEO_EXTENSIONS:
+            has_raw_present["screen"] = True
+            counted_media_paths.add(raw_media.resolve())
+            media_sizes["screen"] += raw_media.stat().st_size
+
     # Load speaker labels if available.
-    speaker_labels_path = Path(segment_dir) / "talents" / "speaker_labels.json"
+    speaker_labels_path = segment_dir_path / "talents" / "speaker_labels.json"
     speaker_map: dict[int, dict] = {}
     if speaker_labels_path.is_file():
         try:
@@ -367,8 +598,13 @@ def segment_content(day: str, stream: str, segment_key: str) -> Any:
     # Process audio files
     audio_files = glob(os.path.join(segment_dir, "*audio.jsonl"))
     for audio_path in sorted(audio_files):
+        has_jsonl["audio"] = True
         try:
             entries = _load_jsonl(audio_path)
+            audio_duration = max(
+                audio_duration,
+                _read_audio_duration_seconds(entries, segment_key),
+            )
             formatted_chunks, meta = format_audio(entries, {"file_path": audio_path})
 
             # Build sentence_id mapping (1-based over transcript entries only).
@@ -388,19 +624,24 @@ def segment_content(day: str, stream: str, segment_key: str) -> Any:
 
             # Validate raw points to an audio file (skip if not)
             if raw_audio and raw_audio.endswith(AUDIO_EXTENSIONS):
-                has_raw_reference = True
-                audio_full = os.path.join(segment_dir, raw_audio)
-                if os.path.isfile(audio_full):
-                    has_raw_file = True
+                has_raw_reference["audio"] = True
+                audio_full = segment_dir_path / raw_audio
+                if audio_full.is_file():
+                    has_raw_present["audio"] = True
+                    has_raw_file["audio"] = True
                     rel_path = f"{stream}/{segment_key}/{raw_audio}"
                     audio_file_url = f"/app/transcripts/api/serve_file/{day}/{rel_path}"
-                    media_sizes["audio"] += os.path.getsize(audio_full)
+                    resolved = audio_full.resolve()
+                    if resolved not in counted_media_paths:
+                        counted_media_paths.add(resolved)
+                        media_sizes["audio"] += audio_full.stat().st_size
 
             for chunk in formatted_chunks:
                 source = chunk.get("source", {})
                 # Audio has start time in HH:MM:SS format
                 time_str = source.get("start", "")
                 markdown = chunk.get("markdown", "")
+                markdown = re.sub(r"^\[\d{2}:\d{2}:\d{2}\]\s*", "", markdown)
 
                 chunk_sid = entry_to_sid.get(id(source))
                 speaker_label = speaker_map.get(chunk_sid) if chunk_sid else None
@@ -438,6 +679,7 @@ def segment_content(day: str, stream: str, segment_key: str) -> Any:
     # Process screen files and collect video URLs for client-side decoding
     screen_files = glob(os.path.join(segment_dir, "*screen.jsonl"))
     for screen_path in sorted(screen_files):
+        has_jsonl["screen"] = True
         try:
             entries = _load_jsonl(screen_path)
             formatted_chunks, meta = format_screen(entries, {"file_path": screen_path})
@@ -458,15 +700,19 @@ def segment_content(day: str, stream: str, segment_key: str) -> Any:
 
             # Validate raw points to a video file (skip if not, e.g. tmux)
             if raw_video and raw_video.endswith(VIDEO_EXTENSIONS):
-                has_raw_reference = True
-                video_full = os.path.join(segment_dir, raw_video)
-                if os.path.isfile(video_full):
-                    has_raw_file = True
+                has_raw_reference["screen"] = True
+                video_full = segment_dir_path / raw_video
+                if video_full.is_file():
+                    has_raw_present["screen"] = True
+                    has_raw_file["screen"] = True
                     rel_path = f"{stream}/{segment_key}/{raw_video}"
                     video_files[filename] = (
                         f"/app/transcripts/api/serve_file/{day}/{rel_path}"
                     )
-                    media_sizes["screen"] += os.path.getsize(video_full)
+                    resolved = video_full.resolve()
+                    if resolved not in counted_media_paths:
+                        counted_media_paths.add(resolved)
+                        media_sizes["screen"] += video_full.stat().st_size
 
             for chunk in formatted_chunks:
                 source = chunk.get("source", {})
@@ -538,14 +784,49 @@ def segment_content(day: str, stream: str, segment_key: str) -> Any:
 
     # Sort all chunks by timestamp
     chunks.sort(key=lambda c: c["timestamp"])
-    media_purged = has_raw_reference and not has_raw_file
+    media_purged = {
+        modality: has_raw_reference[modality] and not has_raw_file[modality]
+        for modality in ("audio", "screen")
+    }
+    warning_types = {
+        detail["type"]
+        for detail in warning_details
+        if detail.get("type") in ("audio", "screen")
+    }
+    data_state: dict[str, str] = {}
+    for modality in ("audio", "screen"):
+        has_chunks = any(chunk["type"] == modality for chunk in chunks)
+        # Sanctioned read-path mutation (CLAUDE.md §7 L1/L6 exception, ACs 10/11/12):
+        # the shared helper may rename/unlink sidecar markers. See data_state.derive_modality_state.
+        if has_chunks:
+            data_state[modality] = derive_modality_state(
+                segment_dir_path,
+                modality,
+                has_chunks=True,
+                has_jsonl=has_jsonl[modality],
+                has_raw=has_raw_present[modality],
+            )
+        elif media_purged[modality]:
+            data_state[modality] = DataState.PURGED.value
+        else:
+            state = derive_modality_state(
+                segment_dir_path,
+                modality,
+                has_chunks=has_chunks,
+                has_jsonl=has_jsonl[modality],
+                has_raw=has_raw_present[modality],
+            )
+            if state != DataState.ABSENT.value:
+                if modality in warning_types and state == DataState.PENDING.value:
+                    state = DataState.FAILED.value
+                data_state[modality] = state
 
     # Get cost data for this segment
     cost_data = get_usage_cost(day, segment=segment_key)
 
     # Collect talent .md files
     md_files = {}
-    talents_dir = Path(segment_dir) / "talents"
+    talents_dir = segment_dir_path / "talents"
     if talents_dir.is_dir():
         for md_path in sorted(talents_dir.rglob("*.md")):
             try:
@@ -554,26 +835,170 @@ def segment_content(day: str, stream: str, segment_key: str) -> Any:
             except Exception:
                 continue
 
-    # UI dedup: when a segment has screen chunks, the structural "screen" tab
-    # already covers it — drop talents/screen.md from md_files so the tab row
-    # doesn't render two screen-labeled tabs. Speaker attribution reads
-    # talents/screen.md directly from disk (apps/speakers/attribution.py),
-    # unaffected by this UI-side suppression.
-    if any(c["type"] == "screen" for c in chunks):
+    # UI dedup: when a segment has structural modality data (screen/audio),
+    # the structural tab already covers it — drop the matching talents/<mod>.md
+    # from md_files so the tab row doesn't render two tabs labeled the same.
+    # Speaker attribution reads talents/screen.md directly from disk
+    # (apps/speakers/attribution.py), unaffected by this UI-side suppression.
+    if "screen" in data_state:
         md_files.pop("screen", None)
+    if "audio" in data_state:
+        md_files.pop("audio", None)
 
     return jsonify(
         {
             "chunks": chunks,
             "audio_file": audio_file_url,
+            "duration": audio_duration,
             "video_files": video_files,
             "md_files": md_files,
             "segment_key": segment_key,
             "cost": cost_data["cost"],
             "media_sizes": media_sizes,
             "media_purged": media_purged,
+            "data_state": data_state,
             "warnings": len(warning_details),
             "warning_details": warning_details,
+        }
+    )
+
+
+@transcripts_bp.route(
+    "/api/segment/<day>/<stream>/<segment_key>/reprocess",
+    methods=["POST"],
+)
+def reprocess_segment(day: str, stream: str, segment_key: str) -> Any:
+    """Start per-modality reprocessing for a segment."""
+    if not DATE_RE.fullmatch(day):
+        return error_response(INVALID_DAY, detail="Invalid day format")
+
+    if not validate_segment_key(segment_key):
+        return error_response(
+            INVALID_SEGMENT_OR_STREAM,
+            detail="Invalid segment key format",
+        )
+
+    if not STREAM_RE.fullmatch(stream):
+        return error_response(INVALID_SEGMENT_OR_STREAM, detail="Invalid stream format")
+
+    day_dir = str(day_path(day, create=False))
+    segment_dir_path = segment_path(day, segment_key, stream, create=False)
+    segment_dir = str(segment_dir_path)
+
+    if not os.path.isdir(day_dir):
+        return error_response(
+            INVALID_DAY,
+            status=404,
+            detail="Day not found",
+        )
+
+    if not os.path.isdir(segment_dir):
+        return error_response(
+            INVALID_SEGMENT_OR_STREAM,
+            status=404,
+            detail="Segment not found",
+        )
+
+    if not os.path.commonpath([segment_dir, day_dir]) == day_dir:
+        return error_response(
+            INVALID_SEGMENT_OR_STREAM,
+            status=403,
+            detail="Invalid segment path",
+        )
+
+    body = request.get_json(silent=True)
+    modality = body.get("modality") if isinstance(body, dict) else None
+    if modality not in {"audio", "screen"}:
+        return error_response(
+            INVALID_REQUEST_VALUE,
+            detail="modality must be audio or screen",
+        )
+
+    signals = _segment_modality_signals(segment_dir_path, modality)
+    state = str(signals["state"])
+    has_raw = bool(signals["has_raw"])
+    if state == DataState.ANALYZED.value:
+        return error_response(
+            INVALID_OPERATION_FOR_STATE,
+            detail="Segment modality is already analyzed",
+        )
+    if state == DataState.PURGED.value or not has_raw:
+        return error_response(
+            RAW_MEDIA_NOT_AVAILABLE,
+            detail="Raw media is no longer available",
+        )
+    marker_path = _analyzing_marker_path(segment_dir_path, modality)
+    failed_path = _analyze_failed_marker_path(segment_dir_path, modality)
+    if state == DataState.ANALYZING.value:
+        data_state = _segment_data_state(segment_dir_path)
+        data_state[modality] = DataState.ANALYZING.value
+        marker = _read_marker_payload(marker_path)
+        return jsonify(
+            {
+                "data_state": data_state,
+                "marker": {"started_at": marker.get("started_at", "")},
+            }
+        )
+
+    if state == DataState.FAILED.value:
+        failed_path.unlink(missing_ok=True)
+
+    try:
+        marker_path = create_analyzing_marker(segment_dir_path, modality)
+    except FileExistsError:
+        data_state = _segment_data_state(segment_dir_path)
+        data_state[modality] = DataState.ANALYZING.value
+        marker = _read_marker_payload(marker_path)
+        return jsonify(
+            {
+                "data_state": data_state,
+                "marker": {"started_at": marker.get("started_at", "")},
+            }
+        )
+
+    argv = [
+        sys.executable,
+        "-m",
+        "solstone.observe.sense",
+        "--day",
+        day,
+        "--segment",
+        segment_key,
+        "--stream",
+        stream,
+        "--reprocess",
+        modality,
+    ]
+    try:
+        proc = subprocess.Popen(
+            argv,
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as exc:
+        marker_path.unlink(missing_ok=True)
+        return error_response(
+            FILE_READ_FAILED,
+            status=500,
+            detail=f"Failed to start analysis: {exc}",
+        )
+
+    watcher = threading.Thread(
+        target=_watch_reprocess_completion,
+        args=(proc, marker_path, failed_path),
+        daemon=True,
+    )
+    watcher.start()
+
+    data_state = _segment_data_state(segment_dir_path)
+    data_state[modality] = DataState.ANALYZING.value
+    marker = _read_marker_payload(marker_path)
+    return jsonify(
+        {
+            "data_state": data_state,
+            "marker": {"started_at": marker.get("started_at", "")},
         }
     )
 

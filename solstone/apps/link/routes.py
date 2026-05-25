@@ -26,30 +26,34 @@ cannot forge a cert signed by the pinned CA.
 from __future__ import annotations
 
 import datetime as dt
+import ipaddress
 import json as _json
 import logging
 import re
 import socket
 from dataclasses import asdict, dataclass
+from importlib import import_module
+from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 from cryptography.hazmat.primitives import serialization
 from flask import Blueprint, Response, abort, jsonify, request
 
 from solstone.apps.link import copy as link_copy
 from solstone.apps.link.copy import (
-    MANUAL_CODE_GROUP,
     MANUAL_CODE_LEN,
     PAIR_LINK_HOST,
     PAIR_LINK_PATH,
 )
+from solstone.apps.link.crockford32 import encode as crockford_encode
 from solstone.apps.link.manual_code import (
     generate as generate_manual_code,
 )
 from solstone.apps.link.manual_code import (
     normalize as normalize_manual_code,
 )
+from solstone.apps.observer.utils import mint_pl_observer_record, revoke_observer_record
+from solstone.apps.utils import log_app_action
 from solstone.convey import emit
 from solstone.convey.reasons import (
     MISSING_REQUIRED_FIELD,
@@ -82,12 +86,18 @@ from solstone.think.link.paths import (
     nonces_path,
     relay_url,
 )
+from solstone.think.utils import get_journal, now_ms
 
 logger = logging.getLogger(__name__)
-MANUAL_CODE_RE = re.compile(
-    rf"^[A-Z2-9]{{{MANUAL_CODE_GROUP}}}"
-    rf"[A-Z2-9]{{{MANUAL_CODE_LEN - MANUAL_CODE_GROUP}}}$"
-)
+MANUAL_CODE_RE = re.compile(rf"^[0-9A-HJKMNP-TV-Z]{{{MANUAL_CODE_LEN}}}$")
+_SENDER_INSTANCE_ID_RE = re.compile(r"^[A-Za-z0-9-]{1,256}$")
+VALID_ROLES = {"phone", "observer", "peer"}
+journal_sources = import_module("solstone.apps.import.journal_sources")
+create_state_directory = journal_sources.create_state_directory
+load_journal_source_by_fingerprint = journal_sources.load_journal_source_by_fingerprint
+save_journal_source = journal_sources.save_journal_source
+journal_source_state_prefix = journal_sources.journal_source_state_prefix
+mint_pl_journal_source_record = journal_sources.mint_pl_journal_source_record
 
 link_bp = Blueprint(
     "app:link",
@@ -162,17 +172,24 @@ def _ca_fingerprint() -> str:
 
 
 def _build_pair_link(
-    lan_url: str,
+    host: str,
+    port: int,
     nonce: str,
     ca_fp: str,
-    device_label: str,
 ) -> str:
-    fp_hex = ca_fp.removeprefix("sha256:")
-    encoded_label = quote(device_label, safe="")
-    return (
-        f"https://{PAIR_LINK_HOST}{PAIR_LINK_PATH}"
-        f"#h={lan_url}&t={nonce}&f={fp_hex}&l={encoded_label}&v=1"
-    )
+    """Build the v2 pair-link URL.
+
+    Layout:
+    version(1) | addr_type(1) | ipv4(4) | port_be(2) | nonce(8) | ca_fp[:16].
+    Encoded as 52-char uppercase Crockford base32 in the URL fragment.
+    """
+    ipv4_bytes = ipaddress.IPv4Address(host).packed
+    port_bytes = port.to_bytes(2, "big")
+    nonce_bytes = bytes.fromhex(nonce)
+    ca_fp_bytes = bytes.fromhex(ca_fp)[:16]
+    blob = b"\x02\x01" + ipv4_bytes + port_bytes + nonce_bytes + ca_fp_bytes
+    assert len(blob) == 32
+    return f"https://{PAIR_LINK_HOST}{PAIR_LINK_PATH}#{crockford_encode(blob)}"
 
 
 @dataclass(frozen=True)
@@ -258,20 +275,34 @@ def pair_start() -> Any:
     device_label = (
         str(payload.get("device_label") or "").strip() or _default_device_label()
     )
+    role = payload.get("role", "phone")
+    if not isinstance(role, str) or role not in VALID_ROLES:
+        return error_response(PAIRING_REQUEST_INVALID, detail="invalid role")
 
+    lan_url = _resolve_host_port()
+    hostname, _, port_str = lan_url.partition(":")
+    try:
+        ipaddress.IPv4Address(hostname)
+    except ValueError:
+        return error_response(
+            PAIRING_REQUEST_INVALID,
+            detail=f"pair-link requires an IPv4 LAN address; got {hostname!r}",
+        )
+    port = int(port_str) if port_str else 80
+
+    ca_fp = _ca_fingerprint()
     nonce = generate_nonce()
     manual_code_hyphenated = generate_manual_code()
+    pair_link = _build_pair_link(hostname, port, nonce, ca_fp)
     _nonces().add(
         nonce,
         device_label,
+        role=role,
         manual_code=normalize_manual_code(manual_code_hyphenated),
     )
-
-    ca_fp = _ca_fingerprint()
-    lan_url = _resolve_host_port()
     response = PairStartResponse(
         nonce=nonce,
-        pair_link=_build_pair_link(lan_url, nonce, ca_fp, device_label),
+        pair_link=pair_link,
         manual_code=manual_code_hyphenated,
         expires_in=300,
         device_label=device_label,
@@ -285,18 +316,14 @@ def _complete_pairing(
     consumed: Nonce,
     csr_pem: str,
     device_label: str,
+    *,
+    sender_instance_id: str | None = None,
 ) -> tuple[dict[str, Any], str, str]:
     ca = load_or_generate_ca(ca_dir())
     client_cert_pem, fingerprint = sign_csr(ca, csr_pem, device_label)
 
     state = LinkState.load_or_create()
     paired_at = _utc_now_iso()
-    _authorized().add(
-        fingerprint=fingerprint,
-        device_label=device_label,
-        instance_id=state.instance_id,
-        paired_at=paired_at,
-    )
     attestation = mint_attestation(ca, state.instance_id, fingerprint)
     ca_chain_pem = ca.cert.public_bytes(serialization.Encoding.PEM).decode("ascii")
     response: dict[str, Any] = {
@@ -310,6 +337,44 @@ def _complete_pairing(
     endpoints = _current_local_endpoints()
     if endpoints:
         response["local_endpoints"] = [endpoint_to_dict(ep) for ep in endpoints]
+
+    observer_record_path = None
+    journal_source_record_path = None
+    try:
+        if consumed.role == "peer":
+            journal_source_record_path = mint_pl_journal_source_record(
+                fingerprint=fingerprint,
+                device_label=device_label,
+                paired_at=paired_at,
+                peer_instance_id=sender_instance_id,
+            )
+            create_state_directory(Path(get_journal()), journal_source_record_path.stem)
+        if consumed.role == "observer":
+            observer_record_path = mint_pl_observer_record(
+                fingerprint=fingerprint,
+                device_label=device_label,
+                paired_at=paired_at,
+            )
+        _authorized().add(
+            fingerprint=fingerprint,
+            device_label=device_label,
+            instance_id=state.instance_id,
+            role=consumed.role,
+            paired_at=paired_at,
+        )
+    except Exception:
+        if observer_record_path is not None:
+            try:
+                observer_record_path.unlink()
+            except FileNotFoundError:
+                pass
+        if journal_source_record_path is not None:
+            try:
+                journal_source_record_path.unlink()
+            except FileNotFoundError:
+                pass
+        raise
+
     return response, fingerprint, paired_at
 
 
@@ -360,6 +425,17 @@ def pair() -> Any:
             MISSING_REQUIRED_FIELD,
             detail="missing fields (nonce + csr required)",
         )
+    raw_sender_instance_id = body.get("sender_instance_id")
+    sender_instance_id: str | None = None
+    if raw_sender_instance_id is not None:
+        if not isinstance(
+            raw_sender_instance_id, str
+        ) or not _SENDER_INSTANCE_ID_RE.fullmatch(raw_sender_instance_id):
+            return error_response(
+                PAIRING_REQUEST_INVALID,
+                detail=f"bad sender_instance_id: {raw_sender_instance_id}",
+            )
+        sender_instance_id = raw_sender_instance_id
 
     consumed = _nonces().consume(nonce_value)
     if consumed is None:
@@ -375,6 +451,7 @@ def pair() -> Any:
             consumed,
             csr_pem,
             effective_label,
+            sender_instance_id=sender_instance_id,
         )
     except ValueError as exc:
         logger.info("pair: bad csr: %s", exc)
@@ -396,6 +473,17 @@ def by_code() -> Any:
             MISSING_REQUIRED_FIELD,
             detail="missing fields (code + csr required)",
         )
+    raw_sender_instance_id = body.get("sender_instance_id")
+    sender_instance_id: str | None = None
+    if raw_sender_instance_id is not None:
+        if not isinstance(
+            raw_sender_instance_id, str
+        ) or not _SENDER_INSTANCE_ID_RE.fullmatch(raw_sender_instance_id):
+            return error_response(
+                PAIRING_REQUEST_INVALID,
+                detail=f"bad sender_instance_id: {raw_sender_instance_id}",
+            )
+        sender_instance_id = raw_sender_instance_id
 
     canonical_code = normalize_manual_code(code)
     if not MANUAL_CODE_RE.fullmatch(canonical_code):
@@ -414,6 +502,7 @@ def by_code() -> Any:
             consumed,
             csr_pem,
             effective_label,
+            sender_instance_id=sender_instance_id,
         )
     except ValueError as exc:
         logger.info("by-code: bad csr: %s", exc)
@@ -429,25 +518,100 @@ def unpair() -> Any:
     Body (JSON): {"fingerprint": "sha256:..."} or {"device_label": "..."}
     """
     body = request.get_json(silent=True) or {}
-    fingerprint = body.get("fingerprint")
-    device_label = body.get("device_label")
-    if not isinstance(fingerprint, str):
-        if not isinstance(device_label, str):
-            return error_response(
-                MISSING_REQUIRED_FIELD,
-                detail="fingerprint or device_label required",
-            )
-        entry = _authorized().find_by_label(device_label)
-        if entry is None:
-            return error_response(
-                PAIRED_DEVICE_NOT_FOUND,
-                detail="no paired device with that label",
-            )
-        fingerprint = entry.fingerprint
+    raw_fingerprint = body.get("fingerprint")
+    raw_device_label = body.get("device_label")
+    fingerprint = raw_fingerprint.strip() if isinstance(raw_fingerprint, str) else None
+    device_label = (
+        raw_device_label.strip() if isinstance(raw_device_label, str) else None
+    )
+    fingerprint = fingerprint or None
+    device_label = device_label or None
 
-    removed = _authorized().remove(fingerprint)
-    if not removed:
-        return error_response(PAIRED_DEVICE_NOT_FOUND, detail="fingerprint not paired")
+    authorized = _authorized()
+    if fingerprint is not None:
+        entry = authorized.get(fingerprint)
+    elif device_label is not None:
+        entry = authorized.find_by_label(device_label)
+        if entry is not None:
+            fingerprint = entry.fingerprint
+    else:
+        return error_response(
+            MISSING_REQUIRED_FIELD,
+            detail="fingerprint or device_label required",
+        )
+
+    if entry is None:
+        detail = (
+            "fingerprint not paired"
+            if fingerprint is not None
+            else "no paired device with that label"
+        )
+        return error_response(
+            PAIRED_DEVICE_NOT_FOUND,
+            detail=detail,
+        )
+
+    fp_hex = fingerprint.removeprefix("sha256:")
+    short_fp = fp_hex[:16]
+    role = entry.role
+
+    if role == "phone":
+        removed = authorized.remove(fingerprint)
+        if not removed:
+            logger.warning(
+                "unpair: phone entry %s already absent from authorized_clients",
+                short_fp,
+            )
+    elif role == "observer":
+        try:
+            revoke_observer_record(short_fp)
+        except ValueError as exc:
+            msg = str(exc)
+            if "already revoked" in msg:
+                logger.warning("unpair: observer %s already revoked: %s", short_fp, msg)
+            else:
+                logger.warning(
+                    "unpair: observer record missing for %s: %s", short_fp, msg
+                )
+            authorized.remove(fingerprint)
+        except RuntimeError as exc:
+            logger.error(
+                "unpair: failed to save observer record for %s: %s",
+                short_fp,
+                exc,
+            )
+            authorized.remove(fingerprint)
+    elif role == "peer":
+        source = load_journal_source_by_fingerprint(fingerprint)
+        if source is None:
+            logger.warning("unpair: peer journal source missing for %s", short_fp)
+        elif source.get("revoked"):
+            logger.warning("unpair: peer journal source %s already revoked", short_fp)
+        else:
+            source["revoked"] = True
+            source["revoked_at"] = now_ms()
+            if save_journal_source(source):
+                log_app_action(
+                    app="import",
+                    facet=None,
+                    action="journal_source_revoke",
+                    params={
+                        "name": source.get("device_label") or source.get("name"),
+                        "key_prefix": journal_source_state_prefix(source),
+                    },
+                )
+            else:
+                logger.error(
+                    "unpair: failed to save peer journal source for %s", short_fp
+                )
+        authorized.remove(fingerprint)
+    else:
+        logger.warning(
+            "unpair: unexpected role %r for entry %s; treating as phone",
+            role,
+            short_fp,
+        )
+        authorized.remove(fingerprint)
     return jsonify({"unpaired": fingerprint})
 
 
@@ -459,6 +623,7 @@ def _entry_to_json(entry: ClientEntry) -> dict[str, Any]:
         "device_label": entry.device_label,
         "paired_at": entry.paired_at,
         "last_seen_at": entry.last_seen_at,
+        "role": entry.role,
     }
 
 

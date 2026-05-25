@@ -5,13 +5,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from solstone.apps.observer.utils import list_observers, save_observer
+from solstone.apps.observer.utils import (
+    list_observers,
+    mint_pl_observer_record,
+    revoke_observer_record,
+    save_observer,
+)
 from solstone.observe import observer_cli
+from solstone.think.link.auth import AuthorizedClients
+from solstone.think.link.paths import authorized_clients_path
 
 
 @pytest.fixture
@@ -68,10 +76,13 @@ def test_create_observer_record_reuses_existing_without_create_side_effects(
         "archon", reuse_existing=True
     )
 
-    assert record == existing
+    assert record["key"] == existing["key"]
+    assert record["name"] == existing["name"]
+    assert record["mode"] == "dl"
+    assert record["filename_prefix"] == "existing"
     assert key == "existing-key-abcdef"
     assert reused is True
-    assert list_observers() == [existing]
+    assert list_observers() == [record]
 
 
 def test_create_observer_record_fresh_create_returns_reused_false_and_logs(
@@ -223,3 +234,158 @@ def test_cmd_create_reuse_existing_creates_normally_when_absent(
             "params": {"name": "archon", "key_prefix": "fresh-ke"},
         }
     ]
+
+
+def test_cmd_list_json_includes_mode_and_width_aware_prefix(
+    observer_cli_env,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert save_observer(_observer(name="desktop", key="abcdefgh12345678"))
+    mint_pl_observer_record(
+        fingerprint="sha256:" + ("a" * 64),
+        device_label="pl-laptop",
+        paired_at="2026-05-20T00:00:00Z",
+    )
+    args = argparse.Namespace(json_output=True)
+
+    rc = observer_cli.cmd_list(args)
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    rows = {row["name"]: row for row in json.loads(captured.out)}
+    assert rows["desktop"]["mode"] == "dl"
+    assert rows["desktop"]["prefix"] == "abcdefgh"
+    assert rows["pl-laptop"]["mode"] == "pl"
+    assert rows["pl-laptop"]["prefix"] == "a" * 16
+
+
+def test_cmd_list_human_shows_mode_column(
+    observer_cli_env,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert save_observer(_observer(name="desktop", key="abcdefgh12345678"))
+    mint_pl_observer_record(
+        fingerprint="sha256:" + ("b" * 64),
+        device_label="pl-laptop",
+        paired_at="2026-05-20T00:00:00Z",
+    )
+    args = argparse.Namespace(json_output=False)
+
+    rc = observer_cli.cmd_list(args)
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "Name                 Mode  Prefix" in captured.out
+    assert "desktop              dl    abcdefgh" in captured.out
+    assert "pl-laptop" in captured.out
+    assert f"pl    {'b' * 16}" in captured.out
+
+
+def test_cmd_status_single_reports_mode_and_pl_prefix(
+    observer_cli_env,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mint_pl_observer_record(
+        fingerprint="sha256:" + ("c" * 64),
+        device_label="pl-laptop",
+        paired_at="2026-05-20T00:00:00Z",
+    )
+
+    rc = observer_cli.cmd_status(
+        argparse.Namespace(identifier="pl-laptop", json_output=True)
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    payload = json.loads(captured.out)
+    assert payload["mode"] == "pl"
+    assert payload["prefix"] == "c" * 16
+
+
+def test_cmd_status_all_table_shows_mode_and_prefix(
+    observer_cli_env,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert save_observer(_observer(name="desktop", key="abcdefgh12345678"))
+    mint_pl_observer_record(
+        fingerprint="sha256:" + ("d" * 64),
+        device_label="pl-laptop",
+        paired_at="2026-05-20T00:00:00Z",
+    )
+
+    rc = observer_cli.cmd_status(argparse.Namespace(identifier=None, json_output=False))
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "Name                 Mode  Prefix" in captured.out
+    assert "desktop              dl    abcdefgh" in captured.out
+    assert "pl-laptop" in captured.out
+    assert f"pl    {'d' * 16}" in captured.out
+
+
+def test_revoke_pl_observer_removes_fingerprint(observer_cli_env) -> None:
+    fingerprint = "sha256:" + ("e" * 64)
+    mint_pl_observer_record(
+        fingerprint=fingerprint,
+        device_label="pl-laptop",
+        paired_at="2026-05-20T00:00:00Z",
+    )
+    authorized = AuthorizedClients(authorized_clients_path())
+    authorized.add(
+        fingerprint,
+        "pl-laptop",
+        "inst-1",
+        role="observer",
+        paired_at="2026-05-20T00:00:00Z",
+    )
+
+    record = revoke_observer_record("pl-laptop")
+
+    assert record["revoked"] is True
+    assert (
+        AuthorizedClients(authorized_clients_path()).is_authorized(fingerprint) is False
+    )
+    payload = json.loads(authorized_clients_path().read_text("utf-8"))
+    assert all(entry.get("fingerprint") != fingerprint for entry in payload)
+
+
+def test_revoke_dl_observer_leaves_authorized_clients_untouched(
+    observer_cli_env,
+) -> None:
+    assert save_observer(_observer(name="desktop", key="abcdefgh12345678"))
+    fingerprint = "sha256:" + ("f" * 64)
+    authorized = AuthorizedClients(authorized_clients_path())
+    authorized.add(
+        fingerprint,
+        "phone",
+        "inst-1",
+        paired_at="2026-05-20T00:00:00Z",
+    )
+    before = authorized_clients_path().read_bytes()
+
+    record = revoke_observer_record("desktop")
+
+    assert record["revoked"] is True
+    assert authorized_clients_path().read_bytes() == before
+    assert (
+        AuthorizedClients(authorized_clients_path()).is_authorized(fingerprint) is True
+    )
+
+
+def test_revoke_pl_observer_missing_fingerprint_warns_but_succeeds(
+    observer_cli_env,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fingerprint = "sha256:" + ("a" * 64)
+    mint_pl_observer_record(
+        fingerprint=fingerprint,
+        device_label="missing-ledger",
+        paired_at="2026-05-20T00:00:00Z",
+    )
+    caplog.set_level(logging.WARNING, logger="solstone.apps.observer.utils")
+
+    record = revoke_observer_record("missing-ledger")
+
+    assert record["revoked"] is True
+    assert "missing-ledger" in caplog.text
+    assert "fingerprint was not authorized" in caplog.text

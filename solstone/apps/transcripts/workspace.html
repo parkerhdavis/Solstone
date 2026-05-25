@@ -3,28 +3,7 @@
 <style>
 /* Transcripts app styles - all classes prefixed with .tr- to avoid conflicts */
 
-/*
- * Layout context:
- * - date_nav: true adds has-date-nav to body, which adds date-nav-height to workspace margin-top
- * - Need to account for facet-bar + date-nav at top
- *
- * Height calculation:
- * - 100vh (viewport)
- * - minus 60px (facet-bar-height)
- * - minus 40px (date-nav-height)
- */
-
-/* Lock workspace scrolling - content must fit, only .tr-panel scrolls */
-body.has-date-nav .workspace:has(.tr-wrap) {
-  overflow: hidden;
-  height: calc(100vh - var(--facet-bar-height) - var(--date-nav-height));
-}
-
-body.has-app-bar.has-date-nav .workspace:has(.tr-wrap) {
-  height: calc(
-    100vh - var(--facet-bar-height) - var(--date-nav-height) - var(--app-bar-height) - 80px
-  );
-}
+/* Columns are sticky+viewport-height; the content column scrolls the page. */
 
 /* Main container */
 .tr-wrap {
@@ -32,12 +11,10 @@ body.has-app-bar.has-date-nav .workspace:has(.tr-wrap) {
   margin: 0 auto;
   padding: 16px 24px;
   box-sizing: border-box;
-  height: 100%;
-  overflow: hidden;
 }
 
 .tr-card {
-  height: 100%;
+  min-height: calc(100vh - var(--facet-bar-height) - var(--date-nav-height) - 48px);
   background: #ffffff;
   border: 1px solid #e5e7eb;
   border-radius: 12px;
@@ -45,15 +22,22 @@ body.has-app-bar.has-date-nav .workspace:has(.tr-wrap) {
   --tr-day-col: 200px;
   --tr-zoom-col: 120px;
   grid-template-columns: var(--tr-day-col) var(--tr-zoom-col) 1fr;
-  overflow: hidden;
+}
+
+body.has-app-bar .tr-card {
+  min-height: calc(
+    100vh - var(--facet-bar-height) - var(--date-nav-height) - var(--app-bar-height) - 48px
+  );
 }
 
 /* Left timeline */
 .tr-timeline {
-  position: relative;
+  position: sticky;
+  top: calc(var(--facet-bar-height) + var(--date-nav-height) + 16px);
+  align-self: start;
   border-right: 1px solid #d1d5db;
   user-select: none;
-  height: 100%;
+  height: calc(100vh - var(--facet-bar-height) - var(--date-nav-height) - 32px);
   overflow: hidden;
   touch-action: pan-y;
   cursor: crosshair;
@@ -268,6 +252,56 @@ body.has-app-bar.has-date-nav .workspace:has(.tr-wrap) {
   border: 1px solid #eab308;
 }
 
+.tr-seg-pending {
+  opacity: 0.9;
+  border-style: dashed;
+}
+
+.tr-seg-audio.tr-seg-pending {
+  background:
+    repeating-linear-gradient(
+      135deg,
+      rgba(74, 222, 128, 0.45) 0,
+      rgba(74, 222, 128, 0.45) 3px,
+      rgba(134, 239, 172, 0.16) 3px,
+      rgba(134, 239, 172, 0.16) 8px
+    );
+  border-color: #22c55e;
+}
+
+.tr-seg-screen.tr-seg-pending {
+  background:
+    repeating-linear-gradient(
+      135deg,
+      rgba(234, 179, 8, 0.45) 0,
+      rgba(234, 179, 8, 0.45) 3px,
+      rgba(253, 230, 138, 0.18) 3px,
+      rgba(253, 230, 138, 0.18) 8px
+    );
+  border-color: #ca8a04;
+}
+
+.tr-seg-analyzing {
+  opacity: 1;
+  border-style: solid;
+  animation: tr-analyzing-pulse 1.5s ease-in-out infinite;
+}
+
+.tr-seg-audio.tr-seg-analyzing {
+  background: rgba(45, 212, 191, 0.58);
+  border-color: #0d9488;
+}
+
+.tr-seg-screen.tr-seg-analyzing {
+  background: rgba(96, 165, 250, 0.58);
+  border-color: #2563eb;
+}
+
+@keyframes tr-analyzing-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
 .tr-now-marker {
   position: absolute;
   left: 64px;
@@ -294,9 +328,7 @@ body.has-app-bar.has-date-nav .workspace:has(.tr-wrap) {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  height: 100%;
   box-sizing: border-box;
-  overflow: hidden;
 }
 
 .tr-header {
@@ -381,6 +413,23 @@ body.has-app-bar.has-date-nav .workspace:has(.tr-wrap) {
 
 .tr-tab-pane.active {
   display: block;
+}
+
+.tr-state-stack {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+}
+
+.tr-analyze-action[disabled] {
+  cursor: progress;
+  opacity: 0.65;
+}
+
+.tr-analyze-error {
+  margin: 8px 0 0;
+  color: #991b1b;
+  font-size: 13px;
 }
 
 .tr-md-content {
@@ -473,8 +522,6 @@ body.has-app-bar.has-date-nav .workspace:has(.tr-wrap) {
 .tr-panel {
   flex: 1;
   padding: 16px;
-  overflow-y: auto;
-  min-height: 0;
   overflow-x: hidden;
   font-size: 14px;
   line-height: 1.5;
@@ -498,13 +545,22 @@ body.has-app-bar.has-date-nav .workspace:has(.tr-wrap) {
 
 /* Middle zoom timeline (segment selector) */
 .tr-zoom {
-  position: relative;
+  position: sticky;
+  top: calc(var(--facet-bar-height) + var(--date-nav-height) + 16px);
+  align-self: start;
   border-right: 1px solid #e5e7eb;
   user-select: none;
-  height: 100%;
+  height: calc(100vh - var(--facet-bar-height) - var(--date-nav-height) - 32px);
   overflow: hidden;
   padding: 12px 0;
   box-sizing: border-box;
+}
+
+body.has-app-bar .tr-timeline,
+body.has-app-bar .tr-zoom {
+  height: calc(
+    100vh - var(--facet-bar-height) - var(--date-nav-height) - var(--app-bar-height) - 32px
+  );
 }
 
 .tr-zoom-timeline-label {
@@ -627,6 +683,66 @@ body.has-app-bar.has-date-nav .workspace:has(.tr-wrap) {
 .tr-zoom-pill-both {
   background: linear-gradient(to right, rgba(134, 239, 172, 0.75), rgba(194, 234, 155, 0.7) 50%, rgba(253, 230, 138, 0.75));
   border: 1px solid #84cc16;
+}
+
+.tr-zoom-pill-pending {
+  border-style: dashed;
+}
+
+.tr-zoom-pill-audio.tr-zoom-pill-pending {
+  background:
+    repeating-linear-gradient(
+      135deg,
+      rgba(74, 222, 128, 0.38) 0,
+      rgba(74, 222, 128, 0.38) 4px,
+      rgba(134, 239, 172, 0.18) 4px,
+      rgba(134, 239, 172, 0.18) 10px
+    );
+  border-color: #22c55e;
+}
+
+.tr-zoom-pill-screen.tr-zoom-pill-pending {
+  background:
+    repeating-linear-gradient(
+      135deg,
+      rgba(234, 179, 8, 0.38) 0,
+      rgba(234, 179, 8, 0.38) 4px,
+      rgba(253, 230, 138, 0.2) 4px,
+      rgba(253, 230, 138, 0.2) 10px
+    );
+  border-color: #ca8a04;
+}
+
+.tr-zoom-pill-both.tr-zoom-pill-pending {
+  background:
+    repeating-linear-gradient(
+      135deg,
+      rgba(132, 204, 22, 0.38) 0,
+      rgba(132, 204, 22, 0.38) 4px,
+      rgba(194, 234, 155, 0.2) 4px,
+      rgba(194, 234, 155, 0.2) 10px
+    );
+  border-color: #65a30d;
+}
+
+.tr-zoom-pill-analyzing {
+  border-style: solid;
+  animation: tr-analyzing-pulse 1.5s ease-in-out infinite;
+}
+
+.tr-zoom-pill-audio.tr-zoom-pill-analyzing {
+  background: rgba(45, 212, 191, 0.6);
+  border-color: #0d9488;
+}
+
+.tr-zoom-pill-screen.tr-zoom-pill-analyzing {
+  background: rgba(96, 165, 250, 0.6);
+  border-color: #2563eb;
+}
+
+.tr-zoom-pill-both.tr-zoom-pill-analyzing {
+  background: linear-gradient(to right, rgba(45, 212, 191, 0.62), rgba(96, 165, 250, 0.62));
+  border-color: #0891b2;
 }
 
 /* Dragging state */
@@ -1474,7 +1590,7 @@ body.presentation-mode .tr-screen-text { font-size: 16px; padding: 12px 16px; bo
 
 <script>
 (() => {
-  const escapeHtml = window.AppServices.escapeHtml;
+  const escapeHtml = (value) => window.AppServices.escapeHtml(value);
   // Timeline bounds - computed dynamically from content
   const DEFAULT_START = 8 * 60;   // 8:00 AM default
   const DEFAULT_END = 20 * 60;    // 8:00 PM default
@@ -1529,13 +1645,34 @@ body.presentation-mode .tr-screen-text { font-size: 16px; padding: 12px 16px; bo
   const deleteSegmentModal = document.getElementById('trDeleteSegmentModal');
   const deleteSegmentModalBody = document.getElementById('trDeleteSegmentModalBody');
   const deleteSegmentModalConfirm = document.getElementById('trDeleteSegmentModalConfirm');
-	  const emptyIcons = {
+  const emptyIcons = {
     day: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>',
     nothing: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>',
     transcript: '<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>',
     audio: '<svg viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>',
-	    screen: '<svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>'
-	  };
+    screen: '<svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>'
+  };
+
+  const BTN_LABEL_PENDING = 'analyze now';
+  const BTN_LABEL_FAILED = 'try again';
+  const ANALYZING_LABEL = 'analyzing…';
+  const BTN_TITLE = modality => `Process this segment's raw ${modality} observed data and generate analyzed content.`;
+  const ANALYZE_POLL_INTERVAL_MS = 3000;
+  const ANALYZE_POLL_MAX_MS = 30 * 60 * 1000;
+
+  const DATA_STATE_SUFFIX = {
+    pending: 'analysis pending',
+    analyzing: '',
+    failed: 'analysis failed'
+  };
+
+  function dataStateCopy(modality, state) {
+    if (state === 'analyzing') {
+      return `${modality} observed · ${ANALYZING_LABEL}`;
+    }
+    const suffix = DATA_STATE_SUFFIX[state];
+    return suffix ? `${modality} observed · ${suffix}` : '';
+  }
 
 	  function warningTimestampLabel(ts) {
 	    const parsed = new Date(ts);
@@ -1644,6 +1781,7 @@ body.presentation-mode .tr-screen-text { font-size: 16px; padding: 12px 16px; bo
           if (mediaError?.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED) {
             const entry = this.videos.get(url);
             entry.unsupported = true;
+            entry.errorCode = mediaError.code;
             entry.ready = true;
             if (!this.warnedUrls.has(url)) {
               this.warnedUrls.add(url);
@@ -1661,6 +1799,7 @@ body.presentation-mode .tr-screen-text { font-size: 16px; padding: 12px 16px; bo
         video,
         ready: false,
         unsupported: false,
+        errorCode: null,
         width: 0,
         height: 0,
         promise,
@@ -1781,7 +1920,7 @@ body.presentation-mode .tr-screen-text { font-size: 16px; padding: 12px 16px; bo
       this.warnedUrls.clear();
     }
 
-    _drawUnsupportedPlaceholder(canvas, width, height) {
+    _drawUnsupportedPlaceholder(canvas, width, height, errorCode = null) {
       canvas.width = width;
       canvas.height = height;
 
@@ -1837,6 +1976,15 @@ body.presentation-mode .tr-screen-text { font-size: 16px; padding: 12px 16px; bo
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
       ctx.fillText('Format not supported', width / 2, standY + gap * 0.55);
+      if (errorCode !== null) {
+        ctx.fillStyle = '#6b7280';
+        ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+        ctx.fillText(
+          `code ${errorCode}`,
+          width / 2,
+          standY + gap * 0.55 + textSize + 2
+        );
+      }
 
       canvas.classList.remove('loading');
     }
@@ -1848,7 +1996,12 @@ body.presentation-mode .tr-screen-text { font-size: 16px; padding: 12px 16px; bo
       try {
         const thumb = await this.captureThumbnail(videoUrl, frameId, width, height);
         if (!thumb) {
-          this._drawUnsupportedPlaceholder(canvas, width || 120, height || 68);
+          this._drawUnsupportedPlaceholder(
+            canvas,
+            width || 120,
+            height || 68,
+            this.videos.get(videoUrl)?.errorCode ?? null
+          );
           return false;
         }
 
@@ -1874,7 +2027,12 @@ body.presentation-mode .tr-screen-text { font-size: 16px; padding: 12px 16px; bo
       try {
         const bitmap = await this.captureFullFrame(videoUrl, frameId);
         if (!bitmap) {
-          this._drawUnsupportedPlaceholder(canvas, 640, 360);
+          this._drawUnsupportedPlaceholder(
+            canvas,
+            640,
+            360,
+            this.videos.get(videoUrl)?.errorCode ?? null
+          );
           return false;
         }
 
@@ -2090,9 +2248,14 @@ body.presentation-mode .tr-screen-text { font-size: 16px; padding: 12px 16px; bo
     return { start, end };
   }
 
-  function addSegmentIndicator(type, startMin, endMin, column, streams = []) {
+  function addSegmentIndicator(type, startMin, endMin, column, streams = [], state = 'analyzed') {
     const el = document.createElement('div');
     el.className = 'tr-seg ' + (type === 'screen' ? 'tr-seg-screen' : 'tr-seg-audio');
+    if (state === 'pending') {
+      el.classList.add('tr-seg-pending');
+    } else if (state === 'analyzing') {
+      el.classList.add('tr-seg-analyzing');
+    }
     el.style.top = y(startMin) + 'px';
     el.style.height = Math.max(2, y(endMin) - y(startMin)) + 'px';
     el.classList.add(column === 1 ? 'tr-seg-col-1' : 'tr-seg-col-0');
@@ -2107,7 +2270,8 @@ body.presentation-mode .tr-screen-text { font-size: 16px; padding: 12px 16px; bo
     const streamHead = sortedStreams.slice(0, 3).join(' + ');
     const streamToken = sortedStreams.length > 3 ? streamHead + ' +' + (sortedStreams.length - 3) : streamHead;
     const streamSuffix = sortedStreams.length ? ' · ' + streamToken : '';
-    el.title = hhmm(startMin) + ' – ' + hhmm(endMin) + ' (' + (endMin - startMin) + ' min, ' + type + streamSuffix + ')';
+    const stateSuffix = state === 'pending' ? ' · pending' : state === 'analyzing' ? ' · analyzing' : '';
+    el.title = hhmm(startMin) + ' – ' + hhmm(endMin) + ' (' + (endMin - startMin) + ' min, ' + type + streamSuffix + stateSuffix + ')';
     el.addEventListener('click', e => {
       e.stopPropagation();
       const midMin = (startMin + endMin) / 2;
@@ -2244,12 +2408,24 @@ body.presentation-mode .tr-screen-text { font-size: 16px; padding: 12px 16px; bo
       // Determine pill type based on content
       const hasAudio = seg.types.includes('audio');
       const hasScreen = seg.types.includes('screen');
+      const dataState = seg.data_state || {};
+      const hasPendingAdvertised = (seg.types || []).some(
+        type => dataState[type] && dataState[type] !== 'analyzed'
+      );
+      const hasAnalyzingAdvertised = (seg.types || []).some(
+        type => dataState[type] === 'analyzing'
+      );
       if (hasAudio && hasScreen) {
         pill.classList.add('tr-zoom-pill-both');
       } else if (hasAudio) {
         pill.classList.add('tr-zoom-pill-audio');
       } else {
         pill.classList.add('tr-zoom-pill-screen');
+      }
+      if (hasAnalyzingAdvertised) {
+        pill.classList.add('tr-zoom-pill-analyzing');
+      } else if (hasPendingAdvertised) {
+        pill.classList.add('tr-zoom-pill-pending');
       }
       const typeLabel = (hasAudio && hasScreen) ? 'audio and screen' : hasAudio ? 'audio' : 'screen';
 
@@ -2261,7 +2437,8 @@ body.presentation-mode .tr-screen-text { font-size: 16px; padding: 12px 16px; bo
       pill.style.height = Math.max(4, zoomY(visEnd) - zoomY(visStart)) + 'px';
       const duration = Math.round(visEnd - visStart);
       const typeDesc = (hasAudio && hasScreen) ? 'audio + screen' : hasAudio ? 'audio' : 'screen';
-      pill.title = seg.start + ' – ' + seg.end + ' · ' + duration + ' min · ' + typeDesc + ' · ' + seg.stream;
+      const pendingSuffix = hasAnalyzingAdvertised ? ' · analyzing' : hasPendingAdvertised ? ' · pending' : '';
+      pill.title = seg.start + ' – ' + seg.end + ' · ' + duration + ' min · ' + typeDesc + ' · ' + seg.stream + pendingSuffix;
       pill.setAttribute('aria-label', 'Segment ' + seg.start + ' \u2013 ' + seg.end + ', ' + typeLabel + ', ' + seg.stream);
       pill.dataset.key = seg.key;
 
@@ -2333,9 +2510,13 @@ body.presentation-mode .tr-screen-text { font-size: 16px; padding: 12px 16px; bo
   let currentSegmentAbort = null;
   let tabPanes = {}; // tabId -> pane element
   let screenDecoded = false;
+  let analyzePollTimer = null;
+  let analyzePollStartedAt = 0;
+  let analyzePollModalities = new Set();
 
   function loadSegmentContent(seg, requestedTabId = null) {
     currentSegmentAbort?.abort();
+    stopAnalyzePoller();
     currentSegmentAbort = new AbortController();
     const signal = currentSegmentAbort.signal;
     const segmentToken = seg.key;
@@ -2360,19 +2541,11 @@ body.presentation-mode .tr-screen-text { font-size: 16px; padding: 12px 16px; bo
           return;
         }
         panel.classList.remove('loading');
-        segmentData = data;
-        updateRangeText();
-        buildTabBar(data);
-        activateTab('transcript');
-        if (
-          requestedTabId
-          && [...tabsContainer.querySelectorAll('.tr-tab')].some(
-            tab => tab.dataset.tab === requestedTabId
-          )
-        ) {
-          activateTab(requestedTabId);
+        renderLoadedSegmentData(data, requestedTabId);
+        const analyzing = currentAnalyzingModalities(data.data_state || {});
+        if (analyzing.length > 0) {
+          startAnalyzePoller(analyzing);
         }
-	        renderWarningNotice(data);
       })
       .catch(err => {
         if (err.name === 'AbortError') {
@@ -2507,11 +2680,12 @@ body.presentation-mode .tr-screen-text { font-size: 16px; padding: 12px 16px; bo
       tabsContainer.appendChild(btn);
     };
 
+    const dataState = data.data_state || {};
     addTab('transcript', 'transcript');
-    if (data.audio_file) {
+    if (dataState.audio) {
       addTab('audio', 'audio');
     }
-    if ((data.chunks || []).some(chunk => chunk.type === 'screen')) {
+    if (dataState.screen) {
       addTab('screen', 'screen');
     }
 
@@ -2595,12 +2769,224 @@ body.presentation-mode .tr-screen-text { font-size: 16px; padding: 12px 16px; bo
     }
   }
 
+	  function formatAudioDuration(seconds) {
+    const totalSeconds = Math.round(Number(seconds) || 0);
+    if (totalSeconds <= 0) return '';
+
+    const secs = totalSeconds % 60;
+    const minutes = Math.floor(totalSeconds / 60) % 60;
+    const hours = Math.floor(totalSeconds / 3600);
+    if (hours > 0) {
+      return `${hours}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    }
+	    return `${minutes}:${String(secs).padStart(2, '0')}`;
+	  }
+
+  function renderAnalyzeButton(modality, label) {
+    const title = BTN_TITLE(modality);
+    return `<button type="button" class="tr-analyze-action" data-modality="${escapeHtml(modality)}" aria-label="${escapeHtml(title)}" title="${escapeHtml(title)}">${escapeHtml(label)}</button>`;
+  }
+
+  function renderFailedDataState(modality) {
+    return `<div class="surface-state surface-state--error" role="alert">`
+      + `<div class="surface-state-icon" aria-hidden="true">${emptyIcons[modality] || emptyIcons.transcript}</div>`
+      + `<h2 class="surface-state-heading">${escapeHtml(dataStateCopy(modality, 'failed'))}</h2>`
+      + `<p class="surface-state-desc">analysis errored for this segment</p>`
+      + `<div class="surface-state-action">${renderAnalyzeButton(modality, BTN_LABEL_FAILED)}</div>`
+      + `</div>`;
+  }
+
+  function renderDataStateAffordance(modality, state, data) {
+    const icon = emptyIcons[modality] || emptyIcons.transcript;
+    if (state === 'pending') {
+      const metadata = [];
+      if (modality === 'audio') {
+        const duration = formatAudioDuration(data.duration);
+        if (duration) metadata.push('duration ' + duration);
+      }
+      const size = formatSize(data.media_sizes?.[modality]);
+      if (size) metadata.push('raw media ' + size);
+      return window.SurfaceState.empty({
+        icon,
+        heading: dataStateCopy(modality, 'pending'),
+        desc: metadata.join(' · '),
+        action: renderAnalyzeButton(modality, BTN_LABEL_PENDING)
+      });
+    }
+    if (state === 'analyzing') {
+      return `<div class="surface-state surface-state--loading tr-analyzing-state" role="status" aria-busy="true">`
+        + `<div class="surface-state-spinner" aria-hidden="true"></div>`
+        + `<span class="surface-state-text">${escapeHtml(ANALYZING_LABEL)}</span>`
+        + `</div>`;
+    }
+    if (state === 'failed') {
+      return renderFailedDataState(modality);
+    }
+    if (state === 'purged') {
+      return window.SurfaceState.empty({
+        icon,
+        heading: 'Raw observed media removed per retention policy',
+        desc: ''
+      });
+    }
+    return '';
+  }
+
+  function tabExists(tabId) {
+    return [...tabsContainer.querySelectorAll('.tr-tab')].some(tab => tab.dataset.tab === tabId);
+  }
+
+  function renderLoadedSegmentData(data, requestedTabId = null) {
+    segmentData = data;
+    updateRangeText();
+    buildTabBar(data);
+    const nextTab = requestedTabId && tabExists(requestedTabId) ? requestedTabId : 'transcript';
+    activateTab(nextTab);
+    renderWarningNotice(data);
+  }
+
+  function currentAnalyzingModalities(dataState) {
+    return ['audio', 'screen'].filter(modality => dataState[modality] === 'analyzing');
+  }
+
+  function stopAnalyzePoller() {
+    if (analyzePollTimer) {
+      clearInterval(analyzePollTimer);
+    }
+    analyzePollTimer = null;
+    analyzePollStartedAt = 0;
+    analyzePollModalities.clear();
+  }
+
+  function updateSelectedSegmentDataState(dataState) {
+    if (!selectedSegment) return;
+    selectedSegment.data_state = { ...(selectedSegment.data_state || {}), ...dataState };
+    const matchingSegment = allSegments.find(
+      seg => seg.key === selectedSegment.key && seg.stream === selectedSegment.stream
+    );
+    if (matchingSegment) {
+      matchingSegment.data_state = { ...(matchingSegment.data_state || {}), ...dataState };
+    }
+  }
+
+  function applySegmentDataState(dataState) {
+    if (!dataState) return;
+    updateSelectedSegmentDataState(dataState);
+    buildZoomSegments();
+    refreshSegmentIndicators();
+  }
+
+  function rerenderSegmentAfterAnalysis(data, preferredTab = activeTab) {
+    currentVideoFiles = {};
+    tabPanes = {};
+    activeTab = null;
+    screenDecoded = false;
+    frameCapture.clear();
+    renderLoadedSegmentData(data, preferredTab);
+  }
+
+  function showAnalyzeError(button, message) {
+    const action = button.closest('.surface-state-action') || button.parentElement;
+    if (!action) return;
+    action.parentElement?.querySelectorAll('.tr-analyze-error').forEach(el => el.remove());
+    const errorEl = document.createElement('p');
+    errorEl.className = 'tr-analyze-error';
+    errorEl.setAttribute('role', 'alert');
+    errorEl.textContent = message || 'analysis request failed';
+    action.insertAdjacentElement('afterend', errorEl);
+  }
+
+  function renderAnalyzeStateInPlace(button, modality, state) {
+    const surface = button.closest('.surface-state');
+    if (!surface || !segmentData) return;
+    const replacement = renderDataStateAffordance(modality, state, segmentData);
+    if (replacement) {
+      surface.outerHTML = replacement;
+    }
+  }
+
+  async function performAnalyzeNow(button, modality) {
+    if (!selectedSegment || !modality) return;
+    const seg = selectedSegment;
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+    button.closest('.surface-state')?.querySelectorAll('.tr-analyze-error').forEach(el => el.remove());
+
+    try {
+      const response = await fetch(
+        `/app/transcripts/api/segment/${day}/${seg.stream}/${seg.key}/reprocess`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ modality })
+        }
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || 'analysis request failed');
+      }
+
+      segmentData = { ...(segmentData || {}), data_state: data.data_state || {} };
+      applySegmentDataState(segmentData.data_state);
+      renderAnalyzeStateInPlace(button, modality, 'analyzing');
+      startAnalyzePoller([modality]);
+    } catch (err) {
+      button.disabled = false;
+      button.removeAttribute('aria-busy');
+      showAnalyzeError(button, err.message);
+    }
+  }
+
+  async function pollAnalyzeState() {
+    if (!selectedSegment || analyzePollModalities.size === 0) {
+      stopAnalyzePoller();
+      return;
+    }
+    if (Date.now() - analyzePollStartedAt > ANALYZE_POLL_MAX_MS) {
+      stopAnalyzePoller();
+      return;
+    }
+
+    const seg = selectedSegment;
+    try {
+      const response = await fetch(`/app/transcripts/api/segment/${day}/${seg.stream}/${seg.key}`);
+      if (!response.ok) return;
+      const data = await response.json();
+      if (!selectedSegment || selectedSegment.key !== seg.key || selectedSegment.stream !== seg.stream) {
+        return;
+      }
+      const dataState = data.data_state || {};
+      segmentData = data;
+      applySegmentDataState(dataState);
+
+      const watched = [...analyzePollModalities];
+      const complete = watched.every(modality => (
+        dataState[modality] === 'analyzed' || dataState[modality] === 'failed'
+      ));
+      if (complete) {
+        const preferredTab = activeTab;
+        stopAnalyzePoller();
+        rerenderSegmentAfterAnalysis(data, preferredTab);
+      }
+    } catch (err) {
+      console.debug('transcripts: analysis poll failed', err);
+    }
+  }
+
+  function startAnalyzePoller(modalities) {
+    modalities.forEach(modality => analyzePollModalities.add(modality));
+    if (analyzePollTimer) return;
+    analyzePollStartedAt = Date.now();
+    analyzePollTimer = setInterval(pollAnalyzeState, ANALYZE_POLL_INTERVAL_MS);
+  }
+
   function renderSegmentTimeline(data, showAudio, showScreen, targetEl) {
     const chunks = (data.chunks || []).filter(c => {
       if (c.type === 'audio' && !showAudio) return false;
       if (c.type === 'screen' && !showScreen) return false;
       return true;
     });
+    const dataState = data.data_state || {};
 
     const textOnlyScreen = showScreen && Object.keys(currentVideoFiles).length === 0;
 
@@ -2609,6 +2995,24 @@ body.presentation-mode .tr-screen-text { font-size: 16px; padding: 12px 16px; bo
     currentFrameIndex = -1;
 
     if (chunks.length === 0) {
+      if (showAudio && !showScreen && dataState.audio && dataState.audio !== 'analyzed') {
+        targetEl.innerHTML = renderDataStateAffordance('audio', dataState.audio, data);
+        return;
+      }
+      if (!showAudio && showScreen && dataState.screen && dataState.screen !== 'analyzed') {
+        targetEl.innerHTML = renderDataStateAffordance('screen', dataState.screen, data);
+        return;
+      }
+      if (showAudio && showScreen) {
+        const states = ['audio', 'screen']
+          .filter(modality => dataState[modality] && dataState[modality] !== 'analyzed')
+          .map(modality => renderDataStateAffordance(modality, dataState[modality], data))
+          .filter(Boolean);
+        if (states.length > 0) {
+          targetEl.innerHTML = `<div class="tr-state-stack">${states.join('')}</div>`;
+          return;
+        }
+      }
       const tabType = !showScreen ? 'audio' : !showAudio ? 'screen' : 'transcript';
       const tabEmptyMap = {
         transcript: { icon: emptyIcons.transcript, heading: 'no transcript entries', desc: 'this segment has no transcript content' },
@@ -2628,14 +3032,20 @@ body.presentation-mode .tr-screen-text { font-size: 16px; padding: 12px 16px; bo
 
     // Audio player section (if we have audio)
     if (data.audio_file && showAudio) {
+      const audioExt = (data.audio_file.split('.').pop() || '').toLowerCase();
+      const audioMime = ({flac:'audio/flac', m4a:'audio/mp4', mp4:'audio/mp4', mp3:'audio/mpeg', wav:'audio/wav', ogg:'audio/ogg'})[audioExt] || '';
+      const audioDuration = formatAudioDuration(data.duration);
+      const audioLabel = audioDuration ? `segment audio · ${audioDuration}` : 'segment audio';
       html += '<div class="tr-audio-players" role="presentation">';
       html += '<div class="tr-audio-player">';
-      html += '<div class="tr-audio-player-label">segment audio</div>';
-      html += `<audio data-role="segment-audio" controls preload="metadata"><source src="${data.audio_file}" type="audio/flac">Your browser does not support audio.</audio>`;
+      html += `<div class="tr-audio-player-label">${audioLabel}</div>`;
+      html += `<audio data-role="segment-audio" controls preload="metadata"><source src="${escapeHtml(data.audio_file)}" type="${audioMime}">Your browser does not support audio.</audio>`;
       html += '</div></div>';
     }
 
-    if (data.media_purged && !data.audio_file && showAudio) {
+    const audioPurged = data.media_purged?.audio && !data.audio_file && showAudio;
+    const screenPurged = data.media_purged?.screen && showScreen && chunks.some(c => c.type === 'screen');
+    if (audioPurged || screenPurged) {
       html += '<div class="tr-purge-notice" role="presentation">Raw observed media removed per retention policy</div>';
     }
 
@@ -2683,6 +3093,24 @@ body.presentation-mode .tr-screen-text { font-size: 16px; padding: 12px 16px; bo
 
     // Get audio element reference
     const paneAudioEl = targetEl.querySelector('audio[data-role="segment-audio"]');
+    if (paneAudioEl) {
+      paneAudioEl.addEventListener('loadedmetadata', () => {
+        if (Number.isFinite(paneAudioEl.duration) && paneAudioEl.duration > 0) {
+          return;
+        }
+
+        const handleDurationChange = () => {
+          if (!Number.isFinite(paneAudioEl.duration) || paneAudioEl.duration === 0) {
+            return;
+          }
+          paneAudioEl.currentTime = 0;
+          paneAudioEl.removeEventListener('durationchange', handleDurationChange);
+        };
+
+        paneAudioEl.addEventListener('durationchange', handleDurationChange);
+        paneAudioEl.currentTime = 1e7;
+      }, { once: true });
+    }
 
     // Add click handlers for audio entries to seek
     targetEl.querySelectorAll('.tr-entry-audio').forEach(entry => {
@@ -3131,21 +3559,8 @@ body.presentation-mode .tr-screen-text { font-size: 16px; padding: 12px 16px; bo
     }
   }
 
-  // Resize observers
   // Account for 12px padding top and bottom
   const PADDING = 24;
-
-  new ResizeObserver(() => {
-    height = timeline.clientHeight - PADDING;
-    ppm = height / (timelineEnd - timelineStart);
-    buildGrid();
-    renderTimeline();
-    if (updateNowPosition) updateNowPosition();
-  }).observe(timeline);
-
-  new ResizeObserver(() => {
-    updateZoom();
-  }).observe(zoom);
 
 	  // Load combined transcript data
 	  function loadDayData() {
@@ -3209,12 +3624,12 @@ body.presentation-mode .tr-screen-text { font-size: 16px; padding: 12px 16px; bo
       (data.audio || []).forEach(rg => {
         const s = parseTime(rg.start);
         const e = parseTime(rg.end);
-        addSegmentIndicator('audio', s, e, 0, rg.streams);
+        addSegmentIndicator('audio', s, e, 0, rg.streams, rg.state || 'analyzed');
       });
       (data.screen || []).forEach(rg => {
         const s = parseTime(rg.start);
         const e = parseTime(rg.end);
-        addSegmentIndicator('screen', s, e, 1, rg.streams);
+        addSegmentIndicator('screen', s, e, 1, rg.streams, rg.state || 'analyzed');
       });
 
       // Now-marker for today
@@ -3288,35 +3703,56 @@ body.presentation-mode .tr-screen-text { font-size: 16px; padding: 12px 16px; bo
 	    });
 	  }
 
-	  loadDayData();
+  function initTranscripts() {
+    // Resize observers
+    new ResizeObserver(() => {
+      height = timeline.clientHeight - PADDING;
+      ppm = height / (timelineEnd - timelineStart);
+      buildGrid();
+      renderTimeline();
+      if (updateNowPosition) updateNowPosition();
+    }).observe(timeline);
 
-	  // Handle browser back/forward
-  window.addEventListener('hashchange', () => {
-    const rawHash = window.location.hash.slice(1);
-    const [segKey, tabIdFromHash] = rawHash.split('/', 2);
-    if (!segKey) {
-      return;
-    }
+    new ResizeObserver(() => {
+      updateZoom();
+    }).observe(zoom);
 
-    const seg = allSegments.find(s => s.key === segKey);
-    if (!seg) {
-      return;
-    }
+    loadDayData();
 
-    if (!selectedSegment || selectedSegment.key !== segKey) {
-      selectSegment(seg, false, tabIdFromHash);
-      return;
-    }
+    // Handle browser back/forward
+    window.addEventListener('hashchange', () => {
+      const rawHash = window.location.hash.slice(1);
+      const [segKey, tabIdFromHash] = rawHash.split('/', 2);
+      if (!segKey) {
+        return;
+      }
 
-    if (
-      tabIdFromHash
-      && [...tabsContainer.querySelectorAll('.tr-tab')].some(
-        tab => tab.dataset.tab === tabIdFromHash
-      )
-    ) {
-      activateTab(tabIdFromHash);
-    }
-  });
+      const seg = allSegments.find(s => s.key === segKey);
+      if (!seg) {
+        return;
+      }
+
+      if (!selectedSegment || selectedSegment.key !== segKey) {
+        selectSegment(seg, false, tabIdFromHash);
+        return;
+      }
+
+      if (
+        tabIdFromHash
+        && [...tabsContainer.querySelectorAll('.tr-tab')].some(
+          tab => tab.dataset.tab === tabIdFromHash
+        )
+      ) {
+        activateTab(tabIdFromHash);
+      }
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initTranscripts);
+  } else {
+    initTranscripts();
+  }
 
   // Keyboard navigation for segment stepping
   document.addEventListener('keydown', (e) => {
@@ -3337,6 +3773,15 @@ body.presentation-mode .tr-screen-text { font-size: 16px; padding: 12px 16px; bo
     if (event.target === deleteSegmentModal) {
       closeDeleteSegmentModal();
     }
+  });
+
+  window.addEventListener('beforeunload', stopAnalyzePoller);
+
+  panel.addEventListener('click', (event) => {
+    const button = event.target.closest('.tr-analyze-action');
+    if (!button || !panel.contains(button)) return;
+    event.preventDefault();
+    performAnalyzeNow(button, button.dataset.modality);
   });
 
   // Click on timeline to set range
@@ -3471,12 +3916,12 @@ body.presentation-mode .tr-screen-text { font-size: 16px; padding: 12px 16px; bo
         (data.audio || []).forEach(rg => {
           const s = parseTime(rg.start);
           const e = parseTime(rg.end);
-          addSegmentIndicator('audio', s, e, 0, rg.streams);
+          addSegmentIndicator('audio', s, e, 0, rg.streams, rg.state || 'analyzed');
         });
         (data.screen || []).forEach(rg => {
           const s = parseTime(rg.start);
           const e = parseTime(rg.end);
-          addSegmentIndicator('screen', s, e, 1, rg.streams);
+          addSegmentIndicator('screen', s, e, 1, rg.streams, rg.state || 'analyzed');
         });
       })
       .catch(() => {
@@ -3603,6 +4048,7 @@ body.presentation-mode .tr-screen-text { font-size: 16px; padding: 12px 16px; bo
 
   // Clear selection and reset UI state
   function clearSegmentSelection() {
+    stopAnalyzePoller();
     selectedSegment = null;
     segmentData = null;
     currentVideoFiles = {};

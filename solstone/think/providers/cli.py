@@ -1,14 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2026 sol pbc
 
-"""CLI subprocess runner for AI provider tool agents.
+"""Shared prompt, error, and subprocess support for provider tool agents.
 
-Spawns provider CLI tools (claude, codex, gemini) in JSON streaming mode
-and translates their JSONL output into our standard Event format.
-
-Each provider module implements a translate() function that converts
-provider-specific JSONL events into our Event TypedDicts. The CLIRunner
-handles subprocess lifecycle, stdin piping, and event emission.
+OpenHands-backed providers share prompt assembly and quota handling. The
+CLIRunner handles subprocess lifecycle, stdin piping, and event emission for
+tool-agent CLI paths.
 """
 
 from __future__ import annotations
@@ -641,184 +638,9 @@ class CLIRunner:
         return path
 
 
-# ---------------------------------------------------------------------------
-# CLI Binary Check
-# ---------------------------------------------------------------------------
-
-
-def check_cli_binary(name: str) -> str:
-    """Check that a CLI binary is available on PATH.
-
-    Args:
-        name: Binary name (e.g., "claude", "codex", "gemini").
-
-    Returns:
-        The full path to the binary.
-
-    Raises:
-        RuntimeError: If the binary is not found.
-    """
-    path = shutil.which(name)
-    if not path:
-        raise RuntimeError(
-            f"CLI tool '{name}' not found on PATH. "
-            f"Install it and ensure it's accessible."
-        )
-    return path
-
-
-# ---------------------------------------------------------------------------
-# Cogitate Environment
-# ---------------------------------------------------------------------------
-
-
-_BASE_ALLOWLIST = [
-    "PATH",
-    "HOME",
-    "USER",
-    "LOGNAME",
-    "SHELL",
-    "PWD",
-    "TERM",
-    "TMPDIR",
-    "TZ",
-    "LANG",
-    "LC_*",
-    "XDG_*",
-    "SOLSTONE_*",
-    "SOL_*",
-    "SSL_CERT_FILE",
-    "SSL_CERT_DIR",
-]
-
-_PROVIDER_ALLOWLIST: dict[str, list[str]] = {
-    "anthropic": ["ANTHROPIC_*", "CLAUDE_*"],
-    "openai": ["OPENAI_*"],
-    "google": ["GOOGLE_*", "GEMINI_*", "VERTEX_*"],
-}
-
-
-def _matches_env_pattern(key: str, pattern: str) -> bool:
-    if pattern.endswith("*"):
-        return key.startswith(pattern[:-1])
-    return key == pattern
-
-
-def build_cogitate_env(provider_name: str) -> dict[str, str]:
-    """Build environment dict for a cogitate CLI subprocess.
-
-    The child environment is built from an allowlist. Patterns ending in ``*``
-    match the prefix before the star, including the exact prefix string.
-    No other glob characters are supported.
-
-    Args:
-        provider_name: Provider name (``anthropic``, ``openai``, or ``google``).
-
-    Returns:
-        Filtered environment for the provider CLI.
-    """
-    from solstone.think.providers import PROVIDER_METADATA
-    from solstone.think.utils import get_config
-
-    if provider_name not in _PROVIDER_ALLOWLIST:
-        valid = ", ".join(sorted(_PROVIDER_ALLOWLIST))
-        raise ValueError(f"Unsupported cogitate provider: {provider_name!r} ({valid})")
-
-    config = get_config()
-    providers_config = config.get("providers", {})
-    auth_config = providers_config.get("auth", {})
-    auth_mode = auth_config.get(provider_name, "platform")
-    env_key = PROVIDER_METADATA[provider_name]["env_key"]
-    allowlist = _BASE_ALLOWLIST + _PROVIDER_ALLOWLIST[provider_name]
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if any(_matches_env_pattern(key, pattern) for pattern in allowlist)
-    }
-
-    if auth_mode == "platform":
-        env.pop(env_key, None)
-
-    # Vertex AI / AI Studio: set backend env vars for Google provider
-    if provider_name == "google":
-        google_backend = providers_config.get("google_backend", "auto")
-
-        # Determine effective backend
-        if google_backend in ("aistudio", "vertex"):
-            effective_backend = google_backend
-        else:
-            api_key = os.getenv("GOOGLE_API_KEY", "")
-            if api_key:
-                from solstone.think.providers.google import _detect_backend
-
-                effective_backend = _detect_backend(api_key)
-            else:
-                effective_backend = "aistudio"
-
-        if effective_backend == "vertex":
-            env["GOOGLE_GENAI_USE_VERTEXAI"] = "true"
-            # Vertex uses SA credentials, not API key — always strip
-            env.pop("GOOGLE_API_KEY", None)
-            # SA credentials: set GOOGLE_APPLICATION_CREDENTIALS
-            creds_path = providers_config.get("vertex_credentials")
-            if not creds_path or not os.path.exists(creds_path):
-                raise ValueError(
-                    f"Vertex provider configured but no usable SA credentials at {creds_path}"
-                )
-            try:
-                with open(creds_path, encoding="utf-8") as _f:
-                    _sa_data = json.load(_f)
-            except (OSError, json.JSONDecodeError) as exc:
-                raise ValueError(
-                    f"Vertex provider configured but no usable SA credentials at {creds_path}"
-                ) from exc
-            project_id = _sa_data.get("project_id")
-            if not project_id:
-                raise ValueError(
-                    f"Vertex provider configured but no usable SA credentials at {creds_path}"
-                )
-            env["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
-            env["GOOGLE_CLOUD_PROJECT"] = project_id
-            env["GOOGLE_CLOUD_LOCATION"] = "global"
-            from solstone.think.utils import get_journal
-
-            settings_path = (
-                Path(get_journal()) / ".config" / "gemini-vertex-settings.json"
-            )
-            if not settings_path.exists():
-                os.makedirs(settings_path.parent, exist_ok=True)
-                with open(settings_path, "w", encoding="utf-8") as settings_file:
-                    json.dump(
-                        {"security": {"auth": {"selectedType": "vertex-ai"}}},
-                        settings_file,
-                    )
-                os.chmod(str(settings_path), 0o600)
-            env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"] = str(settings_path)
-        else:
-            # AI Studio: clear any inherited Vertex env vars so the CLI
-            # doesn't accidentally run in Vertex mode.
-            for vkey in (
-                "GEMINI_CLI_SYSTEM_SETTINGS_PATH",
-                "GOOGLE_APPLICATION_CREDENTIALS",
-                "GOOGLE_CLOUD_LOCATION",
-                "GOOGLE_CLOUD_PROJECT",
-                "GOOGLE_GENAI_USE_VERTEXAI",
-            ):
-                env.pop(vkey, None)
-            # Gemini CLI's auth auto-detection only honors GEMINI_API_KEY for
-            # api-key mode; GOOGLE_API_KEY is recognized only for vertex-ai mode.
-            # Mirror the canonical key so non-interactive `-p -` invocations
-            # don't fall through to oauth-personal and FatalAuthenticationError.
-            if "GOOGLE_API_KEY" in env and "GEMINI_API_KEY" not in env:
-                env["GEMINI_API_KEY"] = env["GOOGLE_API_KEY"]
-    return env
-
-
 __all__ = [
     "CLIRunner",
     "QuotaExhaustedError",
     "ThinkingAggregator",
     "assemble_prompt",
-    "build_cogitate_env",
-    "check_cli_binary",
 ]

@@ -10,6 +10,32 @@ from solstone.think.call import call_app
 runner = CliRunner()
 
 
+def _write_segment(
+    journal_root,
+    day: str,
+    segment: str,
+    *,
+    audio_jsonl: bool = False,
+    audio_flac: bool = False,
+    screen_jsonl: bool = False,
+) -> None:
+    segment_dir = journal_root / "chronicle" / day / "default" / segment
+    segment_dir.mkdir(parents=True, exist_ok=True)
+    if audio_jsonl:
+        (segment_dir / "audio.jsonl").write_text(
+            '{"raw": "audio.flac"}\n{"start": "00:00:01", "text": "audio"}\n',
+            encoding="utf-8",
+        )
+    if audio_flac:
+        (segment_dir / "audio.flac").write_bytes(b"audio")
+    if screen_jsonl:
+        (segment_dir / "screen.jsonl").write_text(
+            '{"raw": "screen.webm"}\n'
+            '{"timestamp": 1, "analysis": {"primary": "work"}}\n',
+            encoding="utf-8",
+        )
+
+
 class TestScan:
     def test_scan_day(self):
         result = runner.invoke(call_app, ["transcripts", "scan", "20240101"])
@@ -21,6 +47,74 @@ class TestScan:
         result = runner.invoke(call_app, ["transcripts", "scan", "20990101"])
         assert result.exit_code == 0
         assert "(none)" in result.output
+
+    def test_scan_output_byte_identical_when_no_pending_segments(
+        self, tmp_path, monkeypatch
+    ):
+        day = "20990102"
+        monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+        _write_segment(
+            tmp_path,
+            day,
+            "090000_300",
+            audio_jsonl=True,
+            screen_jsonl=True,
+        )
+
+        result = runner.invoke(call_app, ["transcripts", "scan", day])
+
+        assert result.exit_code == 0
+        assert result.output == (
+            "Transcripts:\n  09:00 - 09:15\nPercepts:\n  09:00 - 09:15\n"
+        )
+
+    def test_scan_output_annotates_pending_inside_range(self, tmp_path, monkeypatch):
+        day = "20990103"
+        monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+        _write_segment(tmp_path, day, "090000_300", audio_jsonl=True)
+        _write_segment(tmp_path, day, "090500_300", audio_flac=True)
+
+        result = runner.invoke(call_app, ["transcripts", "scan", day])
+
+        assert result.exit_code == 0
+        assert result.output == (
+            "Transcripts:\n"
+            "  09:00 - 09:15 (1 segment pending at 09:05)\n"
+            "Percepts:\n"
+            "  (none)\n"
+        )
+
+    def test_scan_output_reports_pending_only_range(self, tmp_path, monkeypatch):
+        day = "20990104"
+        monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+        _write_segment(tmp_path, day, "091500_300", audio_flac=True)
+
+        result = runner.invoke(call_app, ["transcripts", "scan", day])
+
+        assert result.exit_code == 0
+        assert result.output == (
+            "Transcripts:\n"
+            "  09:15 - 09:30 (1 segment pending at 09:15)\n"
+            "Percepts:\n"
+            "  (none)\n"
+        )
+
+    def test_scan_output_pluralizes_multiple_pending(self, tmp_path, monkeypatch):
+        day = "20990105"
+        monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+        _write_segment(tmp_path, day, "090000_300", audio_jsonl=True)
+        _write_segment(tmp_path, day, "090500_300", audio_flac=True)
+        _write_segment(tmp_path, day, "091000_300", audio_flac=True)
+
+        result = runner.invoke(call_app, ["transcripts", "scan", day])
+
+        assert result.exit_code == 0
+        assert result.output == (
+            "Transcripts:\n"
+            "  09:00 - 09:15 (2 segments pending at 09:05, 09:10)\n"
+            "Percepts:\n"
+            "  (none)\n"
+        )
 
 
 class TestSegments:

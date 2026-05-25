@@ -4,6 +4,42 @@ All notable changes to solstone (the Python package) will be documented in this 
 
 Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), aligned with `cmo/brand/changelog-voice.md`.
 
+## [0.3.9] - 2026-05-25
+
+### Added
+- solstone now has a "services" layer for the optional cloud-backed extras sol pbc offers alongside your local solstone. today that means solstone scout, the alpha-tester program that provisions a Google Gemini key for you and unlocks scout-only features. services are off by default; you turn them on from `services.solstone.app` or `sol services enable scout`, and solstone itself still runs entirely on your machine.
+- you can now move days or whole journals between your own machines, and connect an observer on one machine to a journal on another, over a direct private link between your devices. `sol link join` pairs them; `sol transfer send --to <peer>` and `sol export --to <peer>` push from one to the other. revoking a paired device at the `/link` dashboard, with `sol observer revoke`, or with `sol call link unpair` cuts the connection at TLS the moment you revoke.
+- a new "Local (on-device)" provider runs sol from a bundled `llama-server` on your own machine with a pinned Qwen model. zero-egress: when sol is set to local, it never falls through to a cloud provider.
+- a new daily `journal/identity/health.md` surface tells you whether solstone is OK at a glance. sol reads its own signals, auto-recovers from things like stuck transcripts, and the home page and morning briefing now read its summary.
+
+### Changed
+- a few of the surfaces you touch most are now more direct. creating a facet lands you on a real detail page that confirms what you just made and offers next steps. clicking a "needs you" item on the home page opens a fresh chat with editable starter text already in the box (not as ghost placeholder), and sol knows which item you came from. each modality on segment-detail pages has its own "analyze now" button so you can re-run analysis on one part of a day without dropping to a terminal. the health, tokens, and service-log pages were rebuilt around a glance row that answers the first question (is solstone OK, is this costing too much, where did the pipeline fail) with the detail kept under progressive disclosure; service log lines now carry severity colors with screen-reader announcements on errors.
+
+### Fixed
+- segments that were already analyzed sometimes painted as still-pending on the day timeline; they now render correctly. audio playback on segment pages now shows the real duration and the right format, transcript lines no longer carry a doubled timestamp, the day view scrolls naturally on short windows, and a cold-load race on transcripts pages is resolved. internal stability improvements across providers install, background tasks, and the convey wizard.
+
+## [0.3.8] - 2026-05-22
+
+### Added
+- you can now run sol's on-screen analysis fully on your own Mac. on Apple Silicon with at least 16 GB of memory, "MLX (Local, Apple Silicon)" appears in Settings under Providers; choose it once, sol downloads a local model in the background, and from then on the part of sol that makes sense of your screen runs on your machine, with nothing sent to a cloud provider. it's opt-in and covers vision today; the rest of sol stays on whichever provider you've chosen.
+- you can now power sol with Anthropic or OpenAI without installing anything extra. choose the provider in Settings and solstone sets it up for you, with no separate command-line tool to install first. running on a hosted Google key needs no extra setup either.
+- `sol setup --clean-uninstall` removes the pieces setup added to your machine, behind a confirmation that lists exactly what it will remove. your journal is never touched.
+
+### Changed
+- the timeline view is rebuilt. it opens straight into your real journal, fits any window from a phone-width pane to a wide desktop, and every entry shows which AI produced it with a link to that day. when sol finishes summarizing a new day, the view updates on its own.
+- long todo lists now load fast and stay readable: solstone shows the most recent items first with a "show more" control for the rest, instead of rendering everything at once.
+- api keys in setup and Settings are now masked as you type, and the validate button tells you plainly whether the key connected or failed.
+- on Linux, bringing an observer online no longer needs git or a build step on the host; observers now install straight from their published packages.
+
+### Fixed
+- video and audio in your journal that showed "format not supported" now play. some entries with video or audio hit this; it's resolved.
+- on installs from PyPI, sol's meeting-screen analysis was coming back as freeform notes instead of the structured entries it was built to produce. the missing piece now ships with the package, so meeting frames return to their intended shape.
+- transcription that gave up on a long, dense stretch of audio now retries and recovers, so days that previously failed to transcribe complete. this also recovered a backlog of past days that had errored.
+- pages that occasionally didn't finish loading now load cleanly.
+- on some machines the background service could stop overnight and not restart; it now restarts as intended.
+- pairing a phone by QR code now works in Safari on iPhone and Mac, where the code could previously render too small to scan.
+- internal stability improvements, plus quieter local logs.
+
 ## [0.3.6] - 2026-05-18
 
 ### Changed

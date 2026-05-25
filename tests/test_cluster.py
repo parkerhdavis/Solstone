@@ -2,6 +2,11 @@
 # Copyright (c) 2026 sol pbc
 
 import importlib
+import json
+import os
+import shutil
+import time
+from pathlib import Path
 
 import pytest
 
@@ -606,6 +611,7 @@ def test_scan_day_combined(tmp_path, monkeypatch):
             "end": "09:05",
             "types": ["audio", "screen"],
             "stream": "default",
+            "data_state": {"audio": "pending", "screen": "pending"},
         },
         {
             "key": "093000_300",
@@ -613,6 +619,7 @@ def test_scan_day_combined(tmp_path, monkeypatch):
             "end": "09:35",
             "types": ["audio"],
             "stream": "default",
+            "data_state": {"audio": "pending"},
         },
     ]
     assert (audio_ranges, screen_ranges) == expected_ranges
@@ -625,6 +632,338 @@ def test_scan_day_empty(tmp_path, monkeypatch):
     mod = importlib.import_module("solstone.think.cluster")
 
     assert mod.scan_day("20250101") == ([], [], [])
+
+
+def test_scan_day_marks_stub_screen_pending(tmp_path, monkeypatch):
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+    day_dir = day_path("20240101")
+
+    mod = importlib.import_module("solstone.think.cluster")
+
+    segment = day_dir / "default" / "090000_300"
+    segment.mkdir(parents=True)
+    (segment / "screen.jsonl").write_text('{"raw": "screen.webm"}\n')
+
+    audio_ranges, screen_ranges, segments = mod.scan_day("20240101")
+
+    assert audio_ranges == []
+    assert screen_ranges == [("09:00", "09:15")]
+    assert segments == [
+        {
+            "key": "090000_300",
+            "start": "09:00",
+            "end": "09:05",
+            "types": ["screen"],
+            "stream": "default",
+            "data_state": {"screen": "pending"},
+        }
+    ]
+
+
+def test_scan_day_marks_headerless_screen_frame_analyzed(tmp_path, monkeypatch):
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+    day_dir = day_path("20240101")
+
+    mod = importlib.import_module("solstone.think.cluster")
+
+    segment = day_dir / "default" / "090000_300"
+    segment.mkdir(parents=True)
+    frame = {
+        "frame_id": 1,
+        "timestamp": 1,
+        "analysis": {
+            "primary": "work",
+            "visual_description": "fedora tmux session",
+        },
+        "content": {},
+    }
+    (segment / "fedora_tmux_screen.jsonl").write_text(json.dumps(frame) + "\n")
+
+    _, screen_ranges, segments = mod.scan_day("20240101")
+
+    assert screen_ranges == [("09:00", "09:15")]
+    assert segments[0]["data_state"] == {"screen": "analyzed"}
+
+
+def test_scan_day_marks_analyzed_screen_analyzed(tmp_path, monkeypatch):
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+    day_dir = day_path("20240101")
+
+    mod = importlib.import_module("solstone.think.cluster")
+
+    segment = day_dir / "default" / "090000_300"
+    segment.mkdir(parents=True)
+    (segment / "screen.jsonl").write_text(
+        '{"raw": "screen.webm"}\n{"timestamp": 1, "analysis": {"primary": "work"}}\n'
+    )
+
+    _, screen_ranges, segments = mod.scan_day("20240101")
+
+    assert screen_ranges == [("09:00", "09:15")]
+    assert segments[0]["data_state"] == {"screen": "analyzed"}
+
+
+def test_scan_day_keeps_screen_raw_substring_collision_pending(tmp_path, monkeypatch):
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+    day_dir = day_path("20240101")
+
+    mod = importlib.import_module("solstone.think.cluster")
+
+    segment = day_dir / "default" / "090000_300"
+    segment.mkdir(parents=True)
+    (segment / "screen.jsonl").write_text('{"raw": "clip_timestamp.webm"}\n')
+
+    _, screen_ranges, segments = mod.scan_day("20240101")
+
+    assert screen_ranges == [("09:00", "09:15")]
+    assert segments[0]["data_state"] == {"screen": "pending"}
+
+
+def test_scan_day_marks_whitespace_only_screen_pending(tmp_path, monkeypatch):
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+    day_dir = day_path("20240101")
+
+    mod = importlib.import_module("solstone.think.cluster")
+
+    segment = day_dir / "default" / "090000_300"
+    segment.mkdir(parents=True)
+    (segment / "screen.jsonl").write_text("\n  \n\t\n")
+
+    _, screen_ranges, segments = mod.scan_day("20240101")
+
+    assert screen_ranges == [("09:00", "09:15")]
+    assert segments[0]["data_state"] == {"screen": "pending"}
+
+
+@pytest.mark.parametrize("raw_name", ["audio.flac", "audio.m4a"])
+def test_scan_day_marks_raw_audio_without_jsonl_pending(
+    tmp_path, monkeypatch, raw_name
+):
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+    day_dir = day_path("20240101")
+
+    mod = importlib.import_module("solstone.think.cluster")
+
+    segment = day_dir / "default" / "090000_300"
+    segment.mkdir(parents=True)
+    (segment / raw_name).write_bytes(b"audio")
+
+    audio_ranges, screen_ranges, segments = mod.scan_day("20240101")
+
+    assert audio_ranges == [("09:00", "09:15")]
+    assert screen_ranges == []
+    assert segments[0]["types"] == ["audio"]
+    assert segments[0]["data_state"] == {"audio": "pending"}
+
+
+def test_scan_day_marks_header_only_audio_pending(tmp_path, monkeypatch):
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+    day_dir = day_path("20240101")
+
+    mod = importlib.import_module("solstone.think.cluster")
+
+    segment = day_dir / "default" / "090000_300"
+    segment.mkdir(parents=True)
+    (segment / "audio.jsonl").write_text('{"raw": "audio.flac"}\n')
+
+    audio_ranges, _, segments = mod.scan_day("20240101")
+
+    assert audio_ranges == [("09:00", "09:15")]
+    assert segments[0]["data_state"] == {"audio": "pending"}
+
+
+def test_derive_modality_state_chunks_win_rescue(tmp_path):
+    from solstone.think.data_state import derive_modality_state
+
+    segment = tmp_path / "090000_300"
+    segment.mkdir()
+    marker = segment / ".analyzing_audio"
+    marker.write_text('{"started_at": "2026-05-20T09:00:00Z", "modality": "audio"}\n')
+
+    state = derive_modality_state(
+        segment,
+        "audio",
+        has_chunks=True,
+        has_jsonl=True,
+        has_raw=True,
+    )
+
+    assert state == "analyzed"
+    assert not marker.exists()
+
+
+def test_derive_modality_state_stale_marker_renames_failed(tmp_path):
+    from solstone.think.data_state import derive_modality_state
+
+    segment = tmp_path / "090000_300"
+    segment.mkdir()
+    marker = segment / ".analyzing_screen"
+    failed = segment / ".analyze_failed_screen"
+    marker.write_text('{"started_at": "2026-05-20T09:00:00Z", "modality": "screen"}\n')
+    old_time = time.time() - 2000
+    os.utime(marker, (old_time, old_time))
+
+    state = derive_modality_state(
+        segment,
+        "screen",
+        has_chunks=False,
+        has_jsonl=True,
+        has_raw=True,
+    )
+
+    assert state == "failed"
+    assert not marker.exists()
+    payload = json.loads(failed.read_text())
+    assert payload["reason"] == "stale"
+    assert payload["modality"] == "screen"
+
+
+def test_derive_modality_state_corrupt_marker_renames_failed(tmp_path):
+    from solstone.think.data_state import derive_modality_state
+
+    segment = tmp_path / "090000_300"
+    segment.mkdir()
+    marker = segment / ".analyzing_screen"
+    failed = segment / ".analyze_failed_screen"
+    marker.write_text("{not json")
+
+    state = derive_modality_state(
+        segment,
+        "screen",
+        has_chunks=False,
+        has_jsonl=False,
+        has_raw=True,
+    )
+
+    assert state == "failed"
+    assert not marker.exists()
+    payload = json.loads(failed.read_text())
+    assert payload["reason"] == "marker_corrupt"
+    assert payload["modality"] == "screen"
+
+
+def test_derive_modality_state_does_not_probe_processes(tmp_path, monkeypatch):
+    from solstone.think.data_state import derive_modality_state
+
+    def fail_os_kill(pid, sig):  # pragma: no cover - fails if called
+        raise AssertionError("os.kill should not be used for analyzing state")
+
+    monkeypatch.setattr(os, "kill", fail_os_kill)
+    segment = tmp_path / "090000_300"
+    segment.mkdir()
+    (segment / ".analyzing_screen").write_text(
+        '{"started_at": "2026-05-20T09:00:00Z", "modality": "screen"}\n'
+    )
+
+    assert (
+        derive_modality_state(
+            segment,
+            "screen",
+            has_chunks=False,
+            has_jsonl=True,
+            has_raw=True,
+        )
+        == "analyzing"
+    )
+
+
+def test_scan_day_detects_analyzing_markers_from_fixture(tmp_path, monkeypatch):
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+    source = Path("tests/fixtures/journal/chronicle/20260520")
+    dest = day_path("20260520")
+    shutil.copytree(source, dest, dirs_exist_ok=True)
+    # Normalize all analyzing markers to "now" so wall-clock elapsed since the
+    # fixture was checked out doesn't push fresh markers over the staleness
+    # threshold; then explicitly stale only the one this test exercises.
+    now = time.time()
+    for marker in dest.rglob(".analyzing_*"):
+        os.utime(marker, (now, now))
+    stale_marker = dest / "default" / "093000_300" / ".analyzing_screen"
+    old_time = now - 2000
+    os.utime(stale_marker, (old_time, old_time))
+
+    mod = importlib.import_module("solstone.think.cluster")
+
+    _audio_ranges, _screen_ranges, segments = mod.scan_day("20260520")
+    by_key = {segment["key"]: segment for segment in segments}
+
+    assert by_key["090000_300"]["data_state"]["screen"] == "analyzing"
+    assert by_key["091000_300"]["data_state"]["screen"] == "failed"
+    assert by_key["092000_300"]["data_state"]["screen"] == "analyzed"
+    assert not (dest / "default" / "092000_300" / ".analyzing_screen").exists()
+    assert by_key["093000_300"]["data_state"]["screen"] == "failed"
+    stale_payload = json.loads(
+        (dest / "default" / "093000_300" / ".analyze_failed_screen").read_text()
+    )
+    assert stale_payload["reason"] == "stale"
+    assert by_key["094000_300"]["data_state"] == {
+        "audio": "pending",
+        "screen": "pending",
+    }
+
+
+def test_scan_day_marks_analyzed_audio_analyzed(tmp_path, monkeypatch):
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+    day_dir = day_path("20240101")
+
+    mod = importlib.import_module("solstone.think.cluster")
+
+    segment = day_dir / "default" / "090000_300"
+    segment.mkdir(parents=True)
+    (segment / "audio.jsonl").write_text(
+        '{"raw": "audio.flac"}\n'
+        '{"start": "00:00:01", "source": "mic", "text": "audio line"}\n'
+    )
+
+    audio_ranges, _, segments = mod.scan_day("20240101")
+
+    assert audio_ranges == [("09:00", "09:15")]
+    assert segments[0]["data_state"] == {"audio": "analyzed"}
+
+
+def test_scan_day_keeps_audio_raw_substring_collision_pending(tmp_path, monkeypatch):
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+    day_dir = day_path("20240101")
+
+    mod = importlib.import_module("solstone.think.cluster")
+
+    segment = day_dir / "default" / "090000_300"
+    segment.mkdir(parents=True)
+    (segment / "audio.jsonl").write_text('{"raw": "startup_audio.flac"}\n')
+
+    audio_ranges, _, segments = mod.scan_day("20240101")
+
+    assert audio_ranges == [("09:00", "09:15")]
+    assert segments[0]["data_state"] == {"audio": "pending"}
+
+
+def test_scan_day_omits_absent_modalities(tmp_path, monkeypatch):
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+    day_dir = day_path("20240101")
+
+    mod = importlib.import_module("solstone.think.cluster")
+
+    segment = day_dir / "default" / "090000_300"
+    segment.mkdir(parents=True)
+
+    assert mod.scan_day("20240101") == ([], [], [])
+
+
+@pytest.mark.parametrize("filename", ["imported.md", "call_transcript.md"])
+def test_scan_day_marks_text_transcript_audio_analyzed(tmp_path, monkeypatch, filename):
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+    day_dir = day_path("20240101")
+
+    mod = importlib.import_module("solstone.think.cluster")
+
+    segment = day_dir / "default" / "090000_300"
+    segment.mkdir(parents=True)
+    (segment / filename).write_text("transcript text\n")
+
+    audio_ranges, _, segments = mod.scan_day("20240101")
+
+    assert audio_ranges == [("09:00", "09:15")]
+    assert segments[0]["data_state"] == {"audio": "analyzed"}
 
 
 def test_day_path_create_false(tmp_path, monkeypatch):

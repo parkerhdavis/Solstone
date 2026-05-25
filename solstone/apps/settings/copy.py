@@ -28,6 +28,14 @@ CONVEY_HOST_URL_SET_DONE = "host url set: {url}"
 CONVEY_HOST_URL_CLEARED = "host url cleared. auto-detect is active."
 CONVEY_HOST_URL_INVALID = "error: host url must be an absolute URL"
 CONVEY_HOST_URL_FLAG_CONFLICT = "error: choose exactly one of <url>, --auto, or --show"
+FACET_DETAIL_SUCCESS_HEADING = "{title} is ready"
+FACET_DETAIL_VALUE_FRAMING = (
+    "{title} gathers the people, places, and things that share this context. "
+    "as you tag them, they'll show up here and in your journal's filtered views."
+)
+FACET_DETAIL_PRIMARY_CTA = "tag people, places, and things to {title}"
+FACET_DETAIL_SECONDARY_CTA = "create another facet"
+FACET_DETAIL_TERTIARY_ESCAPE = "back to settings"
 
 
 def format_convey_status(
@@ -64,5 +72,10 @@ __all__ = [
     "CONVEY_RESTART_TIMEOUT",
     "CONVEY_TRUST_DISABLE_DONE",
     "CONVEY_TRUST_ENABLE_DONE",
+    "FACET_DETAIL_PRIMARY_CTA",
+    "FACET_DETAIL_SECONDARY_CTA",
+    "FACET_DETAIL_SUCCESS_HEADING",
+    "FACET_DETAIL_TERTIARY_ESCAPE",
+    "FACET_DETAIL_VALUE_FRAMING",
     "format_convey_status",
 ]

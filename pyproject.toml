@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "solstone"
-version = "0.3.6"
+version = "0.3.9"
 description = "Navigate Life Intelligently"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -31,7 +31,7 @@ keywords = ["audio", "transcription", "screenshot", "multimodal", "ai", "gemini"
 dependencies = [
     # Core dependencies
     "python-dotenv",
-    "google-genai",
+    "google-genai>=1.62.0",
     "Flask[async]",
     "Markdown",
     "mistune",
@@ -46,6 +46,9 @@ dependencies = [
 
     "openai>=1.2.0",
     "anthropic",
+    "mlx-vlm>=0.5.0,<1; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mlx>=0.31.2,<1; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "huggingface-hub>=0.24",
     "httpx",
     "h2",
     "cryptography>=42",
@@ -122,10 +125,10 @@ parakeet-onnx-cuda = [
 sol = "solstone.think.sol_cli:main"
 
 [project.urls]
-Homepage = "https://github.com/solpbc/solstone"
-Repository = "https://github.com/solpbc/solstone"
-Documentation = "https://github.com/solpbc/solstone/blob/main/README.md"
-"Bug Tracker" = "https://github.com/solpbc/solstone/issues"
+Homepage = "https://github.com/solpbc/solstone-journal"
+Repository = "https://github.com/solpbc/solstone-journal"
+Documentation = "https://github.com/solpbc/solstone-journal/blob/main/README.md"
+"Bug Tracker" = "https://github.com/solpbc/solstone-journal/issues"
 
 [tool.setuptools.packages.find]
 include = ["solstone*"]
@@ -134,7 +137,7 @@ include = ["solstone*"]
 "solstone.apps" = ["*/app.json", "*/*.html", "*/guides/*.md", "*/talent/*.md", "*/talent/*.py", "*/talent/*.json", "*/talent/*.schema.json", "*/talent/*/SKILL.md", "*/static/*", "*/static/**/*"]
 "solstone.think" = ["*.md", "*.json", "templates/*.md", "policies/*.toml"]
 "solstone.talent" = ["*.md", "*.py", "*.schema.json", "*/SKILL.md", "*/references/*.md"]
-"solstone.observe" = ["*.md", "*.json", "*.schema.json", "assets/*.onnx", "categories/*.md", "transcribe/*.md", "transcribe/*.json", "transcribe/assets/*.onnx", "transcribe/_fixtures/*.wav", "transcribe/parakeet_helper/Package.swift", "transcribe/parakeet_helper/README.md", "transcribe/parakeet_helper/Sources/parakeet-helper/main.swift", "transcribe/parakeet_helper/_bin/parakeet-helper"]
+"solstone.observe" = ["*.md", "*.json", "*.schema.json", "assets/*.onnx", "categories/*.md", "categories/*.schema.json", "transcribe/*.md", "transcribe/*.json", "transcribe/assets/*.onnx", "transcribe/_fixtures/*.wav", "transcribe/parakeet_helper/Package.swift", "transcribe/parakeet_helper/README.md", "transcribe/parakeet_helper/Sources/parakeet-helper/main.swift", "transcribe/parakeet_helper/_bin/parakeet-helper"]
 "solstone.convey" = ["templates/*.html", "static/*", "static/**/*"]
 
 # Development tools configuration
@@ -182,6 +185,7 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "pytest-cov",
+    "pytest-playwright",
     "pytest-timeout",
     "pytest-xdist",
     "ruff",

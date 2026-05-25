@@ -19,9 +19,9 @@ if solstone is running and healthy, skip to [install an observer](#install-an-ob
 
 ### prerequisites
 
-linux: `uv` is the only requirement. install with `curl -LsSf https://astral.sh/uv/install.sh | sh`.
+linux: install `uv` (`curl -LsSf https://astral.sh/uv/install.sh | sh`) and `ripgrep` (`rg`) from your distro package manager.
 
-macOS: install xcode command line tools (`xcode-select --install`) and homebrew (https://brew.sh), then `brew install uv`.
+macOS: install xcode command line tools (`xcode-select --install`) and homebrew (https://brew.sh), then `brew install uv ripgrep`.
 
 ## install
 
@@ -53,6 +53,7 @@ the sol agent is powered by an AI model, and you choose which. the choice has re
 
 - **a hosted provider key is the recommended way to start.** point solstone at Google (Gemini), OpenAI, or Anthropic with **your own developer API key**, created in that provider's developer console — *not* the consumer chat product (gemini.google.com / chatgpt.com / claude.ai). this is the fastest path to a working co-brain and what the first-run wizard sets up.
 - **a local model via Ollama is a real, supported goal, but not the default daily experience yet.** running the sol agent fully locally means nothing leaves your machine. it's the maximum-privacy path, but it needs capable hardware and a local model with strong "thinking" support; smaller models on constrained machines (for example a base Mac mini) struggle on the reasoning-heavy work. treat local as a goal to grow into, not the recommended starting point.
+- **on Apple Silicon, you can run sol's screen analysis on-device today.** macs with Apple Silicon and at least 16 GB of memory can turn on "MLX (Local, Apple Silicon)" in settings → providers; sol downloads a local model once, then does the work of making sense of your screen entirely on your machine, with nothing sent to a cloud provider. it's opt-in and covers screen analysis for now; the rest of sol stays on whichever provider you chose above.
 
 a hardware heads-up: local transcription alone installs a ~2.5 GB model, and a capable local *thinking* model needs meaningfully more memory and compute on top of that. if your machine is constrained, start with a hosted key and revisit local later; you can switch any time in settings → providers.
 
@@ -80,15 +81,34 @@ uv tool upgrade solstone && sol setup
 
 (or `pipx upgrade solstone && sol setup`.) the second command refreshes the runtime artifacts and reconciles the service unit if anything has changed.
 
+## uninstall
+
+1. remove setup-managed runtime files: `sol setup --clean-uninstall`
+   this removes the user service, managed `~/.local/bin/sol` wrapper, user config, and setup manifest. it does not remove your journal.
+2. optional: uninstall bundled providers you installed: `sol call settings providers uninstall <name>`.
+3. optional: remove agentic-tooling skills: `sol skills uninstall`.
+4. uninstall the python package: `uv tool uninstall solstone` (or `pipx uninstall solstone`).
+5. macOS only: drag `/Applications/solstone.app` to Trash.
+6. macOS only, optional: remove observer app data and the parakeet model cache:
+   ```bash
+   rm -rf ~/Library/Application\ Support/solstone/
+   ```
+   this evicts the ~2.5 GB parakeet cache; reinstall will re-download it.
+7. macOS only, optional: reset privacy permissions:
+   ```bash
+   tccutil reset Microphone app.solstone.observer && tccutil reset ScreenCapture app.solstone.observer
+   ```
+   or use System Settings → Privacy & Security.
+
 ## done
 
 once the observer is running, your observers experience your day along with you, transcribe conversations, surface people and projects, build a knowledge graph, and make everything searchable at http://localhost:5015. everything stays in your journal — one folder per day.
 
-source code: https://github.com/solpbc/solstone
+source code: https://github.com/solpbc/solstone-journal
 company: https://solpbc.org
 
 ## feedback
 
-questions, feedback, or a bug? **follow and tag [@solstone.app](https://bsky.app/profile/solstone.app) on Bluesky** for discussion and updates, open an issue at https://github.com/solpbc/solstone/issues for bugs, or reach support at https://support.solstone.app. you don't need to know anyone — those are the front doors.
+questions, feedback, or a bug? **follow and tag [@solstone.app](https://bsky.app/profile/solstone.app) on Bluesky** for discussion and updates, open an issue at https://github.com/solpbc/solstone-journal/issues for bugs, or reach support at https://support.solstone.app. you don't need to know anyone — those are the front doors.
 
 (running into trouble or want to develop on solstone yourself? see [CONTRIBUTING.md](CONTRIBUTING.md).)

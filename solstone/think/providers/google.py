@@ -33,37 +33,18 @@ from __future__ import annotations
 
 import logging
 import os
-import traceback
-from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from google import genai
 from google.genai import types
 
-from solstone.think.cogitate_policy import build_per_task_policy
 from solstone.think.models import GEMINI_FLASH
-from solstone.think.utils import now_ms
 
-from .cli import (
-    CLIRunner,
-    QuotaExhaustedError,
-    ThinkingAggregator,
-    assemble_prompt,
-    build_cogitate_env,
-)
-from .shared import (
-    GenerateResult,
-    JSONEventCallback,
-    ThinkingEvent,
-    classify_provider_error,
-    safe_raw,
-)
+from .shared import GenerateResult
 
 GEMINI_MAX_OUTPUT_TOKENS = 65536
 _DEFAULT_MAX_TOKENS = 8192
 _DEFAULT_MODEL = GEMINI_FLASH
-
-logger = logging.getLogger(__name__)
 
 # Backend detection cache
 _detected_backend: str | None = None
@@ -213,25 +194,6 @@ def get_or_create_client(client: genai.Client | None = None) -> genai.Client:
     return client
 
 
-def _compute_agent_thinking_params(
-    max_output_tokens: int, thinking_budget: int | None
-) -> tuple[int, int]:
-    """Compute total tokens and effective thinking budget for agent run.
-
-    Args:
-        max_output_tokens: Maximum output tokens from config.
-        thinking_budget: Thinking budget from config, or None for dynamic.
-
-    Returns:
-        Tuple of (total_tokens, effective_thinking_budget).
-        total_tokens = max_output_tokens + (thinking_budget or 0)
-        effective_thinking_budget = thinking_budget if provided, else -1 (dynamic)
-    """
-    total_tokens = max_output_tokens + (thinking_budget or 0)
-    effective_thinking_budget = thinking_budget if thinking_budget is not None else -1
-    return total_tokens, effective_thinking_budget
-
-
 def _build_generate_config(
     temperature: float,
     max_output_tokens: int,
@@ -349,11 +311,14 @@ def _extract_usage(response: Any) -> dict | None:
         return None
 
     metadata = response.usage_metadata
-    usage: dict[str, int] = {
+    usage: dict[str, Any] = {
         "input_tokens": getattr(metadata, "prompt_token_count", 0),
         "output_tokens": getattr(metadata, "candidates_token_count", 0),
         "total_tokens": getattr(metadata, "total_token_count", 0),
     }
+    model_version = getattr(response, "model_version", None)
+    if isinstance(model_version, str) and model_version:
+        usage["model_version"] = model_version
     # Only include optional fields if non-zero
     cached = getattr(metadata, "cached_content_token_count", 0)
     if cached:
@@ -362,6 +327,14 @@ def _extract_usage(response: Any) -> dict | None:
     if reasoning:
         usage["reasoning_tokens"] = reasoning
     return usage
+
+
+def _resolved_model(response: Any, requested: str) -> str:
+    """Return resolved response.model_version when it is a non-empty string, else requested."""
+    resolved = getattr(response, "model_version", None)
+    if isinstance(resolved, str) and resolved:
+        return resolved
+    return requested
 
 
 def _extract_thinking(response: Any) -> list | None:
@@ -441,50 +414,6 @@ def _format_completion_message(finish_reason: str | None, had_tool_calls: bool) 
         return f"Completed ({reason.lower()})."
 
 
-def _log_empty_response_diagnostics(
-    response: Any, finish_reason: str | None, had_tool_calls: bool
-) -> None:
-    """Log diagnostic information when response.text is empty.
-
-    Helps debug intermittent empty response issues with Gemini models.
-    """
-    # Build diagnostic info
-    diag = {
-        "finish_reason": finish_reason,
-        "had_tool_calls": had_tool_calls,
-        "has_candidates": hasattr(response, "candidates") and bool(response.candidates),
-    }
-
-    if hasattr(response, "candidates") and response.candidates:
-        candidate = response.candidates[0]
-        diag["has_content"] = candidate.content is not None
-        if candidate.content:
-            diag["has_parts"] = bool(getattr(candidate.content, "parts", None))
-            if hasattr(candidate.content, "parts") and candidate.content.parts:
-                diag["num_parts"] = len(candidate.content.parts)
-                # Check what types of parts we have
-                part_types = []
-                for part in candidate.content.parts:
-                    if getattr(part, "thought", False):
-                        part_types.append("thinking")
-                    elif getattr(part, "text", None):
-                        part_types.append("text")
-                    elif hasattr(part, "function_call"):
-                        part_types.append("function_call")
-                    elif hasattr(part, "function_response"):
-                        part_types.append("function_response")
-                    else:
-                        part_types.append("other")
-                diag["part_types"] = part_types
-
-    # Check for AFC history (indicates tools were auto-called)
-    if hasattr(response, "automatic_function_calling_history"):
-        afc_history = response.automatic_function_calling_history
-        diag["afc_history_length"] = len(afc_history) if afc_history else 0
-
-    logger.info(f"Empty response.text diagnostics: {diag}")
-
-
 # ---------------------------------------------------------------------------
 # run_generate / run_agenerate functions
 # ---------------------------------------------------------------------------
@@ -537,6 +466,7 @@ def run_generate(
 
     return GenerateResult(
         text=_extract_response_text(response),
+        model=_resolved_model(response, model),
         usage=_extract_usage(response),
         finish_reason=_normalize_finish_reason(response),
         thinking=_extract_thinking(response),
@@ -590,263 +520,11 @@ async def run_agenerate(
 
     return GenerateResult(
         text=_extract_response_text(response),
+        model=_resolved_model(response, model),
         usage=_extract_usage(response),
         finish_reason=_normalize_finish_reason(response),
         thinking=_extract_thinking(response),
     )
-
-
-# ---------------------------------------------------------------------------
-# Agent functions
-# ---------------------------------------------------------------------------
-
-
-def _emit_thinking_events(
-    response: Any, model: str, callback: JSONEventCallback
-) -> None:
-    """Extract and emit thinking events from a response.
-
-    In the Google GenAI SDK, thinking content appears in response.candidates[].content.parts[]
-    where each Part has a `thought` boolean indicating if it's thinking content, and the
-    actual thinking text is in `part.text`.
-    """
-    if not hasattr(response, "candidates") or not response.candidates:
-        return
-
-    for candidate in response.candidates:
-        if not candidate.content or not candidate.content.parts:
-            continue
-
-        for part in candidate.content.parts:
-            # part.thought is a boolean indicating this is thinking content
-            # part.text contains the actual thinking summary
-            if getattr(part, "thought", False) and getattr(part, "text", None):
-                thinking_event: ThinkingEvent = {
-                    "event": "thinking",
-                    "ts": now_ms(),
-                    "summary": part.text,
-                    "model": model,
-                }
-                callback.emit(thinking_event)
-
-
-def _translate_gemini(
-    event: dict[str, Any],
-    aggregator: ThinkingAggregator,
-    callback: JSONEventCallback,
-    usage_out: dict[str, Any] | None = None,
-    pending_tools: dict[str, dict[str, Any]] | None = None,
-) -> str | None:
-    """Translate a Gemini CLI JSONL event into our standard Event types.
-
-    Args:
-        event: Raw JSONL event dict from the Gemini CLI.
-        aggregator: ThinkingAggregator for buffering text.
-        callback: JSONEventCallback for emitting events.
-        usage_out: Optional mutable dict to receive usage stats from result events.
-        pending_tools: Optional mutable dict tracking tool_id -> {tool, args}.
-
-    Returns:
-        The CLI session ID from init events, or None.
-    """
-    event_type = event.get("type")
-
-    if event_type == "init":
-        return event.get("session_id")
-
-    if event_type == "message":
-        role = event.get("role")
-        if role == "user":
-            return None
-        if role == "assistant" and event.get("delta"):
-            content = event.get("content", "")
-            if content:
-                aggregator.accumulate(content)
-            return None
-        return None
-
-    if event_type == "tool_use":
-        aggregator.flush_as_thinking(raw_events=[event])
-        tool_name = event.get("tool_name", "")
-        tool_id = event.get("tool_id")
-        tool_args = event.get("parameters")
-        if pending_tools is not None and tool_id:
-            pending_tools[tool_id] = {"tool": tool_name, "args": tool_args}
-        callback.emit(
-            {
-                "event": "tool_start",
-                "tool": tool_name,
-                "args": tool_args,
-                "call_id": tool_id,
-                "raw": safe_raw([event]),
-                "ts": now_ms(),
-            }
-        )
-        return None
-
-    if event_type == "tool_result":
-        tool_id = event.get("tool_id")
-        tool_info = {}
-        if pending_tools is not None and tool_id:
-            tool_info = pending_tools.pop(tool_id, {})
-        callback.emit(
-            {
-                "event": "tool_end",
-                "tool": tool_info.get("tool", ""),
-                "args": tool_info.get("args"),
-                "call_id": tool_id,
-                "result": event.get("output"),
-                "raw": safe_raw([event]),
-                "ts": now_ms(),
-            }
-        )
-        return None
-
-    if event_type == "result":
-        stats = event.get("stats") or {}
-        if usage_out is not None and stats:
-            input_tokens = stats.get("input_tokens", 0)
-            output_tokens = stats.get("output_tokens", 0)
-            total_tokens = stats.get("total_tokens", 0)
-            usage_out.update(
-                {
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "total_tokens": total_tokens,
-                }
-            )
-            if stats.get("cached"):
-                usage_out["cached_tokens"] = stats["cached"]
-            # CLI doesn't break out thinking tokens, but they're the
-            # difference between total and input+output.
-            reasoning = total_tokens - input_tokens - output_tokens
-            if reasoning > 0:
-                usage_out["reasoning_tokens"] = reasoning
-        return None
-
-    # Unknown event type — log and skip
-    logger.debug("Unknown Gemini CLI event type: %s", event_type)
-    return None
-
-
-async def run_cogitate(
-    config: dict[str, Any],
-    on_event: Callable[[dict], None] | None = None,
-) -> str:
-    """Run a prompt with tool-calling support via Google Gemini.
-
-    Args:
-        config: Complete configuration dictionary including prompt, system_instruction,
-            user_instruction, extra_context, model, etc.
-        on_event: Optional event callback
-    """
-    model = config.get("model", _DEFAULT_MODEL)
-    session_id = config.get("session_id")
-    callback = JSONEventCallback(on_event)
-
-    try:
-        # Assemble prompt from config fields
-        prompt_body, system_instruction = assemble_prompt(
-            config,
-            sol_tool_name="run_shell_command" if not config.get("write") else None,
-        )
-
-        # Gemini CLI has no --system-prompt flag; prepend to prompt body
-        if system_instruction:
-            prompt_body = system_instruction + "\n\n" + prompt_body
-
-        # Approval posture:
-        #   - Write-enabled talents (coder) run unpolicied yolo: full tool registry,
-        #     write_file / replace allowed.
-        #   - Read-only cogitate talents run yolo + a scoped policy: full tool
-        #     registry (no plan-mode stripping), but write_file / replace denied
-        #     and run_shell_command narrowed to `sol` invocations.
-        # Plan mode strips run_shell_command from the registry, which drove a
-        # tool-name hallucination loop in earlier prototypes (documented in sol
-        # pbc's internal engineering notes). The deprecated --allowed-tools
-        # flag controls auto-approval, not availability, so it can't replace
-        # the policy file for this purpose.
-        cmd = [
-            "gemini",
-            "-p",
-            "-",
-            "-o",
-            "stream-json",
-            "--approval-mode",
-            "yolo",
-            "-m",
-            model,
-            "--sandbox=none",
-        ]
-        policy_path = None
-        if not config.get("write"):
-            policy_path = build_per_task_policy(
-                config.get("name") or "cogitate",
-                config,
-                config.get("day") or "",
-                int(config.get("read_scope_span", 0) or 0),
-            )
-            cmd.extend(["--policy", str(policy_path)])
-
-        # Resume from previous session if continuing
-        if session_id:
-            cmd.extend(["--resume", session_id])
-
-        # Mutable containers for translate closure
-        usage: dict[str, Any] = {}
-        pending_tools: dict[str, dict[str, Any]] = {}
-
-        def translate(
-            event: dict[str, Any], agg: ThinkingAggregator, cb: JSONEventCallback
-        ) -> str | None:
-            return _translate_gemini(event, agg, cb, usage, pending_tools)
-
-        aggregator = ThinkingAggregator(callback, model=model)
-        cwd_value = config.get("cwd")
-        runner = CLIRunner(
-            cmd=cmd,
-            prompt_text=prompt_body,
-            translate=translate,
-            callback=callback,
-            aggregator=aggregator,
-            cwd=Path(cwd_value) if cwd_value else None,
-            env=build_cogitate_env("google"),
-            read_call_budget=int(config.get("read_call_budget", 200)),
-        )
-        runner.provider = "google"
-
-        try:
-            result = await runner.run()
-        finally:
-            if policy_path is not None:
-                policy_path.unlink(missing_ok=True)
-
-        # Emit finish event (CLIRunner does not emit one)
-        finish_event: dict[str, Any] = {
-            "event": "finish",
-            "result": result,
-            "ts": now_ms(),
-        }
-        if usage:
-            finish_event["usage"] = usage
-        if runner.cli_session_id:
-            finish_event["cli_session_id"] = runner.cli_session_id
-        callback.emit(finish_event)
-        return result
-    except QuotaExhaustedError:
-        raise
-    except Exception as exc:
-        callback.emit(
-            {
-                "event": "error",
-                "error": str(exc),
-                "reason_code": classify_provider_error(exc, "google"),
-                "provider": "google",
-                "trace": traceback.format_exc(),
-            }
-        )
-        setattr(exc, "_evented", True)
-        raise
 
 
 def list_models() -> list[dict]:
@@ -925,11 +603,9 @@ def validate_vertex_credentials(
 
 
 __all__ = [
-    "run_cogitate",
     "run_generate",
     "run_agenerate",
     "get_or_create_client",
-    "validate_vertex_credentials",
     "_detect_backend",
     "_get_effective_backend",
     "list_models",

@@ -360,6 +360,13 @@ ENDPOINTS = [
         "params": {},
         "status": 200,
     },
+    {
+        "app": "tokens",
+        "name": "daily",
+        "path": "/app/tokens/api/daily",
+        "params": {"days": "14"},
+        "status": 200,
+    },
     # apps/transcripts/routes.py
     {
         "app": "transcripts",
@@ -388,15 +395,6 @@ ENDPOINTS = [
         "path": "/app/transcripts/api/stats/202603",
         "params": {},
         "status": 200,
-    },
-    # apps/graph/routes.py
-    {
-        "app": "graph",
-        "name": "graph",
-        "path": "/app/graph/api/graph",
-        "params": {},
-        "status": 200,
-        "sandbox_only": True,
     },
 ]
 
@@ -471,7 +469,24 @@ def normalize(data: Any, journal_path: str) -> Any:
                             and "not set" not in i
                             and "not reachable" not in i
                         ]
-                        if cli:
+                        if _name == "local":
+                            local_issues = [
+                                i
+                                for i in issues
+                                if i
+                                in {
+                                    "binary_missing",
+                                    "model_missing",
+                                    "ram_insufficient",
+                                    "server_unhealthy",
+                                }
+                            ]
+                            for local_issue in ("binary_missing", "model_missing"):
+                                if local_issue not in local_issues:
+                                    local_issues.append(local_issue)
+                            status["issues"] = sorted(local_issues)
+                            continue
+                        if cli and _name not in {"anthropic", "openai", "google"}:
                             issues.append(f"{cli} CLI not found on PATH")
                         # Re-add generic key-not-set issues per provider
                         env_keys = {
@@ -481,11 +496,16 @@ def normalize(data: Any, journal_path: str) -> Any:
                         }
                         if _name in env_keys:
                             issues.append(f"{env_keys[_name]} not set")
-                        if _name == "ollama":
-                            issues.append(
-                                "Ollama not reachable at http://localhost:11434"
-                            )
                         status["issues"] = sorted(issues)
+            if key == "bundled":
+                for _name, status in result.items():
+                    if isinstance(status, dict):
+                        if "last_transition_at" in status:
+                            status["last_transition_at"] = "<TIMESTAMP>"
+                        if "binary_path" in status and status["binary_path"]:
+                            status["binary_path"] = "<PATH>"
+                        if "binary_exists" in status:
+                            status["binary_exists"] = False
             # Normalize env-dependent API key presence
             if key in ("api_keys", "runtime_env"):
                 for k in result:

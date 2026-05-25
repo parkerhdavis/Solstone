@@ -4,7 +4,7 @@
 """AI provider backends for solstone.think.
 
 This package contains provider-specific implementations for LLM generation
-and agent execution. Each provider module exposes:
+and agent execution. Effective provider modules expose:
 
 - run_generate(): Sync text generation, returns GenerateResult
 - run_agenerate(): Async text generation, returns GenerateResult
@@ -17,7 +17,8 @@ Available providers:
 - google: Google Gemini models
 - openai: OpenAI GPT models
 - anthropic: Anthropic Claude models
-- ollama: Ollama local models
+- local: bundled on-device llama-server models
+- mlx: MLX local Apple Silicon models
 - vllm: vLLM local server (multimodal: text + image + audio)
 """
 
@@ -34,33 +35,33 @@ logger = logging.getLogger(__name__)
 # Provider Registry
 # ---------------------------------------------------------------------------
 # Central registry of supported providers and their module paths.
-# All registered providers must implement:
+# All registered provider module targets must implement:
 #   - run_generate(contents, model, ...) -> GenerateResult
 #   - run_agenerate(contents, model, ...) -> GenerateResult
 #   - run_cogitate(config, on_event) -> str
 # ---------------------------------------------------------------------------
 
 PROVIDER_REGISTRY: Dict[str, str] = {
-    "google": "solstone.think.providers.google",
-    "openai": "solstone.think.providers.openai",
-    "anthropic": "solstone.think.providers.anthropic",
-    "ollama": "solstone.think.providers.ollama",
+    "google": "solstone.think.providers.openhands",
+    "openai": "solstone.think.providers.openhands",
+    "anthropic": "solstone.think.providers.openhands",
+    "local": "solstone.think.providers.local",
+    "mlx": "solstone.think.providers.mlx",
     "vllm": "solstone.think.providers.vllm",
 }
 
 # ---------------------------------------------------------------------------
 # Provider Metadata
 # ---------------------------------------------------------------------------
-# Display labels, environment variable names, and cogitate CLI binary names
-# for each provider. Used by settings UI, provider status, and agent health
-# checks.
+# Display labels, environment variable names, and CLI metadata where applicable.
+# Used by settings UI, provider status, and agent health checks.
 # ---------------------------------------------------------------------------
 
 PROVIDER_METADATA: Dict[str, Dict[str, Any]] = {
     "google": {
         "label": "Google (Gemini)",
         "env_key": "GOOGLE_API_KEY",
-        "cogitate_cli": "gemini",
+        "cogitate_runtime": "openhands",
         "vertex_env_keys": [
             "GOOGLE_GENAI_USE_VERTEXAI",
             "GOOGLE_APPLICATION_CREDENTIALS",
@@ -69,17 +70,21 @@ PROVIDER_METADATA: Dict[str, Dict[str, Any]] = {
     "openai": {
         "label": "OpenAI (GPT)",
         "env_key": "OPENAI_API_KEY",
-        "cogitate_cli": "codex",
+        "cogitate_runtime": "openhands",
     },
     "anthropic": {
         "label": "Anthropic (Claude)",
         "env_key": "ANTHROPIC_API_KEY",
-        "cogitate_cli": "claude",
+        "cogitate_runtime": "openhands",
     },
-    "ollama": {
-        "label": "Ollama (Local)",
+    "local": {
+        "label": "Local (on-device)",
         "env_key": "",
-        "cogitate_cli": "opencode",
+        "cogitate_runtime": "openhands",
+    },
+    "mlx": {
+        "label": "MLX (Local, Apple Silicon)",
+        "env_key": "",
     },
     "vllm": {
         "label": "vLLM (Local)",
@@ -142,8 +147,21 @@ def get_provider_list() -> List[Dict[str, Any]]:
     return providers
 
 
+def _env_key_configured(env_key: str) -> bool:
+    if not env_key:
+        return False
+    if os.getenv(env_key):
+        return True
+    try:
+        from solstone.think.journal_config import read_journal_config
+
+        return bool(read_journal_config().get("env", {}).get(env_key))
+    except Exception:
+        return False
+
+
 def build_provider_status(
-    providers_list: List[Dict[str, Any]],
+    providers_list: List[Dict[str, Any]] | None = None,
     vertex_creds_configured: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     """Build per-provider readiness status.
@@ -158,9 +176,12 @@ def build_provider_status(
     Returns
     -------
     Dict[str, Dict[str, Any]]
-        Keyed by provider name. Each entry has: configured, generate_ready,
-        cogitate_ready, cogitate_cli, cogitate_cli_found, issues.
+        Keyed by provider name. Each entry has readiness fields and issues.
+        CLI-backed providers also include cogitate_cli and cogitate_cli_found.
     """
+    if providers_list is None:
+        providers_list = get_provider_list()
+
     status = {}
     for provider in providers_list:
         name = provider["name"]
@@ -169,27 +190,42 @@ def build_provider_status(
         cogitate_cli = meta.get("cogitate_cli", "")
         issues: list[str] = []
 
-        if name == "ollama":
-            try:
-                import httpx
+        if name == "local":
+            from solstone.think.providers import local_install, local_server
 
-                base_url = os.getenv(
-                    "OLLAMA_BASE_URL", "http://localhost:11434"
-                ).rstrip("/")
-                resp = httpx.get(f"{base_url}/api/version", timeout=2)
-                resp.raise_for_status()
-                configured = True
-            except Exception:
-                configured = False
-                base_url = os.getenv(
-                    "OLLAMA_BASE_URL", "http://localhost:11434"
-                ).rstrip("/")
-                issues.append(f"Ollama not reachable at {base_url}")
+            readiness = local_install.inspect_readiness()
+            binary_installed = bool(readiness["binary_installed"])
+            model_installed = bool(readiness["model_installed"])
+            ram_sufficient = bool(readiness["ram_sufficient"])
+            server_healthy = local_server.is_healthy()
+            configured = binary_installed and model_installed and ram_sufficient
+
+            if not binary_installed:
+                issues.append("binary_missing")
+            if not model_installed:
+                issues.append("model_missing")
+            if not ram_sufficient:
+                issues.append("ram_insufficient")
+            if configured and not server_healthy:
+                issues.append("server_unhealthy")
+
+            ready = configured and server_healthy
+            status[name] = {
+                "configured": configured,
+                "generate_ready": ready,
+                "cogitate_ready": ready,
+                "cogitate_cli": "llama-server",
+                "cogitate_cli_found": binary_installed,
+                "issues": issues,
+            }
+            continue
         elif name == "vllm":
             # Multi-server aware: ping every configured server (or the env-var
             # fallback when no providers.vllm.servers config exists). Configured
             # = at least one reachable; issues lists each unreachable URL so the
-            # operator can see which container needs attention.
+            # operator can see which container needs attention. Falls through to
+            # the generic tail below, where the empty cogitate_cli leaves
+            # cogitate_ready=False (cogitate via vLLM is deferred).
             import httpx
 
             from solstone.think.providers.vllm import _all_configured_base_urls
@@ -204,22 +240,64 @@ def build_provider_status(
                 except Exception:
                     issues.append(f"vLLM not reachable at {url}")
             configured = bool(reachable)
-        elif name == "google":
-            has_key = bool(os.getenv(env_key))
-            configured = has_key or vertex_creds_configured
-            if not configured:
-                issues.append(f"{env_key} not set")
+        elif name in {"google", "anthropic", "openai"}:
+            from solstone.think.providers import bundled
+
+            runtime_state = bundled.get_provider_state(
+                meta.get("cogitate_runtime", "openhands")
+            )
+            runtime_install_state = runtime_state["install_state"]
+            runtime_key_status = runtime_state["key_status"]
+            cogitate_cli = "openhands-sdk"
+            cogitate_cli_found = (
+                runtime_install_state == "installed"
+                and runtime_key_status == "not-applicable"
+                and runtime_state["disabled"] is False
+            )
+
+            if name == "google":
+                has_key = _env_key_configured(env_key)
+                configured = has_key or vertex_creds_configured
+                cogitate_key_configured = has_key
+                if not configured:
+                    issues.append(f"{env_key} not set")
+                elif not has_key:
+                    issues.append(f"{env_key} not set for cogitate")
+            else:
+                configured = _env_key_configured(env_key)
+                cogitate_key_configured = configured
+                if not configured and env_key:
+                    issues.append(f"{env_key} not set")
+
+            if not cogitate_cli_found:
+                issues.extend(runtime_state.get("issues", []))
+
+            status[name] = {
+                "configured": configured,
+                "generate_ready": configured,
+                "cogitate_ready": cogitate_key_configured and cogitate_cli_found,
+                "cogitate_cli": cogitate_cli,
+                "cogitate_cli_found": cogitate_cli_found,
+                "issues": issues,
+            }
+            continue
         else:
-            configured = bool(os.getenv(env_key)) if env_key else False
+            configured = _env_key_configured(env_key)
             if not configured and env_key:
                 issues.append(f"{env_key} not set")
 
         cogitate_cli_found = bool(shutil.which(cogitate_cli)) if cogitate_cli else False
         if cogitate_cli and not cogitate_cli_found:
-            issues.append(f"{cogitate_cli} CLI not found on PATH")
+            install_cmd = meta.get("cogitate_cli_install")
+            if install_cmd:
+                issues.append(
+                    f"{cogitate_cli} CLI not found on PATH — run: {install_cmd}"
+                )
+            else:
+                issues.append(f"{cogitate_cli} CLI not found on PATH")
+        cogitate_ready = configured and cogitate_cli_found
 
         generate_ready = configured
-        cogitate_ready = configured and cogitate_cli_found
 
         status[name] = {
             "configured": configured,
@@ -251,49 +329,22 @@ def get_provider_models(provider: str) -> list[dict]:
         If the provider is not registered.
     """
     module = get_provider_module(provider)
-    return module.list_models()
+    return module.list_models(provider)
 
 
 def list_installed_local_models() -> set[str]:
     """Return the set of model IDs currently usable from local providers.
 
-    Queries both Ollama (``/api/tags``) and vLLM (``/v1/models``). A model
-    id appears in the returned set only when its provider is reachable
-    *and* the model is currently available from that provider.
+    Queries vLLM (``/v1/models``). A model id appears in the returned set
+    only when vLLM is reachable *and* the model is currently being served
+    by the running vLLM instance. vLLM has no pull-on-demand; the model is
+    fixed to whatever ``--served-model-name`` was passed at server startup,
+    so a model not in this list requires a server restart, not a pull.
 
-    Provider semantics differ in what "available" means:
-
-    - **Ollama**: model is in the local pull cache (``/api/tags``).
-      Models not in the cache can still be reached by the user via
-      ``ollama pull <name>`` — no server restart needed.
-    - **vLLM**: model is currently being served by the running vLLM
-      instance (``/v1/models``). vLLM has no pull-on-demand; the model
-      is fixed to whatever ``--served-model-name`` was passed at server
-      startup. A model not in this list requires a server restart, not
-      a pull.
-
-    Both providers contribute silently when reachable; unreachable
-    providers are debug-logged but not raised. Callers must still work
-    when neither provider is up.
+    vLLM contributes silently when reachable; an unreachable provider is
+    debug-logged but not raised. Callers must still work when it is down.
     """
     installed: set[str] = set()
-
-    # Ollama
-    try:
-        from solstone.think.providers.ollama import _OLLAMA_LOCAL_PREFIX, _get_client
-
-        try:
-            client = _get_client()
-            response = client.get("/api/tags", timeout=5.0)
-            response.raise_for_status()
-            for entry in response.json().get("models", []) or []:
-                name = entry.get("name")
-                if name:
-                    installed.add(f"{_OLLAMA_LOCAL_PREFIX}{name}")
-        except Exception as exc:
-            logger.debug("Ollama /api/tags unreachable: %s", exc)
-    except ImportError:
-        logger.debug("ollama provider module unavailable")
 
     # vLLM
     try:
@@ -342,7 +393,7 @@ def validate_key(provider: str, api_key: str) -> dict:
         If the provider is not registered.
     """
     module = get_provider_module(provider)
-    return module.validate_key(api_key)
+    return module.validate_key(provider, api_key)
 
 
 __all__ = [

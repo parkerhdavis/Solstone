@@ -74,7 +74,7 @@ class StartEvent(TypedDict, total=False):
     name: Required[str]
     model: Required[str]
     provider: Required[str]
-    session_id: Optional[str]  # CLI session ID for continuation
+    session_id: Optional[str]  # solstone-owned session ID for continuation
     chat_id: Optional[str]  # Chat ID for reverse lookup
     raw: Optional[list[dict[str, Any]]]  # Original provider JSON event(s)
 
@@ -86,7 +86,9 @@ class FinishEvent(TypedDict, total=False):
     ts: Required[int]
     result: Required[str]
     usage: Optional[dict[str, Any]]
-    cli_session_id: Optional[str]  # Provider CLI session/thread ID for resume
+    cli_session_id: Optional[
+        str
+    ]  # solstone-owned session ID persisted under journal/.cache/cogitate-history/
     raw: Optional[list[dict[str, Any]]]  # Original provider JSON event(s)
 
 
@@ -96,7 +98,12 @@ class ErrorEvent(TypedDict, total=False):
     event: Literal["error"]
     ts: int
     error: str
+    reason: Optional[str]
+    reason_code: Optional[str]
+    provider: Optional[str]
     trace: Optional[str]
+    reset_at_ms: Optional[int]
+    terminal: Optional[bool]
     raw: Optional[list[dict[str, Any]]]  # Original provider JSON event(s)
 
 
@@ -127,6 +134,16 @@ class ThinkingEvent(TypedDict, total=False):
     raw: Optional[list[dict[str, Any]]]  # Original provider JSON event(s)
 
 
+class TextDeltaEvent(TypedDict, total=False):
+    """Event emitted when streamed text content is available."""
+
+    event: Required[Literal["text_delta"]]
+    ts: Required[int]
+    delta: Required[str]
+    model: Optional[str]
+    raw: Optional[list[dict[str, Any]]]  # Original provider JSON event(s)
+
+
 class FallbackEvent(TypedDict, total=False):
     """Event emitted when provider fallback occurs."""
 
@@ -145,6 +162,7 @@ Event = Union[
     FinishEvent,
     ErrorEvent,
     ThinkingEvent,
+    TextDeltaEvent,
     TalentUpdatedEvent,
     FallbackEvent,
 ]
@@ -305,6 +323,9 @@ def classify_provider_error(exc: BaseException, provider: str) -> str:
         exc_name = type(exc).__name__
         exc_name_lower = exc_name.lower()
         message_lower = str(exc).lower()
+        explicit_reason_code = getattr(exc, "reason_code", None)
+        if isinstance(explicit_reason_code, str) and explicit_reason_code:
+            return explicit_reason_code
 
         if exc_name == "QuotaExhaustedError":
             return "provider_quota_exceeded"
@@ -437,6 +458,7 @@ class GenerateResult(TypedDict, total=False):
     """
 
     text: Required[str]  # Response text
+    model: Optional[str]  # Resolved model identifier when provider returns one
     usage: Optional[dict]  # Normalized usage dict (input_tokens, output_tokens, etc.)
     finish_reason: Optional[str]  # Normalized: "stop", "max_tokens", "safety", etc.
     thinking: Optional[list]  # List of thinking block dicts

@@ -10,20 +10,21 @@ import os
 from datetime import timedelta
 from pathlib import Path
 
-from flask import Flask
+from flask import Flask, g, request
 from jinja2 import ChoiceLoader, FileSystemLoader
 
 from solstone.apps import AppRegistry
+from solstone.convey.secure_listener import ConveyIdentity
 from solstone.think.utils import ensure_journal_config
 
 from . import state, system
 from .apps import register_app_context
-from .auth import install_identity_stamper
 from .bridge import emit
 from .chat import chat_bp, start_chat_runtime
 from .config import bp as config_bp
 from .request_id import install_request_id_stamper
 from .root import bp as root_bp
+from .services_scout import bp as services_scout_bp
 
 __all__ = [
     "create_app",
@@ -92,13 +93,28 @@ def _migrate_setup_completed() -> None:
     os.chmod(config_path, 0o600)
 
 
+def install_identity_stamper(app: Flask) -> None:
+    @app.before_request
+    def _stamp_identity() -> None:
+        stamped = request.environ.get("pl.identity")
+        if stamped is not None:
+            g.identity = stamped
+            return
+        g.identity = ConveyIdentity(
+            mode="dl",
+            fingerprint=None,
+            device_label=None,
+            paired_at=None,
+            session_id=None,
+        )
+
+
 def create_app(journal: str = "") -> Flask:
     """Create and configure the Convey Flask application."""
     from solstone.think.link.runtime import start_link_runtime
     from solstone.think.push.runtime import start_push_runtime
     from solstone.think.voice.runtime import start_voice_runtime
 
-    from .pairing import pairing_bp, pairing_ui_bp
     from .push import push_bp
     from .voice import voice_bp
 
@@ -123,12 +139,16 @@ def create_app(journal: str = "") -> Flask:
     _migrate_password_hash()
     _migrate_setup_completed()
     app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)
+    app.config["SEND_FILE_MAX_AGE_DEFAULT"] = timedelta(seconds=300)
     app.config.setdefault("SECURE_LISTENER_ENABLED", False)
     install_identity_stamper(app)
     install_request_id_stamper(app)
 
     # Register root blueprint (login, logout, /, favicon)
     app.register_blueprint(root_bp)
+
+    # Register scout service setup backend
+    app.register_blueprint(services_scout_bp)
 
     # Register config API blueprint
     app.register_blueprint(config_bp)
@@ -144,10 +164,6 @@ def create_app(journal: str = "") -> Flask:
 
     # Register push API blueprint
     app.register_blueprint(push_bp)
-
-    # Register pairing API and UI blueprints
-    app.register_blueprint(pairing_bp)
-    app.register_blueprint(pairing_ui_bp)
 
     # Initialize and register app system
     registry = AppRegistry()

@@ -36,16 +36,6 @@ PAIRING_KEY_INVALID = Reason(
     "I couldn't use that pairing key.",
     400,
 )
-PAIRING_TOKEN_INVALID = Reason(
-    "pairing_token_invalid",
-    "I couldn't use that pairing token.",
-    400,
-)
-PAIRING_TOKEN_UNAVAILABLE = Reason(
-    "pairing_token_unavailable",
-    "I couldn't use that pairing token because it expired or was already used.",
-    410,
-)
 
 # input validation
 INVALID_JSON_REQUEST = Reason(
@@ -68,6 +58,11 @@ INVALID_REQUEST_VALUE = Reason(
     "I couldn't use one of those values.",
     400,
 )
+INVALID_OPERATION_FOR_STATE = Reason(
+    "invalid_operation_for_state",
+    "I couldn't take that action in the current state.",
+    400,
+)
 INVALID_DAY = Reason("invalid_day", "I couldn't use that day.", 400)
 INVALID_MONTH = Reason("invalid_month", "I couldn't use that month.", 400)
 TIMELINE_MONTH_NOT_FOUND = Reason(
@@ -83,6 +78,11 @@ INVALID_SEGMENT_OR_STREAM = Reason(
 # file/journal
 FILE_NOT_FOUND = Reason("file_not_found", "I couldn't find that file.", 404)
 FILE_READ_FAILED = Reason("file_read_failed", "I couldn't read that file.", 500)
+RAW_MEDIA_NOT_AVAILABLE = Reason(
+    "raw_media_not_available",
+    "I couldn't run analysis because the raw media is no longer available.",
+    400,
+)
 OPERATION_NO_LONGER_AVAILABLE = Reason(
     "operation_no_longer_available",
     "I couldn't finish because that action is no longer available.",

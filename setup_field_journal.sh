@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# Populate this fork's journal/chronicle/ with media from a local clone of
-# github.com/solpbc/field_journal. Fork-only tooling — not for upstream.
+# Populate journal/chronicle/ with media from a local clone of
+# github.com/solpbc/field_journal — a public-domain corpus for dev/test runs.
+#
+# Opt-in dev primitive. Not part of the canonical install/setup paths; run only
+# when you want a contributor/integration-test journal seeded from public media
+# rather than personal capture data. Full guide: docs/FIELD_JOURNAL.md.
 #
 # Usage:
 #   ./setup_field_journal.sh [--source PATH] [--force]
@@ -14,6 +18,8 @@
 # <source>/journal/ into ./journal/chronicle/. Copying is intentional: solstone
 # writes derived artifacts (audio.jsonl, audio.npz, descriptions, etc.) as
 # siblings of source media, so symlinking would dirty the field_journal clone.
+#
+# Run `sol setup` afterward to bring the journal to a ready-to-process state.
 
 set -euo pipefail
 

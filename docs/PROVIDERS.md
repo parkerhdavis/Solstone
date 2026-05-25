@@ -122,7 +122,7 @@ async def run_cogitate(
 - `user_instruction`: Agent-specific prompt as second user message
 - `tools`: Optional list of allowed tool names
 - `use_id`, `name`: Identity for logging and tool calls
-- `session_id`: CLI session ID for conversation continuation
+- `session_id`: solstone-owned session ID for conversation continuation; Google cogitate history is stored under `journal/.cache/cogitate-history/`
 - `chat_id`: Chat ID for reverse lookup from agent to chat
 
 **Event emission:**
@@ -177,16 +177,10 @@ honor `config["tools"]` allowlists when present.
 
 **Conversation continuation:**
 
-When `session_id` is provided, use the provider CLI's native resume mechanism:
-```python
-session_id = config.get("session_id")
-if session_id:
-    cmd.extend(["--resume", session_id])
-```
-
-Each CLI tool manages its own session state internally. The `session_id` is
-returned from the CLI's init/finish event on the first interaction and reused
-for all subsequent continuations within the same chat.
+When `session_id` is provided, use the provider's native continuation mechanism
+or a solstone-owned history file where the provider has no durable session
+handle. The `session_id` is reused for all subsequent continuations within the
+same chat.
 
 ## Token Logging
 
@@ -315,33 +309,54 @@ client = OpenAI(
 
 This allows reusing much of the OpenAI provider's patterns for request/response handling.
 
-The Ollama provider (`solstone/think/providers/ollama.py`) takes a different approach —
-it uses Ollama's native ``/api/chat`` endpoint directly via ``httpx`` for
-reliable thinking control. See the Ollama section below.
+The bundled local provider (`solstone/think/providers/local.py`) is OpenAI-
+compatible over a loopback llama-server runtime, while still requiring no API
+key.
 
-## Ollama (Local) Provider
+## Local (On-device) Provider
 
-The ``ollama`` provider connects to a local Ollama instance via the native
-``/api/chat`` endpoint (not the OpenAI-compatible endpoint, which silently
-ignores the ``think`` parameter on models like Qwen3.5). Key differences
-from cloud providers:
+The ``local`` provider installs pinned llama.cpp ``llama-server`` and GGUF
+artifacts on demand, then serves requests on ``127.0.0.1`` through the
+OpenAI-compatible ``/v1`` surface. Key differences from cloud providers:
 
-- **No API key required.** ``validate_key()`` checks Ollama reachability
-  instead of key validity.
-- **Model prefix convention:** Models use the ``ollama-local/`` prefix
-  (e.g., ``ollama-local/qwen3.5:9b``). The prefix is stripped before
-  sending requests to the Ollama API.
-- **Thinking support:** Controlled via Ollama's ``think`` parameter,
-  mapped from ``thinking_budget``. Budget > 0 enables thinking;
-  None or 0 disables it.
-- **Cogitate via OpenCode CLI.** ``run_cogitate()`` uses the OpenCode CLI
-  (``opencode run --format json``) as a subprocess, following the same
-  CLIRunner pattern as the other providers. Requires OpenCode CLI installed
-  and configured with a user-level ``.opencode/opencode.json`` that registers
-  the local Ollama instance as a provider. Do not place this config in the
-  project root — it belongs in the user's config directory.
-- **Base URL:** Reads ``OLLAMA_BASE_URL`` env var, defaults to
-  ``http://localhost:11434``.
+- **No API key required.** ``validate_key()`` performs a loopback health check
+  through a tiny local generation request.
+- **Bundled runtime.** Settings installs the pinned llama-server binary plus the
+  selected GGUF model under the journal cache. v1 ships macOS arm64 Metal and
+  Linux x86_64 CPU slices; Linux CUDA is deferred until an upstream Linux CUDA
+  tarball is pinned.
+- **Model prefix convention:** Models use the ``local/`` prefix
+  (for example, ``local/qwen2.5-coder-7b``).
+- **Cogitate through OpenHands.** Cogitate uses the OpenHands + LiteLLM facade
+  with ``base_url=http://127.0.0.1:<port>/v1`` and ``api_key=EMPTY``. Generate
+  uses the provider's direct loopback client.
+- **No cloud fallback.** If the local runtime, model files, RAM gate, or
+  loopback server are not ready, the local provider surfaces that recovery
+  reason instead of silently falling back to a cloud provider.
+
+## MLX (Local, Apple Silicon) Provider
+
+The ``mlx`` provider (`solstone/think/providers/mlx.py`) runs vision/generate
+on-device on Apple Silicon via the MLX framework — used for the screen-analysis
+path with nothing sent to a cloud provider. It surfaces in Settings → Providers
+as **"MLX (Local, Apple Silicon)"**.
+
+- **Generate-only, no cogitate.** ``run_generate()`` / ``run_agenerate()`` are
+  implemented; ``run_cogitate()`` raises — MLX is vision/generate-only in v1.
+  Configure a cloud provider for cogitate (tool-using) agents.
+- **No API key.** ``env_key`` is empty and ``validate_key()`` always returns
+  ``{"valid": True}`` — availability is gated on platform + RAM, not a secret.
+- **Availability gating.** ``is_mlx_available()`` requires Apple Silicon plus the
+  ``mlx``/``mlx-vlm`` packages; ``is_mlx_available_for_model(spec)`` additionally
+  enforces each model's ``min_ram_bytes`` floor.
+- **Model registry (`_MLX_MODEL_REGISTRY`).** Pinned by repo + revision:
+  ``qwen3.5:9b`` (`mlx-community/Qwen3.5-9B-MLX-8bit`, ≥16 GB) and
+  ``gemma-4-26b-a4b-it-mlx-4bit`` (`mlx-community/gemma-4-26b-a4b-it-4bit`, ≥24 GB,
+  with a ``post_load`` hook that constrains the Gemma 4 vision tower to the
+  screenshot-faithful patch budget).
+- **On-demand snapshot.** The pinned snapshot downloads in the background on first
+  enable; a missing snapshot raises ``ModelSnapshotMissingError`` rather than
+  silently degrading. Loaded models are cached at module level.
 
 ### Benchmark Surface (speed heuristic)
 

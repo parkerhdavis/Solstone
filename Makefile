@@ -14,7 +14,7 @@ export TMPDIR := /var/tmp
 PYTEST_BASETEMP_INIT := BASETEMP=$$(mktemp -d /var/tmp/solstone-pytest-XXXXXX); trap 'rm -rf "$$BASETEMP"' EXIT INT TERM;
 PYTEST_BASETEMP_FLAG := --basetemp "$$BASETEMP"
 
-.PHONY: install uninstall test test-cov test-apps test-app test-only test-integration test-integration-only test-all format format-check install-checks ci clean clean-install coverage watch versions update update-prices pre-commit skills dev all sandbox sandbox-stop install-pinchtab install-models parakeet-helper parakeet-helper-clean wheel-macos wheel-macos-clean verify-browser update-browser-baselines review verify verify-api update-api-baselines service-logs check-layer-hygiene release release-test FORCE
+.PHONY: install uninstall test test-cov test-apps test-app test-only test-integration test-integration-only test-all format format-check install-checks ci clean clean-install coverage watch versions update update-prices pre-commit skills dev all sandbox sandbox-stop install-pinchtab install-models parakeet-helper parakeet-helper-clean wheel-macos wheel-macos-clean verify-browser update-browser-baselines review verify verify-api update-api-baselines service-logs check-layer-hygiene smoke-cogitate release release-test FORCE
 
 # Default target - install package in editable mode
 all: install
@@ -54,6 +54,8 @@ USER_BIN := $(HOME)/.local/bin
 .installed: pyproject.toml uv.lock .python-version-hash
 	@echo "Installing package with uv..."
 	$(UV) sync --group dev $(EXTRAS_ARGS)
+	@echo "Installing Playwright Chromium browser..."
+	$(VENV_BIN)/python -m playwright install chromium
 	@# Python 3.14+ needs onnxruntime from nightly (not yet on PyPI)
 	@OS_NAME=$$(uname -s); \
 	PY_MINOR=$$($(PYTHON) -c "import sys; print(sys.version_info.minor)"); \
@@ -365,6 +367,7 @@ test: .installed format-check
 test-cov: .installed format-check
 	@echo "Running core tests with coverage..."
 	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) tests/ -q --cov=. --ignore=tests/integration $(NOT_INTEGRATION) -n auto --dist loadgroup
+	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) solstone/apps/link/tests/test_workspace_qr_size.py -q --cov=. --cov-append
 
 # Run app tests
 test-apps: .installed
@@ -536,6 +539,42 @@ pre-commit: .installed
 # Low-bar layer-hygiene check (see docs/coding-standards.md § Layer Hygiene)
 check-layer-hygiene: .installed
 	$(VENV_BIN)/python scripts/check_layer_hygiene.py
+
+# Re-run the live four-backend integrated-façade cogitate smoke. Spawns the
+# archived runner (extro `vpe/workspace/archived/`) against this venv so the
+# real openhands-sdk Agent path is exercised end-to-end. Requires real API
+# keys in env (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`) and
+# `llama-server` on PATH for the `local` backend. Catches v1.23-style Agent
+# schema regressions that the openhands-fake unit tests cannot — see
+# `tests/integration/test_cogitate_facade_agent_construction.py` for the
+# pytest variant that runs without keys.
+COGITATE_SMOKE_RUNNER ?= /home/jer/projects/extro/vpe/workspace/archived/cogitate-integrated-facade-smoke-260523.py
+
+smoke-cogitate: .installed
+	@test -f "$(COGITATE_SMOKE_RUNNER)" || { echo "cogitate smoke runner not found: $(COGITATE_SMOKE_RUNNER)" >&2; echo "set COGITATE_SMOKE_RUNNER=/path/to/script to override" >&2; exit 1; }
+	$(VENV_PY) "$(COGITATE_SMOKE_RUNNER)"
+
+# Operator-opt-in install-state smoke: drives the real install primitives
+# (real uv Popen for bundled providers, real httpx for local llama-server +
+# GGUF download, real huggingface_hub for MLX snapshot) against a tmp
+# journal_config and asserts canonical phase transitions, byte-count
+# surfacing, and post-restart state persistence. Hits the same code paths
+# the dashboard hits, end-to-end. Heavier than `make test` because it does
+# real network fetches; lighter than `make smoke-cogitate` because it does
+# not require API keys or a running supervisor.
+smoke-install-providers: .installed
+	@echo "Running install-state integration smoke..."
+	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) \
+	  solstone/apps/settings/tests/test_providers_payload_extended.py \
+	  -v --tb=short --timeout=120
+	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) \
+	  tests/integration/test_bundled_install_real_uv.py \
+	  tests/integration/test_bundled_provider_migration.py \
+	  tests/integration/test_local_install_canonical.py \
+	  -m integration -v --tb=short --timeout=120
+	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) \
+	  solstone/apps/settings/tests/test_providers_panel_visual.py \
+	  -m integration -v --tb=short --timeout=120
 
 release: ## Publish solstone to PyPI (production)
 	@bash scripts/release.sh

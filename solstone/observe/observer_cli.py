@@ -25,11 +25,14 @@ import secrets
 import sys
 
 from solstone.apps.observer.utils import (
+    _find_observer,
     find_observer_by_name,
     get_hist_dir,
-    get_observers_dir,
     list_observers,
     load_history,
+    observer_filename_prefix,
+    observer_mode,
+    revoke_observer_record,
     save_observer,
 )
 from solstone.apps.utils import log_app_action
@@ -54,26 +57,6 @@ CONNECTED_THRESHOLD_MS = 2 * 60 * 1000
 def _generate_key() -> str:
     """Generate a URL-safe key for observer authentication."""
     return base64.urlsafe_b64encode(secrets.token_bytes(KEY_BYTES)).decode().rstrip("=")
-
-
-def _find_observer(identifier: str) -> dict | None:
-    """Find an observer by name or key prefix."""
-    # Try name first
-    observer = find_observer_by_name(identifier)
-    if observer:
-        return observer
-
-    # Try key prefix (file is named <prefix>.json)
-    observers_dir = get_observers_dir()
-    observer_path = observers_dir / f"{identifier}.json"
-    if observer_path.exists():
-        try:
-            with open(observer_path) as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    return None
 
 
 def _status_label(observer: dict) -> str:
@@ -150,32 +133,6 @@ def create_observer_record(
     return observer_data, key, False
 
 
-def revoke_observer_record(identifier: str) -> dict:
-    """Revoke an observer registration and return the mutated record."""
-    observer = _find_observer(identifier)
-    if not observer:
-        raise ValueError(f"observer not found: {identifier}")
-
-    if observer.get("revoked", False):
-        raise ValueError(f"observer already revoked: {observer.get('name')}")
-
-    name = observer.get("name", "")
-    key_prefix = observer.get("key", "")[:8]
-    observer["revoked"] = True
-    observer["revoked_at"] = now_ms()
-
-    if not save_observer(observer):
-        raise RuntimeError("failed to save observer")
-
-    log_app_action(
-        app="observer",
-        facet=None,
-        action="observer_revoke",
-        params={"name": name, "key_prefix": key_prefix},
-    )
-    return observer
-
-
 # === Subcommands ===
 
 
@@ -230,7 +187,8 @@ def cmd_list(args: argparse.Namespace) -> int:
             result.append(
                 {
                     "name": r.get("name", ""),
-                    "prefix": r.get("key", "")[:8],
+                    "mode": observer_mode(r),
+                    "prefix": observer_filename_prefix(r),
                     "status": _status_label(r),
                     "last_seen": r.get("last_seen"),
                     "segments": stats.get("segments_received", 0),
@@ -245,21 +203,22 @@ def cmd_list(args: argparse.Namespace) -> int:
         return 0
 
     print(
-        f"{'Name':<20} {'Prefix':<10} {'Status':<14} "
+        f"{'Name':<20} {'Mode':<5} {'Prefix':<18} {'Status':<14} "
         f"{'Last Seen':<18} {'Segments':>10} {'Bytes':>12}"
     )
-    print("-" * 86)
+    print("-" * 100)
 
     for r in observers:
         name = r.get("name", "")
-        prefix = r.get("key", "")[:8]
+        mode = observer_mode(r)
+        prefix = observer_filename_prefix(r)
         status = _status_label(r)
         last_seen = _fmt_time(r.get("last_seen"))
         stats = r.get("stats", {})
         segments = stats.get("segments_received", 0)
         bytes_recv = _fmt_bytes(stats.get("bytes_received", 0))
         print(
-            f"{name:<20} {prefix:<10} {status:<14} "
+            f"{name:<20} {mode:<5} {prefix:<18} {status:<14} "
             f"{last_seen:<18} {segments:>10} {bytes_recv:>12}"
         )
 
@@ -285,7 +244,7 @@ def cmd_revoke(args: argparse.Namespace) -> int:
         return 1
 
     name = observer.get("name", "")
-    key_prefix = observer.get("key", "")[:8]
+    key_prefix = observer_filename_prefix(observer)
 
     if args.json_output:
         print(json.dumps({"name": name, "prefix": key_prefix, "revoked": True}))
@@ -323,7 +282,7 @@ def cmd_rename(args: argparse.Namespace) -> int:
         print(f"Observer is already named '{new_name}'.", file=sys.stderr)
         return 1
 
-    key_prefix = observer.get("key", "")[:8]
+    key_prefix = observer_filename_prefix(observer)
     observer["name"] = new_name
 
     if not save_observer(observer):
@@ -366,7 +325,8 @@ def _status_single(identifier: str, json_output: bool = False) -> int:
         return 1
 
     name = observer.get("name", "")
-    key_prefix = observer.get("key", "")[:8]
+    mode = observer_mode(observer)
+    key_prefix = observer_filename_prefix(observer)
     stats = observer.get("stats", {})
 
     if json_output:
@@ -374,6 +334,7 @@ def _status_single(identifier: str, json_output: bool = False) -> int:
             json.dumps(
                 {
                     "name": name,
+                    "mode": mode,
                     "prefix": key_prefix,
                     "status": _status_label(observer),
                     "created_at": observer.get("created_at"),
@@ -387,6 +348,7 @@ def _status_single(identifier: str, json_output: bool = False) -> int:
         return 0
 
     print(f"Observer: {name}")
+    print(f"  Mode:       {mode}")
     print(f"  Prefix:     {key_prefix}")
     print(f"  Status:     {_status_label(observer)}")
     print(f"  Created:    {_fmt_time(observer.get('created_at'))}")
@@ -485,6 +447,8 @@ def _status_all(json_output: bool = False) -> int:
                     "observers": [
                         {
                             "name": r.get("name", ""),
+                            "mode": observer_mode(r),
+                            "prefix": observer_filename_prefix(r),
                             "status": _status_label(r),
                             "last_seen": r.get("last_seen"),
                         }
@@ -502,13 +466,15 @@ def _status_all(json_output: bool = False) -> int:
     print(f"  Total segments: {total_segments}")
     print(f"  Total bytes:    {_fmt_bytes(total_bytes)}")
 
-    print(f"\n{'Name':<20} {'Status':<14} {'Last Seen':<18}")
-    print("-" * 54)
+    print(f"\n{'Name':<20} {'Mode':<5} {'Prefix':<18} {'Status':<14} {'Last Seen':<18}")
+    print("-" * 80)
     for r in observers:
         name = r.get("name", "")
+        mode = observer_mode(r)
+        prefix = observer_filename_prefix(r)
         status = _status_label(r)
         last_seen = _fmt_time(r.get("last_seen"))
-        print(f"{name:<20} {status:<14} {last_seen:<18}")
+        print(f"{name:<20} {mode:<5} {prefix:<18} {status:<14} {last_seen:<18}")
 
     return 0
 
@@ -582,6 +548,16 @@ def main() -> None:
     )
     p_install.add_argument(
         "--force", action="store_true", help="Recreate registration and rerun install"
+    )
+    p_install.add_argument(
+        "--observer-version",
+        default=None,
+        dest="observer_version",
+        metavar="VERSION",
+        help=(
+            "Override the pinned observer package version "
+            "(developer use; bypasses the version pinned by sol)."
+        ),
     )
 
     args = setup_cli(parser)

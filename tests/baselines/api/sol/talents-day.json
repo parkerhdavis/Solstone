@@ -294,7 +294,7 @@
     "morning_briefing": {
       "app": null,
       "color": "#1565c0",
-      "description": "Synthesizes all daily agent outputs into a structured five-section morning briefing with entity intelligence",
+      "description": "Synthesizes all daily agent outputs into a structured five-section morning briefing",
       "multi_facet": false,
       "output_format": "md",
       "schedule": "daily",
@@ -433,6 +433,17 @@
       "source": "system",
       "title": "Speaker Attribution",
       "type": "generate"
+    },
+    "steward": {
+      "app": null,
+      "color": "#6c757d",
+      "description": "Synthesizes federated health signals into identity/health.md.",
+      "multi_facet": false,
+      "output_format": null,
+      "schedule": "daily",
+      "source": "system",
+      "title": "Steward",
+      "type": "cogitate"
     },
     "support:support": {
       "app": "support",

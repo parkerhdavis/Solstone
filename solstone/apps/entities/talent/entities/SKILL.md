@@ -3,9 +3,8 @@ name: entities
 description: >
   Tracked entities — people, companies, projects, tools — within facets.
   Detect, attach, move, merge, consolidate, update, alias, search.
-  Relationship strength and intelligence briefings. TRIGGER: entity, person,
-  company, relationship, who is, contact, intelligence briefing, sol call
-  entities detect/attach/merge/intelligence.
+  TRIGGER: entity, person, company, relationship, who is, contact, sol call
+  entities detect/attach/merge/search.
 ---
 
 # Entities CLI Skill
@@ -235,61 +234,26 @@ Example:
 sol call entities observe "Alicia Chen" "Prefers design docs before implementation" -f work --source-day 20260115
 ```
 
-## strength
-
-```bash
-sol call entities strength [FACET] [-n LIMIT]
-```
-
-Rank entities by relationship strength score within a facet.
-
-- `FACET`: facet name (default: `SOL_FACET` env).
-- `-n, --limit`: max results (default `10`).
-
-Use this to find the most significant relationships in a facet.
-
-Example:
-
-```bash
-sol call entities strength work -n 20
-```
-
 ## search
 
 ```bash
-sol call entities search [QUERY] [--type TYPE] [--facet FACET] [--active-days N]
+sol call entities search [--query QUERY] [--type TYPE] [--facet FACET] [--since YYYYMMDD] [--limit N]
 ```
 
-Search entities by text, type, facet, or recent activity.
+Search entities by text, type, facet, or detected activity since a day.
 
-- `QUERY`: optional text query.
+- `--query`: optional text query.
 - `--type`: filter by entity type (e.g., `Person`, `Company`).
 - `--facet`: filter by facet.
-- `--active-days`: filter to entities active within N days.
+- `--since`: filter to entities detected on or after `YYYYMMDD`.
+- `--limit`: maximum results.
 
 Examples:
 
 ```bash
-sol call entities search "Chen"
+sol call entities search --query "Chen"
 sol call entities search --type Person --facet work
-sol call entities search --active-days 7
-```
-
-## intelligence
-
-```bash
-sol call entities intelligence ENTITY [-f FACET]
-```
-
-Get a full intelligence briefing for an entity — relationship history, observations, activity timeline, and cross-facet presence.
-
-- `ENTITY`: entity id, name, or alias.
-- `-f, --facet`: facet name (default: `SOL_FACET` env).
-
-Example:
-
-```bash
-sol call entities intelligence "Alicia Chen" -f work
+sol call entities search --since 20260115
 ```
 
 ## consolidate
@@ -346,4 +310,4 @@ sol call entities merge jeremy-miller jeremie-miller --commit
 - **`merge` previews by default.** Default is `--no-commit`: it emits a JSON plan without mutating anything. Pass `--commit` when you actually want the merge to happen.
 - **`consolidate` auto-merges at 85%.** Fuzzy-name matching runs unattended; review the output whenever it reports new entities to catch unexpected consolidations.
 - **`detect` requires TYPE ≥ 3 chars.** Shorter types are silently rejected.
-- **`observe` is for durable traits, `detect` is for day-scoped sightings.** Mixing them skews relationship-strength scoring.
+- **`observe` is for durable traits, `detect` is for day-scoped sightings.** Mixing them skews future entity context.

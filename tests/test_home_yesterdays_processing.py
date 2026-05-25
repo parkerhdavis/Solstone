@@ -23,14 +23,12 @@ from solstone.apps.home.routes import (
     _collect_anticipated_activities,
     _format_activity_label,
     _format_duration,
-    _format_entity_summary,
     _format_gap_links,
     _format_heatmap_summary,
     _knowledge_graph_freshness,
     _newsletter_attempts_from_think_logs,
     _summarize_yesterday_processing,
 )
-from solstone.think.indexer.journal import get_journal_index
 
 FIXTURES = Path(__file__).parent / "fixtures" / "journal"
 
@@ -141,70 +139,6 @@ def _write_briefing(
     )
 
 
-def _seed_entities(journal: Path, day: str = "20260415") -> None:
-    conn, _ = get_journal_index(str(journal))
-    try:
-        conn.execute("DELETE FROM entity_signals")
-        conn.execute("DELETE FROM entities")
-        conn.executemany(
-            """
-            INSERT INTO entities(entity_id, source, path, name, type)
-            VALUES (?, 'identity', ?, ?, ?)
-            """,
-            [
-                ("jane_doe", "entities/jane_doe/entity.json", "Jane Doe", "person"),
-                (
-                    "alice_johnson",
-                    "entities/alice_johnson/entity.json",
-                    "Alice Johnson",
-                    "person",
-                ),
-                (
-                    "product_roadmap",
-                    "entities/product_roadmap/entity.json",
-                    "Product Roadmap",
-                    "topic",
-                ),
-                (
-                    "launch_decision",
-                    "entities/launch_decision/entity.json",
-                    "Launch decision",
-                    "decision",
-                ),
-            ],
-        )
-        conn.executemany(
-            """
-            INSERT INTO entity_signals(
-                signal_type, entity_name, entity_type, target_name,
-                relationship_type, day, facet, event_title, event_type, path
-            )
-            VALUES (?, ?, NULL, NULL, NULL, ?, ?, NULL, NULL, ?)
-            """,
-            [
-                ("mention", "jane_doe", day, "work", f"{day}/talents/flow.md"),
-                ("mention", "alice_johnson", day, "work", f"{day}/talents/flow.md"),
-                (
-                    "mention",
-                    "product_roadmap",
-                    day,
-                    "work",
-                    f"{day}/talents/knowledge_graph.md",
-                ),
-                (
-                    "mention",
-                    "launch_decision",
-                    day,
-                    "work",
-                    f"{day}/talents/knowledge_graph.md",
-                ),
-            ],
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
 def _append_think_log(
     journal: Path,
     day: str,
@@ -225,6 +159,59 @@ def _append_think_log(
         if facet is not None:
             record["facet"] = facet
         handle.write(json.dumps(record) + "\n")
+
+
+def _patch_minimal_pulse_context(monkeypatch, pipeline_status):
+    monkeypatch.setattr(
+        "solstone.apps.home.routes.get_capture_health",
+        lambda: {"status": "active", "observers": []},
+    )
+    monkeypatch.setattr("solstone.apps.home.routes.get_cached_state", lambda: {})
+    monkeypatch.setattr("solstone.apps.home.routes.get_current", lambda: None)
+    monkeypatch.setattr(
+        "solstone.apps.home.routes._resolve_attention", lambda awareness: None
+    )
+    monkeypatch.setattr("solstone.apps.home.routes._today", lambda: "20260416")
+    monkeypatch.setattr("solstone.apps.home.routes._yesterday", lambda: "20260415")
+    monkeypatch.setattr(
+        "solstone.apps.home.routes._count_journal_age_days", lambda today: 8
+    )
+    monkeypatch.setattr("solstone.apps.home.routes._load_stats", lambda today: {})
+    monkeypatch.setattr(
+        "solstone.apps.home.routes._load_flow_md", lambda today: (None, None)
+    )
+    monkeypatch.setattr(
+        "solstone.apps.home.routes._load_pulse_md", lambda: (None, None, [])
+    )
+    monkeypatch.setattr(
+        "solstone.apps.home.routes._load_briefing_md", lambda today: ({}, None, [])
+    )
+    monkeypatch.setattr(
+        "solstone.apps.home.routes._collect_anticipated_activities", lambda today: []
+    )
+    monkeypatch.setattr(
+        "solstone.apps.home.routes._collect_activities", lambda today: []
+    )
+    monkeypatch.setattr("solstone.apps.home.routes._collect_todos", lambda today: [])
+    monkeypatch.setattr("solstone.apps.home.routes._collect_routines", lambda: [])
+    monkeypatch.setattr("solstone.apps.home.routes._collect_skills", lambda: [])
+    monkeypatch.setattr(
+        "solstone.apps.home.routes.read_steward_health",
+        lambda: pipeline_status,
+    )
+    monkeypatch.setattr(
+        "solstone.apps.home.routes._summarize_yesterday_processing",
+        lambda yesterday, journal_age_days: {
+            "title": "Yesterday's processing",
+            "mode": "healthy",
+            "default_collapsed": True,
+            "summary_line": "I wrote 2 newsletters.",
+            "details": [],
+            "sparse_lines": None,
+            "first_week_framing": None,
+            "status_reasons": [],
+        },
+    )
 
 
 def _set_mtime(path: Path, dt: datetime) -> None:
@@ -350,7 +337,6 @@ def test_yesterdays_card_sparse_mode_copy(tmp_path, monkeypatch):
 def test_yesterdays_card_healthy_collapsed_on_day_8_plus(tmp_path, monkeypatch):
     journal = _seed_journal(tmp_path, monkeypatch)
     _write_briefing(journal, "2026-04-16T06:45:00")
-    _seed_entities(journal)
 
     monkeypatch.setattr("solstone.apps.home.routes._today", lambda: "20260416")
 
@@ -371,7 +357,6 @@ def test_yesterdays_card_healthy_expanded_with_framing_on_days_1_to_7(
 ):
     journal = _seed_journal(tmp_path, monkeypatch)
     _write_briefing(journal, "2026-04-16T06:45:00")
-    _seed_entities(journal)
 
     monkeypatch.setattr("solstone.apps.home.routes._today", lambda: "20260416")
 
@@ -383,7 +368,6 @@ def test_yesterdays_card_healthy_expanded_with_framing_on_days_1_to_7(
         summary["first_week_framing"]
         == "Most of what I learn becomes useful in the third or fourth week, when I've seen enough patterns to surface them. For now, here's what's already happening:"
     )
-    assert "I recognized 2 people, 1 decision, and 1 topic." in summary["details"]
 
 
 def test_yesterdays_card_degraded_shows_warning_and_partial_count(
@@ -391,7 +375,6 @@ def test_yesterdays_card_degraded_shows_warning_and_partial_count(
 ):
     journal = _seed_journal(tmp_path, monkeypatch)
     _write_briefing(journal, "2026-04-16T06:45:00")
-    _seed_entities(journal)
     _append_think_log(journal, "20260415", "facet_newsletter", facet="personal")
 
     monkeypatch.setattr("solstone.apps.home.routes._today", lambda: "20260416")
@@ -415,7 +398,6 @@ def test_yesterdays_card_degraded_zero_newsletters_keeps_failure_caveat(
     tmp_path, monkeypatch
 ):
     journal = _seed_journal(tmp_path, monkeypatch)
-    _seed_entities(journal)
     for path in journal.glob("facets/*/news/20260415.md"):
         path.unlink()
 
@@ -433,19 +415,6 @@ def test_yesterdays_card_degraded_zero_newsletters_keeps_failure_caveat(
 def test_format_duration_boundaries():
     assert _format_duration(59) == "59 min"
     assert _format_duration(60) == "1 hour"
-
-
-def test_entity_grouping_people_first_zero_dropped_plurals():
-    assert (
-        _format_entity_summary(
-            [
-                {"entity_type": "topic"},
-                {"entity_type": "person"},
-                {"entity_type": "person"},
-            ]
-        )
-        == "I recognized 2 people and 1 topic."
-    )
 
 
 def test_heatmap_peaks_top_3():
@@ -505,8 +474,7 @@ def test_knowledge_graph_refresh_detection_yesterday_and_overnight(
 
 
 def test_briefing_frontmatter_missing_counts_as_gap(tmp_path, monkeypatch):
-    journal = _seed_journal(tmp_path, monkeypatch)
-    _seed_entities(journal)
+    _seed_journal(tmp_path, monkeypatch)
 
     monkeypatch.setattr("solstone.apps.home.routes._today", lambda: "20260416")
 
@@ -694,19 +662,9 @@ def test_build_pulse_context_includes_yesterday_processing(monkeypatch):
         "solstone.apps.home.routes._collect_activities", lambda today: []
     )
     monkeypatch.setattr("solstone.apps.home.routes._collect_todos", lambda today: [])
-    monkeypatch.setattr(
-        "solstone.apps.home.routes._collect_entities_today", lambda today: []
-    )
     monkeypatch.setattr("solstone.apps.home.routes._collect_routines", lambda: [])
     monkeypatch.setattr("solstone.apps.home.routes._collect_skills", lambda: [])
-    monkeypatch.setattr(
-        "solstone.apps.home.routes.summarize_pipeline_day",
-        lambda day: {"status": "healthy", "anomalies": []},
-    )
-    monkeypatch.setattr(
-        "solstone.apps.home.routes.pipeline_status_message",
-        lambda summary: None,
-    )
+    monkeypatch.setattr("solstone.apps.home.routes.read_steward_health", lambda: None)
     monkeypatch.setattr(
         "solstone.apps.home.routes._summarize_yesterday_processing",
         lambda yesterday, journal_age_days: {
@@ -724,3 +682,20 @@ def test_build_pulse_context_includes_yesterday_processing(monkeypatch):
     ctx = _build_pulse_context()
 
     assert ctx["yesterday_processing"]["summary_line"] == "I wrote 2 newsletters."
+
+
+def test_build_pulse_context_pipeline_status_none_when_steward_healthy(monkeypatch):
+    _patch_minimal_pulse_context(monkeypatch, None)
+
+    ctx = _build_pulse_context()
+
+    assert ctx["pipeline_status"] is None
+
+
+def test_build_pulse_context_pipeline_status_surfaces_steward_warning(monkeypatch):
+    status = {"status": "warning", "message": "Foo bar"}
+    _patch_minimal_pulse_context(monkeypatch, status)
+
+    ctx = _build_pulse_context()
+
+    assert ctx["pipeline_status"] == status

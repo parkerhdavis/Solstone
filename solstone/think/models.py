@@ -3,14 +3,16 @@
 
 import fcntl
 import fnmatch
+import functools
 import inspect
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Union
 
 import frontmatter
 from jsonschema import Draft202012Validator
@@ -44,19 +46,97 @@ TIER_LITE = 3
 # E.g., "gpt-5.2-high" → reasoning_effort="high", "gpt-5.2" → omitted.
 OPENAI_EFFORT_SUFFIXES = ("-none", "-low", "-medium", "-high", "-xhigh")
 
-# Map model names that genai-prices doesn't recognize yet to a known equivalent.
-MODEL_PRICE_ALIASES: Dict[str, str] = {
-    "gpt-5.5": "gpt-5.2",
-    "gpt-5.4": "gpt-5.2",
-    "gpt-5.4-mini": "gpt-5-mini",
-    "gpt-5.4-nano": "gpt-5-nano",
-    "claude-sonnet-4-6": "claude-sonnet-4-5",
-    "claude-opus-4-7": "claude-opus-4-5",
+
+class _Family(NamedTuple):
+    key: tuple[str, str | None]
+    version: tuple[int, ...]
+
+
+def _parse_family_openai(model: str) -> _Family | None:
+    model = model.lower()
+    if model.startswith("ft:") or "-image" in model or not model.startswith("gpt-"):
+        return None
+    match = re.fullmatch(r"gpt-(\d+)(?:\.(\d+))?(?:-(mini|nano|pro))?", model)
+    if match is None:
+        return None
+    return _Family(
+        key=("openai", match.group(3)),
+        version=(int(match.group(1)), int(match.group(2) or 0)),
+    )
+
+
+def _parse_family_anthropic(model: str) -> _Family | None:
+    model = model.lower()
+    match = re.fullmatch(r"claude-(opus|sonnet|haiku)-(\d+)(?:-(\d+))?", model)
+    if match is None:
+        return None
+    return _Family(
+        key=("anthropic", match.group(1)),
+        version=(int(match.group(2)), int(match.group(3) or 0)),
+    )
+
+
+def _parse_family_gemini(model: str) -> _Family | None:
+    model = model.lower()
+    latest_aliases = {
+        "gemini-flash-latest": _Family(key=("gemini", "flash"), version=(0, 0)),
+        "gemini-pro-latest": _Family(key=("gemini", "pro"), version=(0, 0)),
+        "gemini-flash-lite-latest": _Family(
+            key=("gemini", "flash-lite"),
+            version=(0, 0),
+        ),
+    }
+    if model in latest_aliases:
+        return latest_aliases[model]
+    if "-image" in model:
+        return None
+    if model.endswith("-preview"):
+        model = model[: -len("-preview")]
+    match = re.fullmatch(r"gemini-(\d+)(?:\.(\d+))?-(pro|flash|flash-lite)", model)
+    if match is None:
+        return None
+    return _Family(
+        key=("gemini", match.group(3)),
+        version=(int(match.group(1)), int(match.group(2) or 0)),
+    )
+
+
+_FAMILY_PARSERS: dict[str, Callable[[str], _Family | None]] = {
+    "openai": _parse_family_openai,
+    "anthropic": _parse_family_anthropic,
+    "google": _parse_family_gemini,
 }
 
-GEMINI_PRO = "gemini-3.1-pro-preview"
-GEMINI_FLASH = "gemini-3-flash-preview"
-GEMINI_LITE = "gemini-2.5-flash-lite"
+_LOGGED_FALLBACKS: set[str] = set()
+
+
+@functools.lru_cache(maxsize=None)
+def _find_pricing_fallback(model: str, provider_id: str) -> str | None:
+    parser = _FAMILY_PARSERS.get(provider_id)
+    if parser is None:
+        return None
+    target = parser(model)
+    if target is None:
+        return None
+
+    from genai_prices.data import providers
+
+    best: tuple[tuple[int, ...], str] | None = None
+    for provider in providers:
+        if provider.id != provider_id:
+            continue
+        for snapshot_model in provider.models:
+            candidate = parser(snapshot_model.id)
+            if candidate is None or candidate.key != target.key:
+                continue
+            if best is None or candidate.version > best[0]:
+                best = (candidate.version, snapshot_model.id)
+    return best[1] if best else None
+
+
+GEMINI_PRO = "gemini-pro-latest"
+GEMINI_FLASH = "gemini-flash-latest"
+GEMINI_LITE = "gemini-flash-lite-latest"
 
 GPT_5 = "gpt-5.5"
 GPT_5_MINI = "gpt-5.4-mini"
@@ -66,9 +146,15 @@ CLAUDE_OPUS_4 = "claude-opus-4-7"
 CLAUDE_SONNET_4 = "claude-sonnet-4-6"
 CLAUDE_HAIKU_4 = "claude-haiku-4-5"
 
-OLLAMA_PRO = "ollama-local/qwen3.5:35b-a3b-bf16"
-OLLAMA_FLASH = "ollama-local/qwen3.5:9b"
-OLLAMA_LITE = "ollama-local/qwen3.5:2b"
+LOCAL_PRO = "local/qwen3-coder-30b-a3b-q4_k_m"
+LOCAL_FLASH = "local/qwen2.5-coder-7b"
+LOCAL_LITE = "local/qwen2.5-coder-7b"
+
+QWEN_35_9B = "qwen3.5:9b"
+GEMMA4_26B_A4B_4BIT = "gemma-4-26b-a4b-it-mlx-4bit"
+MLX_PRO = QWEN_35_9B
+MLX_FLASH = QWEN_35_9B
+MLX_LITE = QWEN_35_9B
 
 # vLLM tier defaults — same Qwen 3.5 family as Ollama, picked for apples-to-apples
 # quant parity (bf16 for the MoE, AWQ-Int4 from cyankiwi for the dense models).
@@ -100,10 +186,15 @@ PROVIDER_DEFAULTS: Dict[str, Dict[int, str]] = {
         TIER_FLASH: CLAUDE_SONNET_4,
         TIER_LITE: CLAUDE_HAIKU_4,
     },
-    "ollama": {
-        TIER_PRO: OLLAMA_PRO,
-        TIER_FLASH: OLLAMA_FLASH,
-        TIER_LITE: OLLAMA_LITE,
+    "local": {
+        TIER_PRO: LOCAL_PRO,
+        TIER_FLASH: LOCAL_FLASH,
+        TIER_LITE: LOCAL_LITE,
+    },
+    "mlx": {
+        TIER_PRO: MLX_PRO,
+        TIER_FLASH: MLX_FLASH,
+        TIER_LITE: MLX_LITE,
     },
     "vllm": {
         TIER_PRO: VLLM_PRO,
@@ -445,7 +536,7 @@ def resolve_provider(context: str, agent_type: str) -> tuple[str, str]:
     then glob patterns (via fnmatch), falling back to type-specific defaults.
 
     Supports both explicit model strings and tier-based routing:
-    - {"provider": "google", "model": "gemini-3-flash-preview"} - explicit model
+    - {"provider": "google", "model": "gemini-flash-latest"} - explicit model
     - {"provider": "google", "tier": 2} - tier-based (2=flash)
     - {"tier": 1} - tier only, inherits provider from type default
 
@@ -568,7 +659,7 @@ def log_token_usage(
     Parameters
     ----------
     model : str
-        Model name (e.g., "gpt-5", "gemini-2.5-flash")
+        Model name (e.g., "gpt-5", "gemini-flash-latest")
     usage : dict
         Normalized usage dict with keys from USAGE_KEYS.
     context : str, optional
@@ -620,7 +711,7 @@ def log_token_usage(
         ):
             normalized_usage["cached_tokens"] = usage["cached_input_tokens"]
 
-        # Compute total_tokens from parts when missing (e.g. Codex CLI omits it)
+        # Compute total_tokens from parts when missing.
         if not normalized_usage.get("total_tokens"):
             inp = normalized_usage.get("input_tokens", 0)
             out = normalized_usage.get("output_tokens", 0)
@@ -664,17 +755,21 @@ def get_model_provider(model: str) -> str:
     Parameters
     ----------
     model : str
-        Model name (e.g., "gpt-5", "gemini-2.5-flash", "claude-sonnet-4-5")
+        Model name (e.g., "gpt-5", "gemini-flash-latest", "claude-sonnet-4-5")
 
     Returns
     -------
     str
-        Provider name: "openai", "google", "anthropic", "ollama", or "unknown"
+        Provider name: "openai", "google", "anthropic", "local", or "unknown"
     """
     model_lower = model.lower()
 
-    if model_lower.startswith("ollama-local/"):
-        return "ollama"
+    if model_lower == GEMMA4_26B_A4B_4BIT.lower():
+        return "mlx"
+    elif model_lower == QWEN_35_9B.lower():
+        return "mlx"
+    elif model_lower.startswith("local/"):
+        return "local"
     elif model_lower.startswith("gpt"):
         return "openai"
     elif model_lower.startswith("gemini"):
@@ -693,7 +788,7 @@ def calc_token_cost(token_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     token_data : dict
         Token usage record from journal logs with structure:
         {
-            "model": "gemini-2.5-flash",
+            "model": "gemini-flash-latest",
             "usage": {
                 "input_tokens": 1500,
                 "output_tokens": 500,
@@ -735,8 +830,7 @@ def calc_token_cost(token_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if provider_id == "unknown":
             return None
 
-        # Ollama models are local — no cost
-        if provider_id == "ollama":
+        if provider_id in {"local", "mlx"}:
             return {
                 "total_cost": 0.0,
                 "input_cost": 0.0,
@@ -744,8 +838,7 @@ def calc_token_cost(token_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 "currency": "USD",
             }
 
-        # Apply price aliases for models genai-prices doesn't recognize yet
-        model = MODEL_PRICE_ALIASES.get(model, model)
+        # Family-fallback below handles unpriced inputs.
 
         # Map our token fields to genai_prices Usage format
         # Note: Gemini reports reasoning_tokens separately, but they're billed at
@@ -767,11 +860,24 @@ def calc_token_cost(token_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         )
 
         # Calculate price
-        result = calc_price(
-            usage=usage,
-            model_ref=model,
-            provider_id=provider_id,
-        )
+        try:
+            result = calc_price(
+                usage=usage,
+                model_ref=model,
+                provider_id=provider_id,
+            )
+        except LookupError:
+            resolved = _find_pricing_fallback(model, provider_id)
+            if resolved is None:
+                raise
+            result = calc_price(
+                usage=usage,
+                model_ref=resolved,
+                provider_id=provider_id,
+            )
+            if model not in _LOGGED_FALLBACKS:
+                _LOGGED_FALLBACKS.add(model)
+                logger.info("pricing: family-fallback %s -> %s", model, resolved)
 
         # Return simplified cost breakdown
         return {
@@ -797,6 +903,10 @@ def calc_agent_cost(
     """
     if not model or not usage:
         return None
+    # Token logs store resolved models; this boundary covers cortex start-event aliases.
+    resolved_model = usage.get("model_version")
+    if resolved_model:
+        model = resolved_model
     try:
         cost_data = calc_token_cost({"model": model, "usage": usage})
         if cost_data:
@@ -1083,6 +1193,7 @@ def generate(
     result = provider_mod.run_generate(
         contents=contents,
         model=model,
+        provider=provider,
         temperature=temperature,
         max_output_tokens=max_output_tokens,
         system_instruction=system_instruction,
@@ -1097,7 +1208,7 @@ def generate(
     # still get their usage recorded)
     if result.get("usage"):
         log_token_usage(
-            model=model,
+            model=result.get("model") or model,
             usage=result["usage"],
             context=context,
             type="generate",
@@ -1131,6 +1242,10 @@ def get_backup_provider(agent_type: str) -> Optional[str]:
     type_config = providers_config.get(agent_type, {})
     primary_provider = type_config.get("provider", type_defaults["provider"])
     backup = type_config.get("backup", type_defaults["backup"])
+    if primary_provider == "local":
+        return None
+    if agent_type == "generate" and primary_provider == "mlx":
+        return None
     if backup == primary_provider:
         return None
     return backup
@@ -1381,6 +1496,7 @@ def generate_with_result(
     result = provider_mod.run_generate(
         contents=contents,
         model=model,
+        provider=provider,
         temperature=temperature,
         max_output_tokens=max_output_tokens,
         system_instruction=system_instruction,
@@ -1395,7 +1511,7 @@ def generate_with_result(
     # still get their usage recorded)
     if result.get("usage"):
         log_token_usage(
-            model=model,
+            model=result.get("model") or model,
             usage=result["usage"],
             context=context,
             type="generate",
@@ -1485,6 +1601,7 @@ async def agenerate(
     result = await provider_mod.run_agenerate(
         contents=contents,
         model=model,
+        provider=provider,
         temperature=temperature,
         max_output_tokens=max_output_tokens,
         system_instruction=system_instruction,
@@ -1499,7 +1616,7 @@ async def agenerate(
     # still get their usage recorded)
     if result.get("usage"):
         log_token_usage(
-            model=model,
+            model=result.get("model") or model,
             usage=result["usage"],
             context=context,
             type="generate",
@@ -1523,6 +1640,9 @@ __all__ = [
     "GEMINI_FLASH",
     "GPT_5",
     "CLAUDE_SONNET_4",
+    "QWEN_35_9B",
+    "GEMMA4_26B_A4B_4BIT",
+    "MLX_FLASH",
     # Unified API
     "generate",
     "generate_with_result",

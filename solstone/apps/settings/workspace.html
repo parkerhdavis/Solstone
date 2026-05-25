@@ -43,6 +43,7 @@
 }
 
 .settings-nav-item {
+  position: relative;
   display: block;
   width: 100%;
   padding: 0.375rem 1.25rem;
@@ -87,6 +88,22 @@
   color: white;
   font-weight: 600;
   box-shadow: inset 3px 0 0 0 rgba(255,255,255,0.5);
+}
+
+/* Reusable per-tab attention indicator. Any tab can opt in by setting
+   data-attention="true" on its <button class="settings-nav-item">. The
+   dot is positioned within the button so it follows the tab in both
+   desktop nav and the mobile select rendering of the same items. */
+.settings-nav-item[data-attention="true"]::after {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #d97706;
+  margin-left: 0.4em;
+  vertical-align: middle;
+  flex-shrink: 0;
 }
 
 /* Mobile nav dropdown */
@@ -919,6 +936,170 @@ input:checked + .slider:before {
 
 .provider-key-warning a:hover {
   text-decoration: underline;
+}
+
+#localCogitateStatus {
+  align-items: flex-start;
+}
+
+#localCogitateStatus-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4em;
+}
+
+.local-command-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4em;
+  align-items: center;
+}
+
+.local-command-row input {
+  min-width: min(100%, 22em);
+  flex: 1;
+  font-family: 'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', 'Consolas', monospace;
+  font-size: 0.95em;
+}
+
+#providersPanel {
+  display: grid;
+  gap: 0.75em;
+  margin: 1em 0 1.25em;
+}
+
+.provider-card {
+  border: 1px solid var(--facet-border, #e5e0db);
+  border-radius: 8px;
+  padding: 0.85em;
+  background: #fff;
+}
+
+.provider-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75em;
+  margin-bottom: 0.65em;
+}
+
+.provider-card__title {
+  font-weight: 600;
+  color: #333;
+}
+
+.provider-card__pills {
+  display: flex;
+  gap: 0.4em;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.provider-card__badge,
+.provider-card__key-pill {
+  border-radius: 999px;
+  padding: 0.2em 0.55em;
+  font-size: 0.75em;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.provider-card__badge[data-tone="ok"],
+.provider-card__key-pill[data-tone="ok"] {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.provider-card__badge[data-tone="progress"],
+.provider-card__badge[data-tone="warn"],
+.provider-card__key-pill[data-tone="progress"],
+.provider-card__key-pill[data-tone="warn"] {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.provider-card__badge[data-tone="error"],
+.provider-card__key-pill[data-tone="error"] {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.provider-card__badge[data-tone="muted"],
+.provider-card__key-pill[data-tone="muted"] {
+  background: #f3f4f6;
+  color: #374151;
+}
+
+.provider-card__meta {
+  display: grid;
+  gap: 0.25em;
+  color: #666;
+  font-size: 0.85em;
+  margin-bottom: 0.75em;
+}
+
+.provider-card__bytes,
+.provider-card__issue {
+  color: #666;
+  font-size: 0.85em;
+  margin-bottom: 0.75em;
+}
+
+.provider-card__issue {
+  color: #856404;
+}
+
+.provider-card__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  flex-wrap: wrap;
+}
+
+.provider-card__actions button,
+.provider-card__menu button {
+  border: 1px solid #d1d5db;
+  background: white;
+  color: #374151;
+  border-radius: 6px;
+  padding: 0.4em 0.75em;
+  font-size: 0.85em;
+  cursor: pointer;
+}
+
+.provider-card__actions button:disabled {
+  color: #999;
+  cursor: default;
+}
+
+.provider-card__menu {
+  position: relative;
+}
+
+.provider-card__menu summary {
+  cursor: pointer;
+  color: #555;
+  font-size: 0.9em;
+}
+
+.provider-card__menu-body {
+  display: grid;
+  gap: 0.35em;
+  position: absolute;
+  right: 0;
+  top: 1.5em;
+  min-width: 8em;
+  padding: 0.45em;
+  border: 1px solid var(--facet-border, #e5e0db);
+  border-radius: 8px;
+  background: #fff;
+  z-index: 3;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.12);
+}
+
+.provider-model-row {
+  align-items: flex-start;
+  margin-top: -0.25em;
 }
 
 /* Backend settings fieldsets */
@@ -2419,6 +2600,7 @@ button:focus:not(:focus-visible) {
     <section class="settings-section" id="section-providers" role="tabpanel" aria-labelledby="tab-providers">
       <h2>providers</h2>
       <p class="settings-section-desc">configure ai providers separately for generation (text analysis) and cogitate (tool-calling agents).</p>
+      <div id="providersPanel" class="providers-panel"></div>
 
       <form class="settings-form" onsubmit="return false;">
 
@@ -2447,6 +2629,28 @@ button:focus:not(:focus-visible) {
             <!-- Populated dynamically from registry -->
           </select>
           <small></small>
+        </div>
+      </div>
+      <div id="mlxModelRow" class="provider-row provider-model-row" style="display:none">
+        <div class="settings-field">
+          <label for="field-mlx-active-model">model</label>
+          <select id="field-mlx-active-model">
+            <!-- Populated dynamically from registry -->
+          </select>
+          <small></small>
+          <small id="mlxModelIdentifier" style="display:none"></small>
+          <small id="mlxScopeCopy" style="display:none">vision and text on your device. tool-calling agents continue to use your configured cogitate provider.</small>
+        </div>
+      </div>
+      <div id="localModelRow" class="provider-row provider-model-row" style="display:none">
+        <div class="settings-field">
+          <label for="field-local-active-model">local model</label>
+          <select id="field-local-active-model">
+            <!-- Populated dynamically from registry -->
+          </select>
+          <small></small>
+          <small id="localModelIdentifier" style="display:none"></small>
+          <small id="localScopeCopy" style="display:none">on-device generate and cogitate using bundled llama-server.</small>
         </div>
       </div>
       <div id="generateProviderKeyWarning" class="provider-key-warning" style="display:none">
@@ -2551,6 +2755,10 @@ button:focus:not(:focus-visible) {
         <span>API key not configured for cogitate provider.</span>
         <a href="#" id="cogitateProviderKeyLink">configure in API keys</a>
       </div>
+	      <div id="localCogitateStatus" class="provider-key-warning" style="display: none;">
+	        <div id="localCogitateStatus-indicator"></div>
+	        <div id="localCogitateStatus-detail"></div>
+	      </div>
       <small id="providerStatus">loading...</small>
 
       <!-- Detailed Tasks -->
@@ -2570,7 +2778,6 @@ button:focus:not(:focus-visible) {
     <section class="settings-section" id="section-apikeys" role="tabpanel" aria-labelledby="tab-apikeys">
       <h2>API keys</h2>
       <p class="settings-section-desc">configure API keys for AI providers. keys are stored in your journal config.</p>
-      <p class="settings-section-desc" style="margin-top:-0.5em">tool-using agents (entity detection, etc.) also need each provider's CLI binary installed (`gemini`, `claude`, `codex`, `opencode`) — see <a href="https://github.com/solpbc/solstone/blob/main/CONTRIBUTING.md#tool-using-agents-cogitate-cli-binaries" target="_blank">install docs</a>.</p>
 
       <form class="settings-form" onsubmit="return false;">
       <div style="margin-bottom: 1em;">
@@ -2581,9 +2788,9 @@ button:focus:not(:focus-visible) {
       <div id="googleApiKeyField" class="settings-field">
         <label for="field-env-google">Google AI (Gemini)</label>
         <div class="password-wrap">
-          <input type="text" id="field-env-google" data-section="env" data-key="GOOGLE_API_KEY" placeholder="enter API key" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true">
-          <button type="button" class="password-toggle" data-toggle="field-env-google" title="hide key">
-            <span>&#128064;</span>
+          <input type="password" id="field-env-google" data-section="env" data-key="GOOGLE_API_KEY" placeholder="enter API key" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true">
+          <button type="button" class="password-toggle" data-toggle="field-env-google" title="show key">
+            <span>&#128065;</span>
           </button>
         </div>
         <small>primary provider for transcription and insights. a developer API key from Google AI Studio — not a gemini.google.com chat account. <a href="https://aistudio.google.com/apikey" target="_blank">get key</a></small>
@@ -2592,9 +2799,9 @@ button:focus:not(:focus-visible) {
       <div class="settings-field">
         <label for="field-env-openai">OpenAI</label>
         <div class="password-wrap">
-          <input type="text" id="field-env-openai" data-section="env" data-key="OPENAI_API_KEY" placeholder="enter API key" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true">
-          <button type="button" class="password-toggle" data-toggle="field-env-openai" title="hide key">
-            <span>&#128064;</span>
+          <input type="password" id="field-env-openai" data-section="env" data-key="OPENAI_API_KEY" placeholder="enter API key" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true">
+          <button type="button" class="password-toggle" data-toggle="field-env-openai" title="show key">
+            <span>&#128065;</span>
           </button>
         </div>
         <small>alternative provider for chat and agents. a developer API key from the OpenAI platform console — not a chatgpt.com account. <a href="https://platform.openai.com/api-keys" target="_blank">get key</a></small>
@@ -2603,9 +2810,9 @@ button:focus:not(:focus-visible) {
       <div class="settings-field">
         <label for="field-env-anthropic">Anthropic</label>
         <div class="password-wrap">
-          <input type="text" id="field-env-anthropic" data-section="env" data-key="ANTHROPIC_API_KEY" placeholder="enter API key" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true">
-          <button type="button" class="password-toggle" data-toggle="field-env-anthropic" title="hide key">
-            <span>&#128064;</span>
+          <input type="password" id="field-env-anthropic" data-section="env" data-key="ANTHROPIC_API_KEY" placeholder="enter API key" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true">
+          <button type="button" class="password-toggle" data-toggle="field-env-anthropic" title="show key">
+            <span>&#128065;</span>
           </button>
         </div>
         <small>alternative provider for chat and agents. a developer API key from the Anthropic console — not a claude.ai chat account. <a href="https://console.anthropic.com/settings/keys" target="_blank">get key</a></small>
@@ -2614,9 +2821,9 @@ button:focus:not(:focus-visible) {
       <div class="settings-field">
         <label for="field-env-revai">Rev.ai</label>
         <div class="password-wrap">
-          <input type="text" id="field-env-revai" data-section="env" data-key="REVAI_ACCESS_TOKEN" placeholder="enter access token" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true">
-          <button type="button" class="password-toggle" data-toggle="field-env-revai" title="hide token">
-            <span>&#128064;</span>
+          <input type="password" id="field-env-revai" data-section="env" data-key="REVAI_ACCESS_TOKEN" placeholder="enter access token" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true">
+          <button type="button" class="password-toggle" data-toggle="field-env-revai" title="show token">
+            <span>&#128065;</span>
           </button>
         </div>
         <small>audio transcription for imported files. <a href="https://www.rev.ai/access_token" target="_blank">get token</a></small>
@@ -2624,9 +2831,9 @@ button:focus:not(:focus-visible) {
       <div class="settings-field">
         <label for="field-env-plaud">Plaud</label>
         <div class="password-wrap">
-          <input type="text" id="field-env-plaud" data-section="env" data-key="PLAUD_ACCESS_TOKEN" placeholder="enter access token" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true">
-          <button type="button" class="password-toggle" data-toggle="field-env-plaud" title="hide token">
-            <span>&#128064;</span>
+          <input type="password" id="field-env-plaud" data-section="env" data-key="PLAUD_ACCESS_TOKEN" placeholder="enter access token" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true">
+          <button type="button" class="password-toggle" data-toggle="field-env-plaud" title="show token">
+            <span>&#128065;</span>
           </button>
         </div>
         <small>Import audio from Plaud recorder. Log into the web portal and extract token from browser console.</small>
@@ -3239,6 +3446,12 @@ button:focus:not(:focus-visible) {
       <h2>facets</h2>
       <p class="settings-section-desc">Manage muted facets. Muted facets are hidden from the facet bar but retain all their data.</p>
 
+      <h3>all facets</h3>
+      <div id="allFacetsList">
+        <p class="text-muted">Loading...</p>
+      </div>
+
+      <h3>muted facets</h3>
       <div id="mutedFacetsList">
         <p class="text-muted">Loading...</p>
       </div>
@@ -3460,6 +3673,9 @@ button:focus:not(:focus-visible) {
 </div>
 
 <script>
+const INSTALL_COPY = {{ install_copy | tojson }};
+const IN_FLIGHT_INSTALL_STATES = ['resolving', 'downloading', 'verifying', 'installing'];
+
 // ========== STATE ==========
 let configData = null;
 let facetConfig = null;
@@ -3469,7 +3685,7 @@ let insightsData = null;
 let keyValidationData = {};
 let solVoiceData = null;
 let solVoiceThrottledTimer = null;
-const escapeHtml = window.AppServices.escapeHtml;
+const escapeHtml = (value) => window.AppServices.escapeHtml(value);
 
 // Reusable per-tab attention indicator. Any tab can opt in by calling
 // setTabAttention('<section>', true) when its content has a problem the
@@ -3513,6 +3729,26 @@ const solVoiceCopy = {
   throttledHeaderOutcome: {{ sol_voice_copy.SOL_VOICE_THROTTLED_LOG_HEADER_OUTCOME | tojson }},
 };
 const solVoiceCategories = {{ sol_voice_copy.CATEGORIES | list | tojson }};
+
+// ========== TAB ATTENTION ==========
+
+// Reusable per-tab attention indicator. Any tab can opt in by calling
+// setTabAttention('<section>', true) when its content has a problem the
+// user should notice (incompatible backend on the transcription tab,
+// missing API key referenced from the providers tab, etc.) and
+// setTabAttention('<section>', false) once the issue clears. Implemented
+// by toggling data-attention on the <button id="tab-{section}"> in the
+// nav; the CSS rule on .settings-nav-item[data-attention="true"]::after
+// draws the dot.
+function setTabAttention(section, on) {
+  const tab = document.getElementById('tab-' + section);
+  if (!tab) return;
+  if (on) {
+    tab.setAttribute('data-attention', 'true');
+  } else {
+    tab.removeAttribute('data-attention');
+  }
+}
 
 // ========== MODAL ACCESSIBILITY ==========
 function setupModalAccessibility(modalId) {
@@ -3595,6 +3831,7 @@ function switchSection(sectionId, updateHash = true) {
   });
 
   if (sectionId === 'facets') {
+    loadAllFacets();
     loadMutedFacets();
   }
 
@@ -3617,7 +3854,72 @@ function switchSection(sectionId, updateHash = true) {
   }
 }
 
-// ========== MUTED FACETS ==========
+// ========== FACETS ==========
+async function loadAllFacets() {
+  const container = document.getElementById('allFacetsList');
+  if (!container) return;
+  try {
+    const response = await fetch('/app/settings/api/facets');
+    const data = await response.json();
+    if (data.error) throw new Error(data.error);
+
+    const facets = data.facets || [];
+    if (facets.length === 0) {
+      container.innerHTML = '<p class="text-muted">No facets yet.</p>';
+      return;
+    }
+
+    container.innerHTML = '';
+    facets.forEach(facet => {
+      const row = document.createElement('a');
+      row.className = 'settings-field';
+      row.href = `/app/settings/facets/${encodeURIComponent(facet.name)}`;
+      row.style.display = 'flex';
+      row.style.alignItems = 'center';
+      row.style.justifyContent = 'space-between';
+      row.style.textDecoration = 'none';
+      row.style.color = 'inherit';
+
+      const info = document.createElement('div');
+      info.style.display = 'flex';
+      info.style.alignItems = 'center';
+      info.style.gap = '0.5em';
+
+      if (facet.emoji) {
+        const emoji = document.createElement('span');
+        emoji.textContent = facet.emoji;
+        info.appendChild(emoji);
+      }
+
+      const title = document.createElement('span');
+      title.textContent = facet.title || facet.name;
+      info.appendChild(title);
+
+      if (facet.color) {
+        const swatch = document.createElement('span');
+        swatch.style.display = 'inline-block';
+        swatch.style.width = '12px';
+        swatch.style.height = '12px';
+        swatch.style.borderRadius = '50%';
+        swatch.style.backgroundColor = facet.color;
+        swatch.style.marginLeft = '0.25em';
+        info.appendChild(swatch);
+      }
+
+      const state = document.createElement('span');
+      state.className = 'text-muted';
+      state.style.fontSize = '0.85em';
+      state.textContent = facet.muted ? 'muted' : 'open';
+
+      row.appendChild(info);
+      row.appendChild(state);
+      container.appendChild(row);
+    });
+  } catch (err) {
+    container.innerHTML = '<p class="text-muted">Failed to load facets.</p>';
+  }
+}
+
 async function loadMutedFacets() {
   const container = document.getElementById('mutedFacetsList');
   try {
@@ -4963,7 +5265,7 @@ document.getElementById('createPersonalBtn').onclick = async () => {
     const data = await response.json();
     if (data.success) {
       document.cookie = `selectedFacet=${data.facet}; path=/; SameSite=Lax`;
-      window.location.href = '/app/home';
+      window.location.href = '/app/settings/facets/' + encodeURIComponent(data.facet);
     } else {
       throw new Error(data.error);
     }
@@ -5042,17 +5344,74 @@ function promptReload() {
 
 // ========== PROVIDERS ==========
 let providersData = null;
+let providersPanelPollTimer = null;
+let providersPanelActionPending = false;
+let mlxBootstrapPostStarted = false;
+let mlxModels = [];
+let localBootstrapPostStarted = false;
+let localModels = [];
+let localStatusLoading = false;
+let localStatusError = '';
+
+const PROVIDER_NAMES = ['anthropic', 'openai', 'openhands', 'local', 'mlx'];
+const MLX_COGITATE_UNSUPPORTED_TITLE = 'MLX provider does not support cogitate in v1 — it is vision/generate-only. Configure a cloud provider for cogitate agents.';
+const MLX_SCOPE_COPY = 'vision and text on your device. tool-calling agents continue to use your configured cogitate provider.';
+const MLX_MODEL_LABELS = {
+  'qwen3.5:9b': 'qwen 3.5 — 16 GB Mac',
+  'gemma-4-26b-a4b-it-mlx-4bit': 'gemma 4 (26B) — 24 GB Mac',
+};
+const LOCAL_SCOPE_COPY = 'on-device generate and cogitate using bundled llama-server.';
+const LOCAL_MODEL_LABELS = {
+  'local/qwen2.5-coder-7b': 'qwen 2.5 coder 7B — 12 GB',
+  'local/qwen3-coder-30b-a3b-q4_k_m': 'qwen3 coder 30B — 32 GB',
+};
 
 async function loadProviders() {
   try {
     const response = await fetch('api/providers');
     providersData = await response.json();
     if (providersData.error) throw new Error(providersData.error);
+    mlxModels = await loadMlxModels();
+    providersData.mlx_models = mlxModels;
+    providersData.mlx_availability = await loadMlxAvailability();
+    localModels = await loadLocalModels();
+    providersData.local_models = localModels;
+    providersData.local_availability = await loadLocalAvailability();
     populateProviders(providersData);
   } catch (err) {
     console.error('Error loading providers:', err);
     document.getElementById('providerStatus').textContent = 'error loading providers';
   }
+}
+
+async function loadMlxModels() {
+  const response = await fetch('api/mlx/models');
+  const models = await response.json();
+  if (!response.ok) throw new Error(models.detail || models.error || 'MLX models failed');
+  return models;
+}
+
+async function loadMlxAvailability() {
+  const model = encodeURIComponent(getSelectedMlxModel());
+  const response = await fetch(`api/mlx/availability?model=${model}`);
+  const availability = await response.json();
+  if (!response.ok) throw new Error(availability.detail || availability.error || 'MLX availability failed');
+  return availability;
+}
+
+async function loadLocalModels() {
+  const response = await fetch('api/local/models');
+  const models = await response.json();
+  if (!response.ok) throw new Error(models.detail || models.error || 'Local models failed');
+  return models;
+}
+
+async function loadLocalAvailability() {
+  const model = encodeURIComponent(getSelectedLocalModel());
+  const response = await fetch(`api/local/availability?model=${model}`);
+  const availability = await response.json();
+  if (!response.ok) throw new Error(availability.detail || availability.error || 'Local availability failed');
+  return availability;
 }
 
 function populateProviders(data) {
@@ -5071,7 +5430,12 @@ function populateProviders(data) {
         for (const p of data.providers) {
           const opt = document.createElement('option');
           opt.value = p.name;
-          opt.textContent = p.label;
+          opt.textContent = getProviderOptionLabel(p, type);
+          const disabledReason = getProviderOptionDisabledReason(p, type);
+          if (disabledReason) {
+            opt.disabled = true;
+            opt.title = disabledReason;
+          }
           select.appendChild(opt);
         }
       }
@@ -5098,6 +5462,8 @@ function populateProviders(data) {
   if (backendSelect) {
     backendSelect.value = data.google_backend || 'auto';
   }
+  populateMlxModelPicker(data);
+  populateLocalModelPicker(data);
   // Show/hide vertex fields
   const vertexFields = document.getElementById('vertexFields');
   if (vertexFields) {
@@ -5108,6 +5474,10 @@ function populateProviders(data) {
 
   // Update status text
   document.getElementById('providerStatus').textContent = '';
+  syncProviderModelRows();
+  renderProvidersPanel(data);
+  syncProviderAutoFire();
+  syncProvidersPanelPolling(data);
 
   // Refresh env status displays with latest validation data
   const env = configData?.env || {};
@@ -5128,6 +5498,864 @@ function populateProviders(data) {
 
   // Populate context overrides
   renderContextGroups(data);
+  renderLocalCogitateStatus();
+}
+
+function getSelectedCogitateProvider() {
+  return document.getElementById('field-cogitate-provider')?.value || providersData?.cogitate?.provider || '';
+}
+
+function setLocalStatusTone(statusEl, tone) {
+  if (tone === 'ready') {
+    statusEl.style.background = '#e8f5e9';
+    statusEl.style.borderColor = '#a5d6a7';
+    statusEl.style.color = '#1b5e20';
+  } else if (tone === 'checking') {
+    statusEl.style.background = '#f8f9fa';
+    statusEl.style.borderColor = '#d6d8db';
+    statusEl.style.color = '#495057';
+  } else {
+    statusEl.style.background = '';
+    statusEl.style.borderColor = '';
+    statusEl.style.color = '';
+  }
+}
+
+function setLocalIndicator(indicator, text, color) {
+  indicator.innerHTML = '';
+  indicator.style.display = 'flex';
+  indicator.style.alignItems = 'center';
+  indicator.style.gap = '0.4em';
+  const dot = document.createElement('span');
+  dot.setAttribute('aria-hidden', 'true');
+  dot.style.width = '0.55em';
+  dot.style.height = '0.55em';
+  dot.style.borderRadius = '999px';
+  dot.style.background = color;
+  dot.style.display = 'inline-block';
+  dot.style.flex = '0 0 auto';
+  indicator.append(dot, document.createTextNode(text));
+}
+
+function appendLocalStatusError(row) {
+  if (!localStatusError) return;
+  const error = document.createElement('span');
+  error.style.fontSize = '0.9em';
+  error.textContent = localStatusError;
+  row.appendChild(error);
+}
+
+function createLocalRecheckButton(row) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = localStatusLoading ? 'Checking…' : 'Re-check';
+  button.disabled = localStatusLoading;
+  button.addEventListener('click', recheckLocalStatus);
+  row.appendChild(button);
+  appendLocalStatusError(row);
+  return button;
+}
+
+function localIssueCopy(issue) {
+  const messages = {
+    binary_missing: 'local runtime is not installed',
+    model_missing: 'local model files are not installed',
+    server_unhealthy: 'local runtime is not ready',
+    ram_insufficient: 'not enough memory for the selected local model',
+  };
+  return messages[issue] || issue || 'local provider is not ready';
+}
+
+function renderLocalCogitateStatus() {
+  const statusEl = document.getElementById('localCogitateStatus');
+  const indicator = document.getElementById('localCogitateStatus-indicator');
+  const detail = document.getElementById('localCogitateStatus-detail');
+  if (!statusEl || !indicator || !detail) return;
+
+  indicator.innerHTML = '';
+  detail.innerHTML = '';
+  if (getSelectedCogitateProvider() !== 'local') {
+    statusEl.style.display = 'none';
+    return;
+  }
+
+  statusEl.style.display = 'flex';
+  const status = providersData?.provider_status?.local || {};
+  if (localStatusLoading) {
+    setLocalStatusTone(statusEl, 'checking');
+    setLocalIndicator(indicator, 'Checking…', '#6c757d');
+    const row = document.createElement('div');
+    row.className = 'local-command-row';
+    createLocalRecheckButton(row);
+    detail.appendChild(row);
+    return;
+  }
+  if (status.cogitate_ready === true) {
+    setLocalStatusTone(statusEl, 'ready');
+    setLocalIndicator(indicator, 'Ready', '#2e7d32');
+    return;
+  }
+
+  setLocalStatusTone(statusEl, 'warning');
+  const issue = (status.issues || [])[0];
+  setLocalIndicator(indicator, localIssueCopy(issue), '#856404');
+  const row = document.createElement('div');
+  row.className = 'local-command-row';
+  createLocalRecheckButton(row);
+  detail.appendChild(row);
+}
+
+async function recheckLocalStatus() {
+  localStatusLoading = true;
+  localStatusError = '';
+  renderLocalCogitateStatus();
+  try {
+    const response = await fetch('api/providers/local/status');
+    const payload = await response.json();
+    if (!response.ok || payload.error) {
+      throw new Error(payload.detail || payload.error || 'Local status check failed');
+    }
+    providersData = providersData || {};
+    providersData.provider_status = providersData.provider_status || {};
+    providersData.provider_status.local = payload;
+  } catch (err) {
+    console.error('Error rechecking local status:', err);
+    localStatusError = 'Re-check failed.';
+  } finally {
+    localStatusLoading = false;
+    renderLocalCogitateStatus();
+  }
+}
+
+function populateMlxModelPicker(data) {
+  const select = document.getElementById('field-mlx-active-model');
+  if (!select) return;
+  const models = data.mlx_models || mlxModels || [];
+  select.innerHTML = '';
+  for (const model of models) {
+    const opt = document.createElement('option');
+    opt.value = model.name;
+    opt.textContent = MLX_MODEL_LABELS[model.name] || model.label || model.name;
+    select.appendChild(opt);
+  }
+  select.value = data.mlx?.active_model || 'qwen3.5:9b';
+}
+
+function populateLocalModelPicker(data) {
+  const select = document.getElementById('field-local-active-model');
+  if (!select) return;
+  const models = data.local_models || localModels || [];
+  select.innerHTML = '';
+  for (const model of models) {
+    const opt = document.createElement('option');
+    opt.value = model.name;
+    opt.textContent = LOCAL_MODEL_LABELS[model.name] || model.label || model.name;
+    select.appendChild(opt);
+  }
+  const active = data.local_availability?.model || 'local/qwen2.5-coder-7b';
+  select.value = active;
+}
+
+function providerKind(providerId) {
+  if (providerId === 'openhands') return 'openhands';
+  if (providerId === 'local' || providerId === 'mlx') return 'local-mlx';
+  return 'cloud';
+}
+
+function providerPanelStates(data) {
+  return {
+    ...(data?.bundled || {}),
+    local: data?.local,
+    mlx: data?.mlx,
+  };
+}
+
+function providerPanelUrl() {
+  const model = encodeURIComponent(getSelectedLocalModel());
+  return `api/providers?local_model=${model}`;
+}
+
+function mergeProviderPanelData(payload) {
+  const previous = providersData || {};
+  providersData = {
+    ...payload,
+    mlx_models: previous.mlx_models || mlxModels,
+    local_models: previous.local_models || localModels,
+    mlx_availability: previous.mlx_availability,
+    local_availability: previous.local_availability,
+  };
+}
+
+function getProviderAvailability(providerId) {
+  if (providerId === 'mlx' && providersData?.mlx_availability) {
+    return { provider: 'mlx', ...providersData.mlx_availability };
+  }
+  if (providerId === 'local' && providersData?.local_availability) {
+    return { provider: 'local', ...providersData.local_availability };
+  }
+  return null;
+}
+
+function providerLabel(providerId, state) {
+  if (state?.label) return state.label;
+  const provider = providersData?.providers?.find(item => item.name === providerId);
+  return provider?.label || providerId;
+}
+
+function renderProvidersPanel(data) {
+  const container = document.getElementById('providersPanel');
+  if (!container) return;
+  container.innerHTML = '';
+  const states = providerPanelStates(data);
+  for (const providerId of PROVIDER_NAMES) {
+    const state = states[providerId];
+    if (!state) continue;
+    container.appendChild(
+      renderProviderCard(providerId, state, providerKind(providerId), getProviderAvailability(providerId))
+    );
+  }
+}
+
+function renderProviderCard(providerId, state, kind, availability) {
+  const meta = providerCardMeta(state, kind, availability);
+  const card = document.createElement('div');
+  card.className = 'provider-card';
+  card.dataset.provider = providerId;
+
+  const header = document.createElement('header');
+  header.className = 'provider-card__header';
+  const title = document.createElement('div');
+  title.className = 'provider-card__title';
+  title.textContent = providerLabel(providerId, state);
+
+  const pills = document.createElement('div');
+  pills.className = 'provider-card__pills';
+  const badge = document.createElement('span');
+  badge.className = 'provider-card__badge';
+  badge.dataset.tone = meta.badgeTone;
+  badge.textContent = meta.badgeLabel;
+  pills.appendChild(badge);
+  if (meta.showKeyPill) {
+    const keyPill = document.createElement('span');
+    keyPill.className = 'provider-card__key-pill';
+    keyPill.dataset.tone = meta.keyPillTone;
+    keyPill.textContent = meta.keyPillLabel;
+    pills.appendChild(keyPill);
+  }
+  header.append(title, pills);
+  card.appendChild(header);
+
+  const metaLine = providerCardMetaLine(state, kind);
+  if (metaLine) {
+    const details = document.createElement('div');
+    details.className = 'provider-card__meta';
+    details.appendChild(metaLine);
+    card.appendChild(details);
+  }
+
+  if (meta.showByteCounter) {
+    const bytes = document.createElement('div');
+    bytes.className = 'provider-card__bytes';
+    bytes.textContent = meta.byteLabel;
+    card.appendChild(bytes);
+  }
+
+  if (meta.issueText) {
+    const issue = document.createElement('div');
+    issue.className = 'provider-card__issue';
+    issue.textContent = meta.issueText;
+    card.appendChild(issue);
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'provider-card__actions';
+  if (meta.primaryLabel) {
+    const primary = document.createElement('button');
+    primary.type = 'button';
+    primary.textContent = meta.primaryLabel;
+    primary.disabled = meta.primaryDisabled;
+    if (meta.primaryAction) {
+      primary.addEventListener('click', () => runProviderAction(providerId, meta.primaryAction));
+    }
+    actions.appendChild(primary);
+  }
+  const overflow = providerCardOverflow(state, kind);
+  if (overflow) actions.appendChild(overflow);
+  if (actions.children.length) card.appendChild(actions);
+  return card;
+}
+
+function providerCardMetaLine(state, kind) {
+  if (!['cloud', 'openhands'].includes(kind) || !state?.binary_path) return null;
+  const line = document.createElement('span');
+  line.textContent = `CLI: installed at ${state.binary_path}`;
+  return line;
+}
+
+function localMlxBlockedReason(state, availability) {
+  if (!availability || availability.available !== false || !availability.reason) return '';
+  if (availability.provider === 'mlx') {
+    if (availability.model_present || availability.reason === 'model snapshot not present') return '';
+    return availability.reason;
+  }
+  if (availability.provider === 'local') {
+    const installableReasons = [
+      'local runtime is not installed',
+      'local model files are not installed',
+    ];
+    if (installableReasons.includes(availability.reason)) return '';
+    return availability.reason;
+  }
+  return '';
+}
+
+function providerKeyPill(keyStatus) {
+  return {
+    'key-needed': { label: 'Needs API key', tone: 'warn' },
+    validating: { label: 'Validating key…', tone: 'progress' },
+    valid: { label: 'Ready', tone: 'ok' },
+    invalid: { label: 'Invalid key', tone: 'error' },
+  }[keyStatus] || { label: 'Needs API key', tone: 'warn' };
+}
+
+function installBadgeLabel(installState, installError) {
+  return {
+    idle: INSTALL_COPY.INSTALL_PHASE_IDLE,
+    resolving: INSTALL_COPY.INSTALL_PHASE_RESOLVING,
+    downloading: INSTALL_COPY.INSTALL_PHASE_DOWNLOADING,
+    verifying: INSTALL_COPY.INSTALL_PHASE_VERIFYING,
+    installing: INSTALL_COPY.INSTALL_PHASE_INSTALLING,
+    installed: INSTALL_COPY.INSTALL_PHASE_INSTALLED,
+    failed: `${INSTALL_COPY.INSTALL_PHASE_FAILED_PREFIX}${installError || INSTALL_COPY.INSTALL_FAILED_FALLBACK}`,
+  }[installState] || INSTALL_COPY.INSTALL_PHASE_IDLE;
+}
+
+function providerCardMeta(state, kind, availability) {
+  const installState = state?.install_state || 'idle';
+  const keyStatus = state?.key_status || 'key-needed';
+  const blockedReason = kind === 'local-mlx' ? localMlxBlockedReason(state, availability) : '';
+  if (blockedReason) {
+    return {
+      badgeLabel: `${INSTALL_COPY.INSTALL_PHASE_FAILED_PREFIX}${blockedReason}`,
+      badgeTone: 'error',
+      primaryLabel: INSTALL_COPY.INSTALL_BUTTON_INSTALL,
+      primaryAction: 'install',
+      primaryDisabled: true,
+      showKeyPill: false,
+      keyPillLabel: '',
+      keyPillTone: 'muted',
+      showByteCounter: false,
+      byteLabel: '',
+      issueText: '',
+    };
+  }
+
+  if (state?.disabled === true) {
+    return {
+      badgeLabel: 'Disabled',
+      badgeTone: 'muted',
+      primaryLabel: 'Enable',
+      primaryAction: 'enable',
+      primaryDisabled: false,
+      showKeyPill: kind === 'cloud',
+      ...providerCardKeyFields(keyStatus),
+      showByteCounter: false,
+      byteLabel: '',
+      issueText: firstProviderIssue(state),
+    };
+  }
+
+  const badgeLabel = installBadgeLabel(installState, state?.install_error);
+  const tone = providerBadgeTone(installState, keyStatus);
+  const byteLabel = providerByteLabel(kind, installState, badgeLabel, state);
+  const keyFields = providerCardKeyFields(keyStatus);
+  const base = {
+    badgeLabel,
+    badgeTone: tone,
+    showKeyPill: kind === 'cloud',
+    ...keyFields,
+    showByteCounter: !!byteLabel,
+    byteLabel,
+    issueText: firstProviderIssue(state),
+  };
+
+  if (IN_FLIGHT_INSTALL_STATES.includes(installState)) {
+    return {
+      ...base,
+      primaryLabel: INSTALL_COPY.INSTALL_BUTTON_INSTALLING,
+      primaryAction: null,
+      primaryDisabled: true,
+    };
+  }
+  if (installState === 'idle') {
+    return {
+      ...base,
+      primaryLabel: INSTALL_COPY.INSTALL_BUTTON_INSTALL,
+      primaryAction: 'install',
+      primaryDisabled: false,
+    };
+  }
+  if (installState === 'failed') {
+    return {
+      ...base,
+      primaryLabel: INSTALL_COPY.INSTALL_BUTTON_RETRY,
+      primaryAction: 'install',
+      primaryDisabled: false,
+    };
+  }
+  if (installState === 'installed' && kind === 'cloud') {
+    return cloudInstalledMeta(base, state, keyStatus);
+  }
+  return {
+    ...base,
+    primaryLabel: null,
+    primaryAction: null,
+    primaryDisabled: true,
+  };
+}
+
+function providerCardKeyFields(keyStatus) {
+  const keyPill = providerKeyPill(keyStatus);
+  return {
+    keyPillLabel: keyPill.label,
+    keyPillTone: keyPill.tone,
+  };
+}
+
+function providerBadgeTone(installState, keyStatus) {
+  if (installState === 'installed') return 'ok';
+  if (installState === 'failed') return 'error';
+  if (IN_FLIGHT_INSTALL_STATES.includes(installState)) return 'progress';
+  if (keyStatus === 'invalid') return 'warn';
+  return 'muted';
+}
+
+function providerByteLabel(kind, installState, badgeLabel, state) {
+  if (kind !== 'local-mlx' || !['downloading', 'verifying'].includes(installState)) return '';
+  const received = state?.progress_bytes_received;
+  const total = state?.progress_bytes_total;
+  const receivedBytes = Number(received || 0);
+  const totalBytes = Number(total || 0);
+  if ((received == null && total == null) || (receivedBytes === 0 && totalBytes === 0)) return '';
+  return `${badgeLabel} ${formatMlxBytes(receivedBytes)} / ${formatMlxBytes(totalBytes)}`;
+}
+
+function firstProviderIssue(state) {
+  return state?.issues && state.issues.length ? state.issues[0] : '';
+}
+
+function cloudInstalledMeta(base, state, keyStatus) {
+  if (keyStatus === 'key-needed') {
+    return {
+      ...base,
+      primaryLabel: 'Add key',
+      primaryAction: 'focus-key',
+      primaryDisabled: false,
+    };
+  }
+  if (keyStatus === 'invalid') {
+    return {
+      ...base,
+      primaryLabel: 'Re-enter key',
+      primaryAction: 'focus-key',
+      primaryDisabled: false,
+    };
+  }
+  if (keyStatus === 'validating') {
+    return {
+      ...base,
+      primaryLabel: 'Validating key…',
+      primaryAction: null,
+      primaryDisabled: true,
+    };
+  }
+  return {
+    ...base,
+    primaryLabel: state?.key_configured ? 'Validate key' : null,
+    primaryAction: state?.key_configured ? 'validate-key' : null,
+    primaryDisabled: false,
+  };
+}
+
+function providerCardOverflow(state, kind) {
+  if (kind === 'local-mlx') return null;
+  const installState = state?.install_state || 'idle';
+  const inFlight = IN_FLIGHT_INSTALL_STATES.includes(installState);
+  const items = [];
+  if (state?.disabled === true) {
+    if (!inFlight) items.push('uninstall');
+  } else if (installState === 'installed') {
+    items.push('uninstall', 'disable');
+  }
+  if (!items.length) return null;
+  const details = document.createElement('details');
+  details.className = 'provider-card__menu';
+  const summary = document.createElement('summary');
+  summary.textContent = 'more';
+  const body = document.createElement('div');
+  body.className = 'provider-card__menu-body';
+  for (const action of items) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = providerCardActionLabel(action);
+    button.addEventListener('click', () => {
+      details.open = false;
+      runProviderAction(state.name, action);
+    });
+    body.appendChild(button);
+  }
+  details.append(summary, body);
+  return details;
+}
+
+function providerCardActionLabel(action) {
+  return {
+    disable: 'Disable',
+    enable: 'Enable',
+    uninstall: 'Uninstall',
+  }[action] || action;
+}
+
+function runProviderAction(providerId, action) {
+  if (action === 'focus-key') {
+    focusProviderKey(providerId);
+    return;
+  }
+  providersPanelActionPending = true;
+  syncProvidersPanelPolling();
+  if (providerId === 'local') {
+    startLocalBootstrap();
+    return;
+  }
+  if (providerId === 'mlx') {
+    startMlxBootstrap();
+    return;
+  }
+  postProviderAction(providerId, action);
+}
+
+function focusProviderKey(providerId) {
+  const state = providersData?.bundled?.[providerId];
+  const envKey = state?.env_key || (providerId === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY');
+  switchSection('apikeys');
+  window.requestAnimationFrame(() => {
+    const input = document.querySelector(`[data-key="${envKey}"]`);
+    if (input) {
+      input.focus();
+      input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  });
+}
+
+async function postProviderAction(providerId, action) {
+  try {
+    const response = await fetch(`api/providers/${providerId}/${action}`, { method: 'POST' });
+    const payload = await response.json();
+    if (!response.ok || payload.error) throw new Error(payload.detail || payload.error || 'provider action failed');
+    providersData = providersData || {};
+    providersData.bundled = providersData.bundled || {};
+    providersData.bundled[providerId] = payload;
+    renderProvidersPanel(providersData);
+    syncProvidersPanelPolling();
+  } catch (err) {
+    providersPanelActionPending = false;
+    syncProvidersPanelPolling();
+    notifyError('Provider action failed', err.message);
+  }
+}
+
+function syncProvidersPanelPolling(data = providersData) {
+  const states = Object.values(providerPanelStates(data)).filter(Boolean);
+  const active = states.some(
+    state => (
+      IN_FLIGHT_INSTALL_STATES.includes(state.install_state)
+      || state.key_status === 'validating'
+    )
+  );
+  if (active || providersPanelActionPending) {
+    startProvidersPanelPolling();
+  } else {
+    clearProvidersPanelPollTimer();
+  }
+}
+
+function startProvidersPanelPolling() {
+  if (providersPanelPollTimer) return;
+  providersPanelPollTimer = setInterval(pollProvidersPanel, 1000);
+}
+
+function clearProvidersPanelPollTimer() {
+  if (providersPanelPollTimer) {
+    clearInterval(providersPanelPollTimer);
+    providersPanelPollTimer = null;
+  }
+}
+
+async function pollProvidersPanel() {
+  try {
+    const response = await fetch(providerPanelUrl());
+    const payload = await response.json();
+    if (!response.ok || payload.error) throw new Error(payload.detail || payload.error || 'provider status failed');
+    mergeProviderPanelData(payload);
+    providersPanelActionPending = false;
+    populateProviderStateOnly(providersData);
+    if (payload?.mlx?.install_state === 'installed') {
+      refreshMlxAvailability();
+    }
+    if (payload?.local?.install_state === 'installed') {
+      refreshLocalAvailability();
+    }
+    syncProvidersPanelPolling(providersData);
+  } catch (err) {
+    providersPanelActionPending = false;
+    clearProvidersPanelPollTimer();
+    notifyError('Provider status failed', err.message);
+  }
+}
+
+function populateProviderStateOnly(data) {
+  renderProvidersPanel(data);
+  syncProviderModelRows();
+  renderLocalCogitateStatus();
+}
+
+function getMlxAvailability() {
+  return providersData?.mlx_availability || null;
+}
+
+function getProviderOptionDisabledReason(provider, type) {
+  if (!provider || provider.name !== 'mlx') return '';
+  if (type === 'cogitate') return MLX_COGITATE_UNSUPPORTED_TITLE;
+  const availability = getMlxAvailability();
+  if (availability && availability.available === false) {
+    return availability.reason || 'MLX unavailable';
+  }
+  return '';
+}
+
+function getProviderOptionLabel(provider, type) {
+  let label = provider.label;
+  if (provider.name !== 'mlx') return label;
+  const availability = getMlxAvailability();
+  if (availability && availability.available === false) {
+    label += ' — unavailable';
+  }
+  return label;
+}
+
+function getSelectedMlxModel() {
+  const select = document.getElementById('field-mlx-active-model');
+  return select?.value || providersData?.mlx?.active_model || 'qwen3.5:9b';
+}
+
+function getSelectedLocalModel() {
+  const select = document.getElementById('field-local-active-model');
+  return select?.value || providersData?.local_availability?.model || 'local/qwen2.5-coder-7b';
+}
+
+function formatMlxBytes(value) {
+  const bytes = Number(value || 0);
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let size = bytes / 1024;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  const digits = size >= 10 ? 1 : 2;
+  return `${size.toFixed(digits)} ${units[unitIndex]}`;
+}
+
+function updateMlxModelIdentifier() {
+  const identifier = document.getElementById('mlxModelIdentifier');
+  const scopeCopy = document.getElementById('mlxScopeCopy');
+  const provider = document.getElementById('field-generate-provider')?.value;
+  const modelPresent = !!getMlxAvailability()?.model_present;
+  if (scopeCopy) {
+    scopeCopy.textContent = MLX_SCOPE_COPY;
+    scopeCopy.style.display = provider === 'mlx' ? '' : 'none';
+  }
+  if (!identifier) return;
+  if (provider === 'mlx' && modelPresent) {
+    identifier.textContent = `model: ${getSelectedMlxModel()}`;
+    identifier.style.display = '';
+  } else {
+    identifier.textContent = '';
+    identifier.style.display = 'none';
+  }
+}
+
+async function refreshMlxAvailability() {
+  try {
+    const availability = await loadMlxAvailability();
+    providersData = providersData || {};
+    providersData.mlx_availability = availability;
+    updateMlxModelIdentifier();
+    renderProvidersPanel(providersData);
+  } catch (err) {
+    console.error('Error refreshing MLX availability:', err);
+  }
+}
+
+function getLocalAvailability() {
+  return providersData?.local_availability || null;
+}
+
+function updateLocalModelIdentifier() {
+  const identifier = document.getElementById('localModelIdentifier');
+  const scopeCopy = document.getElementById('localScopeCopy');
+  const selected = isLocalProviderSelected();
+  const availability = getLocalAvailability();
+  const installed = !!(availability?.binary_present && availability?.model_present);
+  if (scopeCopy) {
+    scopeCopy.textContent = LOCAL_SCOPE_COPY;
+    scopeCopy.style.display = selected ? '' : 'none';
+  }
+  if (!identifier) return;
+  if (selected && installed) {
+    identifier.textContent = `model: ${getSelectedLocalModel()}`;
+    identifier.style.display = '';
+  } else {
+    identifier.textContent = '';
+    identifier.style.display = 'none';
+  }
+}
+
+function isLocalProviderSelected() {
+  return document.getElementById('field-generate-provider')?.value === 'local'
+    || document.getElementById('field-cogitate-provider')?.value === 'local';
+}
+
+function syncProviderModelRows() {
+  const mlxRow = document.getElementById('mlxModelRow');
+  const localRow = document.getElementById('localModelRow');
+  if (mlxRow) {
+    mlxRow.style.display = document.getElementById('field-generate-provider')?.value === 'mlx' ? '' : 'none';
+  }
+  if (localRow) {
+    localRow.style.display = isLocalProviderSelected() ? '' : 'none';
+  }
+  updateMlxModelIdentifier();
+  updateLocalModelIdentifier();
+}
+
+function syncProviderAutoFire() {
+  maybeAutoStartMlxBootstrap();
+  maybeAutoStartLocalBootstrap();
+}
+
+function maybeAutoStartMlxBootstrap() {
+  if (document.getElementById('field-generate-provider')?.value !== 'mlx') {
+    mlxBootstrapPostStarted = false;
+    return;
+  }
+  const state = providersData?.mlx || {};
+  const availability = getProviderAvailability('mlx');
+  if (
+    state.install_state === 'idle'
+    && availability
+    && !availability.model_present
+    && !localMlxBlockedReason(state, availability)
+    && !mlxBootstrapPostStarted
+  ) {
+    mlxBootstrapPostStarted = true;
+    startMlxBootstrap();
+  }
+}
+
+function maybeAutoStartLocalBootstrap() {
+  if (!isLocalProviderSelected()) {
+    localBootstrapPostStarted = false;
+    return;
+  }
+  const state = providersData?.local || {};
+  const availability = getProviderAvailability('local');
+  if (
+    state.install_state === 'idle'
+    && availability
+    && !(availability.binary_present && availability.model_present)
+    && !localMlxBlockedReason(state, availability)
+    && !localBootstrapPostStarted
+  ) {
+    localBootstrapPostStarted = true;
+    startLocalBootstrap();
+  }
+}
+
+async function startMlxBootstrap() {
+  providersPanelActionPending = true;
+  syncProvidersPanelPolling();
+  try {
+    const model = encodeURIComponent(getSelectedMlxModel());
+    const response = await fetch(`api/mlx/bootstrap?model=${model}`, { method: 'POST' });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || payload.error || 'MLX bootstrap failed');
+    providersData = providersData || {};
+    providersData.mlx = {
+      ...(providersData.mlx || {}),
+      install_state: payload.install_state || 'resolving',
+      install_error: null,
+    };
+    renderProvidersPanel(providersData);
+    syncProvidersPanelPolling();
+  } catch (err) {
+    mlxBootstrapPostStarted = false;
+    providersPanelActionPending = false;
+    providersData = providersData || {};
+    providersData.mlx = {
+      ...(providersData.mlx || {}),
+      install_state: 'failed',
+      install_error: err.message,
+    };
+    renderProvidersPanel(providersData);
+    syncProvidersPanelPolling();
+    notifyError('MLX bootstrap failed', err.message);
+  }
+}
+
+async function refreshLocalAvailability() {
+  try {
+    const availability = await loadLocalAvailability();
+    providersData = providersData || {};
+    providersData.local_availability = availability;
+    updateLocalModelIdentifier();
+    renderProvidersPanel(providersData);
+    await recheckLocalStatus();
+  } catch (err) {
+    console.error('Error refreshing local availability:', err);
+  }
+}
+
+async function startLocalBootstrap() {
+  providersPanelActionPending = true;
+  syncProvidersPanelPolling();
+  try {
+    const model = encodeURIComponent(getSelectedLocalModel());
+    const response = await fetch(`api/local/bootstrap?model=${model}`, { method: 'POST' });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || payload.error || 'Local bootstrap failed');
+    providersData = providersData || {};
+    providersData.local = {
+      ...(providersData.local || {}),
+      install_state: payload.install_state || 'resolving',
+      install_error: null,
+    };
+    renderProvidersPanel(providersData);
+    syncProvidersPanelPolling();
+  } catch (err) {
+    localBootstrapPostStarted = false;
+    providersPanelActionPending = false;
+    providersData = providersData || {};
+    providersData.local = {
+      ...(providersData.local || {}),
+      install_state: 'failed',
+      install_error: err.message,
+    };
+    renderProvidersPanel(providersData);
+    syncProvidersPanelPolling();
+    notifyError('Local bootstrap failed', err.message);
+  }
 }
 
 function updateTypeProviderKeyWarning(type, provider, apiKeys, auth) {
@@ -5136,7 +6364,7 @@ function updateTypeProviderKeyWarning(type, provider, apiKeys, auth) {
   if (!warning || !link) return;
   const message = warning.querySelectorAll('span')[1];
 
-  // Providers with no env_key (e.g., Ollama local) don't need API keys
+  // Providers with no env_key (e.g., local) don't need API keys
   const providerMeta = providersData?.providers?.find(p => p.name === provider);
   if (providerMeta && !providerMeta.env_key) {
     warning.style.display = 'none';
@@ -5404,7 +6632,15 @@ for (const type of ['generate', 'cogitate']) {
             body: JSON.stringify({ [type]: { [field]: value } }),
           }],
           onSuccess: (result) => {
+            const previousMlxAvailability = providersData?.mlx_availability;
+            const previousMlxModels = providersData?.mlx_models || mlxModels;
+            const previousLocalAvailability = providersData?.local_availability;
+            const previousLocalModels = providersData?.local_models || localModels;
             providersData = result;
+            providersData.mlx_availability = previousMlxAvailability;
+            providersData.mlx_models = previousMlxModels;
+            providersData.local_availability = previousLocalAvailability;
+            providersData.local_models = previousLocalModels;
             if (field === 'provider') {
               updateTypeProviderKeyWarning(type, value, result.api_keys, result.auth);
               if (type === 'cogitate') {
@@ -5412,7 +6648,23 @@ for (const type of ['generate', 'cogitate']) {
                 if (authSelect && result.auth) {
                   authSelect.value = result.auth[value] || 'platform';
                 }
+                renderLocalCogitateStatus();
               }
+            }
+            if (type === 'generate' && (field === 'provider' || field === 'tier')) {
+              syncProviderModelRows();
+              refreshMlxAvailability().then(() => {
+                syncProviderAutoFire();
+                syncProvidersPanelPolling();
+              });
+            }
+            if (field === 'provider' || field === 'tier') {
+              syncProviderModelRows();
+              refreshLocalAvailability().then(() => {
+                syncProviderAutoFire();
+                syncProvidersPanelPolling();
+              });
+              renderLocalCogitateStatus();
             }
             showFieldStatus(el, 'saved');
           },
@@ -5422,6 +6674,69 @@ for (const type of ['generate', 'cogitate']) {
     });
   }
 }
+
+document.getElementById('field-mlx-active-model')?.addEventListener('change', async function() {
+  const select = this;
+  const model = select.value;
+  const errorHost = prepareFieldErrorHost(select);
+  clearProvidersPanelPollTimer();
+  mlxBootstrapPostStarted = false;
+  providersData = providersData || {};
+  providersData.mlx = providersData.mlx || {};
+  providersData.mlx.active_model = model;
+  try {
+    providersData.mlx_availability = await loadMlxAvailability();
+    syncProviderModelRows();
+    renderProvidersPanel(providersData);
+    await window.saveControl({
+      el: select,
+      errorHost,
+      fetchArgs: ['api/providers', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mlx: { active_model: model } }),
+      }],
+      onSuccess: (result) => {
+        const previousMlxAvailability = providersData?.mlx_availability;
+        const previousMlxModels = providersData?.mlx_models || mlxModels;
+        providersData = result;
+        providersData.mlx_availability = previousMlxAvailability;
+        providersData.mlx_models = previousMlxModels;
+        if (!providersData.mlx) providersData.mlx = {};
+        providersData.mlx.active_model = model;
+        populateMlxModelPicker(providersData);
+        syncProviderModelRows();
+        renderProvidersPanel(providersData);
+        syncProviderAutoFire();
+        syncProvidersPanelPolling();
+        showFieldStatus(select, 'saved');
+      },
+    });
+  } catch (err) {
+    notifyError('MLX model save failed', err.message);
+  }
+});
+
+document.getElementById('field-local-active-model')?.addEventListener('change', async function() {
+  const select = this;
+  const errorHost = prepareFieldErrorHost(select);
+  clearProvidersPanelPollTimer();
+  localBootstrapPostStarted = false;
+  providersData = providersData || {};
+  try {
+    providersData.local_availability = await loadLocalAvailability();
+    populateLocalModelPicker(providersData);
+    syncProviderModelRows();
+    await pollProvidersPanel();
+    syncProviderAutoFire();
+    syncProvidersPanelPolling();
+    renderLocalCogitateStatus();
+    showFieldStatus(select, 'saved');
+  } catch (err) {
+    showFieldError(errorHost, err.message);
+    notifyError('Local model update failed', err.message);
+  }
+});
 
 // Cogitate auth mode change handler
 document.getElementById('field-cogitate-auth')?.addEventListener('change', async function() {
@@ -5439,7 +6754,9 @@ document.getElementById('field-cogitate-auth')?.addEventListener('change', async
         body: JSON.stringify({ auth: { [provider]: authSelect.value } }),
       }],
       onSuccess: (result) => {
+        const previousMlxAvailability = providersData?.mlx_availability;
         providersData = result;
+        providersData.mlx_availability = previousMlxAvailability;
         updateTypeProviderKeyWarning('cogitate', provider, result.api_keys, result.auth);
         showFieldStatus(authSelect, 'saved');
       },
@@ -5462,7 +6779,9 @@ document.getElementById('field-google-backend')?.addEventListener('change', asyn
         body: JSON.stringify({ google_backend: value }),
       }],
       onSuccess: (result) => {
+        const previousMlxAvailability = providersData?.mlx_availability;
         providersData = result;
+        providersData.mlx_availability = previousMlxAvailability;
         showFieldStatus(this, 'saved');
         const vf = document.getElementById('vertexFields');
         if (vf) vf.style.display = value === 'vertex' ? '' : 'none';
@@ -7382,33 +8701,41 @@ document.getElementById('cleanupPreviewBtn').addEventListener('click', runCleanu
 document.getElementById('cleanupConfirmBtn').addEventListener('click', runCleanupExecute);
 
 // ========== INIT ==========
-updateFacetNav();
-initFromHash();
-loadConfig();
-loadSolVoiceSettings();
-loadProviders();
-loadObserve();
-loadVision();
-loadInsights();
-loadSync();
-loadStorage();
-setupAutoSave();
-setupSolVoiceListeners();
-setupStorageListeners();
+function initSettings() {
+  updateFacetNav();
+  initFromHash();
+  loadConfig();
+  loadSolVoiceSettings();
+  loadProviders();
+  loadObserve();
+  loadVision();
+  loadInsights();
+  loadSync();
+  loadStorage();
+  setupAutoSave();
+  setupSolVoiceListeners();
+  setupStorageListeners();
 
-// Enter-to-save for auto-save text inputs inside forms
-document.querySelectorAll('.settings-form input[data-section][type="text"], .settings-form input[data-section][type="number"], .settings-form input[data-section][type="password"]').forEach(input => {
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      input.blur();
-    }
+  // Enter-to-save for auto-save text inputs inside forms
+  document.querySelectorAll('.settings-form input[data-section][type="text"], .settings-form input[data-section][type="number"], .settings-form input[data-section][type="password"]').forEach(input => {
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        input.blur();
+      }
+    });
   });
-});
 
-// If facet is selected on load, load its config
-if (window.selectedFacet) {
-  loadFacetConfig(window.selectedFacet);
+  // If facet is selected on load, load its config
+  if (window.selectedFacet) {
+    loadFacetConfig(window.selectedFacet);
+  }
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initSettings);
+} else {
+  initSettings();
 }
 
 // ----------------------------------------------------------------------

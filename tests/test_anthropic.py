@@ -153,95 +153,48 @@ def _setup_anthropic_stub(
     monkeypatch.setitem(sys.modules, "anthropic.types", anthropic_types_stub)
 
 
-def _setup_claude_cli_stub(
+def _setup_openhands_cogitate_stub(
     monkeypatch,
-    provider_mod,
     *,
     error=False,
     with_thinking=False,
     with_redacted_thinking=False,
 ):
-    monkeypatch.setattr(
-        provider_mod, "check_cli_binary", lambda _name: "/usr/bin/claude"
-    )
+    from solstone.think.providers import openhands as openhands_provider
 
-    class DummyCLIRunner:
-        def __init__(
-            self,
-            cmd,
-            prompt_text,
-            translate,
-            callback,
-            aggregator,
-            cwd=None,
-            env=None,
-            timeout=600,
-        ):
-            self.translate = translate
-            self.callback = callback
-            self.aggregator = aggregator
-            self.cli_session_id = None
-
-        async def run(self):
-            if error:
-                raise RuntimeError("boo")
-
-            raw_events = [
-                {
-                    "type": "system",
-                    "subtype": "init",
-                    "session_id": "test-session-abc123",
-                }
-            ]
+    async def fake_run_cogitate(config, on_event=None):
+        if error:
+            raise RuntimeError("boo")
+        if on_event:
             if with_thinking:
-                raw_events.append(
+                on_event(
                     {
-                        "type": "assistant",
-                        "message": {
-                            "content": [
-                                {
-                                    "type": "thinking",
-                                    "thinking": "I'm thinking about this...",
-                                }
-                            ]
-                        },
+                        "event": "thinking",
+                        "summary": "I'm thinking about this...",
+                        "signature": "test-signature-123",
+                        "redacted_data": None,
+                        "model": config.get("model"),
                     }
                 )
             if with_redacted_thinking:
-                raw_events.append(
+                on_event(
                     {
-                        "type": "assistant",
-                        "message": {
-                            "content": [{"type": "thinking", "thinking": "[redacted]"}]
-                        },
+                        "event": "thinking",
+                        "summary": "[redacted]",
+                        "signature": None,
+                        "redacted_data": "encrypted-data-xyz",
+                        "model": config.get("model"),
                     }
                 )
-            raw_events.append(
-                {
-                    "type": "assistant",
-                    "message": {"content": [{"type": "text", "text": "ok"}]},
-                }
-            )
+            on_event({"event": "text_delta", "delta": "ok"})
+            on_event({"event": "finish", "result": "ok"})
+        return "ok"
 
-            for raw_event in raw_events:
-                session_id = self.translate(raw_event, self.aggregator, self.callback)
-                if session_id:
-                    self.cli_session_id = session_id
-
-            return self.aggregator.flush_as_result()
-
-    monkeypatch.setattr(provider_mod, "CLIRunner", DummyCLIRunner)
+    monkeypatch.setattr(openhands_provider, "run_cogitate", fake_run_cogitate)
 
 
 def test_claude_main(monkeypatch, tmp_path, capsys):
-    _setup_anthropic_stub(monkeypatch)
-    monkeypatch.delitem(
-        sys.modules, "solstone.think.providers.anthropic", raising=False
-    )
-    provider_mod = importlib.reload(
-        importlib.import_module("solstone.think.providers.anthropic")
-    )
-    _setup_claude_cli_stub(monkeypatch, provider_mod)
+    _setup_openhands_cogitate_stub(monkeypatch)
     mod = importlib.reload(importlib.import_module("solstone.think.talents"))
 
     journal = tmp_path / "journal"
@@ -280,14 +233,7 @@ def test_claude_main(monkeypatch, tmp_path, capsys):
 
 
 def test_claude_outfile(monkeypatch, tmp_path, capsys):
-    _setup_anthropic_stub(monkeypatch)
-    monkeypatch.delitem(
-        sys.modules, "solstone.think.providers.anthropic", raising=False
-    )
-    provider_mod = importlib.reload(
-        importlib.import_module("solstone.think.providers.anthropic")
-    )
-    _setup_claude_cli_stub(monkeypatch, provider_mod)
+    _setup_openhands_cogitate_stub(monkeypatch)
     mod = importlib.reload(importlib.import_module("solstone.think.talents"))
 
     journal = tmp_path / "journal"
@@ -329,15 +275,7 @@ def test_claude_outfile(monkeypatch, tmp_path, capsys):
 
 def test_claude_thinking_events(monkeypatch, tmp_path, capsys):
     """Test that thinking events are properly emitted for Claude models."""
-    # Setup anthropic stub with thinking
-    _setup_anthropic_stub(monkeypatch, with_thinking=True)
-    monkeypatch.delitem(
-        sys.modules, "solstone.think.providers.anthropic", raising=False
-    )
-    provider_mod = importlib.reload(
-        importlib.import_module("solstone.think.providers.anthropic")
-    )
-    _setup_claude_cli_stub(monkeypatch, provider_mod, with_thinking=True)
+    _setup_openhands_cogitate_stub(monkeypatch, with_thinking=True)
     mod = importlib.reload(importlib.import_module("solstone.think.talents"))
 
     journal = tmp_path / "journal"
@@ -375,14 +313,7 @@ def test_claude_thinking_events(monkeypatch, tmp_path, capsys):
 
 def test_claude_redacted_thinking_events(monkeypatch, tmp_path, capsys):
     """Test that redacted thinking events are properly handled."""
-    _setup_anthropic_stub(monkeypatch, with_redacted_thinking=True)
-    monkeypatch.delitem(
-        sys.modules, "solstone.think.providers.anthropic", raising=False
-    )
-    provider_mod = importlib.reload(
-        importlib.import_module("solstone.think.providers.anthropic")
-    )
-    _setup_claude_cli_stub(monkeypatch, provider_mod, with_redacted_thinking=True)
+    _setup_openhands_cogitate_stub(monkeypatch, with_redacted_thinking=True)
     mod = importlib.reload(importlib.import_module("solstone.think.talents"))
 
     journal = tmp_path / "journal"
@@ -418,14 +349,7 @@ def test_claude_redacted_thinking_events(monkeypatch, tmp_path, capsys):
 
 
 def test_claude_outfile_error(monkeypatch, tmp_path, capsys):
-    _setup_anthropic_stub(monkeypatch, error=True)
-    monkeypatch.delitem(
-        sys.modules, "solstone.think.providers.anthropic", raising=False
-    )
-    provider_mod = importlib.reload(
-        importlib.import_module("solstone.think.providers.anthropic")
-    )
-    _setup_claude_cli_stub(monkeypatch, provider_mod, error=True)
+    _setup_openhands_cogitate_stub(monkeypatch, error=True)
     mod = importlib.reload(importlib.import_module("solstone.think.talents"))
 
     journal = tmp_path / "journal"
@@ -456,6 +380,51 @@ def test_claude_outfile_error(monkeypatch, tmp_path, capsys):
 
 
 class TestRunGenerateJsonSchema:
+    def test_run_generate_records_resolved_model_version(self, monkeypatch):
+        provider = importlib.reload(
+            importlib.import_module("solstone.think.providers.anthropic")
+        )
+        mock_client = MagicMock()
+        mock_response = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="ok")],
+            usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+            stop_reason="end_turn",
+            model="claude-haiku-4-5-20251001",
+        )
+        mock_client.messages.create.return_value = mock_response
+        monkeypatch.setattr(provider, "_get_anthropic_client", lambda: mock_client)
+
+        result = provider.run_generate(
+            "hello",
+            model="claude-haiku-4-5",
+            max_output_tokens=100,
+        )
+
+        assert result["model"] == "claude-haiku-4-5-20251001"
+        assert result["usage"]["model_version"] == "claude-haiku-4-5-20251001"
+
+    def test_run_generate_model_version_falls_back_to_requested(self, monkeypatch):
+        provider = importlib.reload(
+            importlib.import_module("solstone.think.providers.anthropic")
+        )
+        mock_client = MagicMock()
+        mock_response = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="ok")],
+            usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+            stop_reason="end_turn",
+        )
+        mock_client.messages.create.return_value = mock_response
+        monkeypatch.setattr(provider, "_get_anthropic_client", lambda: mock_client)
+
+        result = provider.run_generate(
+            "hello",
+            model="claude-haiku-4-5",
+            max_output_tokens=100,
+        )
+
+        assert result["model"] == "claude-haiku-4-5"
+        assert "model_version" not in result["usage"]
+
     def test_structured_messages_passthrough(self, monkeypatch):
         provider = importlib.reload(
             importlib.import_module("solstone.think.providers.anthropic")

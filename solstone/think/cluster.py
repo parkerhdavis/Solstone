@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2026 sol pbc
 
+import json
 import os
 import re
 import sys
 from collections import Counter, defaultdict
+from collections.abc import Collection
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from solstone.observe.screen import format_screen_text
+from solstone.think.data_state import DataState, derive_modality_state
+from solstone.think.media import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS
 
 from .streams import read_segment_stream
 from .utils import day_from_path, day_path
@@ -394,25 +398,112 @@ def _slots_to_ranges(slots: list[datetime]) -> list[tuple[str, str]]:
     return ranges
 
 
-def _detect_content_types(seg_path: Path) -> list[str]:
-    """Detect content types present in a segment directory."""
-    types = []
-    if (
-        (seg_path / "audio.jsonl").exists()
-        or any(seg_path.glob("*_audio.jsonl"))
-        or any(seg_path.glob("*_transcript.jsonl"))
-        or any(seg_path.glob("*_transcript.md"))
-        or (seg_path / "imported.md").exists()
-    ):
-        types.append("audio")
-    if (seg_path / "screen.jsonl").exists() or any(seg_path.glob("*_screen.jsonl")):
-        types.append("screen")
-    return types
+def _jsonl_has_marker_row(path: Path, marker_key: str) -> bool:
+    """Return whether an early JSONL object has the marker key.
+
+    Key-based membership test on at most the first two nonblank lines.
+    """
+    try:
+        lines = []
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                lines.append(line)
+                if len(lines) == 2:
+                    break
+    except OSError:
+        return False
+    for line in lines:
+        try:
+            parsed = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(parsed, dict) and marker_key in parsed:
+            return True
+    return False
+
+
+def _has_nonempty_text(path: Path) -> bool:
+    try:
+        return path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _has_raw_media(paths: Collection[Path], extensions: Collection[str]) -> bool:
+    return any(path.suffix.lower() in extensions for path in paths)
+
+
+def _detect_data_state(seg_path: Path) -> dict[str, str]:
+    """Detect cheap per-modality data state for a segment directory."""
+    state: dict[str, str] = {}
+    raw_media_paths = [path for path in seg_path.iterdir() if path.is_file()]
+
+    audio_jsonl_files = sorted(
+        {
+            path
+            for pattern in ("audio.jsonl", "*_audio.jsonl", "*_transcript.jsonl")
+            for path in seg_path.glob(pattern)
+            if path.is_file()
+        }
+    )
+    audio_md_files = sorted(
+        {
+            path
+            for pattern in ("*_transcript.md", "imported.md")
+            for path in seg_path.glob(pattern)
+            if path.is_file()
+        }
+    )
+    audio_analyzed = any(
+        _jsonl_has_marker_row(path, "start") for path in audio_jsonl_files
+    ) or any(_has_nonempty_text(path) for path in audio_md_files)
+    audio_has_raw = _has_raw_media(raw_media_paths, AUDIO_EXTENSIONS)
+    # Sanctioned read-path mutation (CLAUDE.md §7 L1/L6 exception, ACs 10/11/12):
+    # the shared helper may rename/unlink sidecar markers. See data_state.derive_modality_state.
+    audio_state = derive_modality_state(
+        seg_path,
+        "audio",
+        has_chunks=audio_analyzed,
+        has_jsonl=bool(audio_jsonl_files),
+        has_raw=audio_has_raw,
+    )
+    if audio_state != DataState.ABSENT.value:
+        state["audio"] = audio_state
+
+    screen_jsonl_files = sorted(
+        {
+            path
+            for pattern in ("screen.jsonl", "*_screen.jsonl")
+            for path in seg_path.glob(pattern)
+            if path.is_file()
+        }
+    )
+    screen_analyzed = any(
+        _jsonl_has_marker_row(path, "timestamp") for path in screen_jsonl_files
+    )
+    screen_has_raw = _has_raw_media(raw_media_paths, VIDEO_EXTENSIONS)
+    screen_state = derive_modality_state(
+        seg_path,
+        "screen",
+        has_chunks=screen_analyzed,
+        has_jsonl=bool(screen_jsonl_files),
+        has_raw=screen_has_raw,
+    )
+    if screen_state != DataState.ABSENT.value:
+        state["screen"] = screen_state
+
+    return state
 
 
 def scan_day(
     day: str,
-) -> tuple[list[tuple[str, str]], list[tuple[str, str]], list[dict[str, Any]]]:
+) -> tuple[
+    list[tuple[str, str]],
+    list[tuple[str, str]],
+    list[dict[str, Any]],
+]:
     """Single-pass scan returning both range aggregation and segment list.
 
     Combines the work of ``cluster_scan()`` and ``cluster_segments()``
@@ -422,9 +513,10 @@ def scan_day(
         day: Day folder in ``YYYYMMDD`` format.
 
     Returns:
-        Tuple of (audio_ranges, screen_ranges, segments) where ranges are
-        ``(start, end)`` pairs in ``HH:MM`` format and segments is a list
-        of dicts with ``key``, ``start``, ``end``, ``types``, and ``stream``.
+        Tuple of (audio_ranges, screen_ranges, segments) where
+        ranges are ``(start, end)`` pairs in ``HH:MM`` format, segments is a list
+        of dicts with ``key``, ``start``, ``end``, ``types``, ``stream``, and
+        ``data_state``.
     """
     from solstone.think.utils import iter_segments, segment_parse
 
@@ -441,7 +533,8 @@ def scan_day(
     for stream_name, _, seg_path in iter_segments(day_dir):
         start_time, end_time = segment_parse(seg_path.name)
 
-        types = _detect_content_types(seg_path) if start_time else []
+        data_state = _detect_data_state(seg_path) if start_time else {}
+        types = [modality for modality in ("audio", "screen") if modality in data_state]
 
         if start_time and types:
             dt = datetime.combine(day_date, start_time)
@@ -461,6 +554,7 @@ def scan_day(
                     "end": end_time.strftime("%H:%M"),
                     "types": types,
                     "stream": stream_name,
+                    "data_state": data_state,
                 }
             )
 
@@ -500,6 +594,7 @@ def cluster_segments(day: str) -> list[dict[str, Any]]:
         - start: start time as HH:MM
         - end: end time as HH:MM
         - types: list of content types present ("audio", "screen", or both)
+        - data_state: per-modality state for non-absent modalities
     """
     _, _, segments = scan_day(day)
     return segments
