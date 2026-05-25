@@ -92,7 +92,13 @@ class _CliError(Exception):
 
 class _ServicesArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
-        if "invalid choice" in message and "choose from scout" in message:
+        # argparse quotes choices differently across Python versions
+        # ("choose from scout" vs "choose from 'scout'"), so match on the
+        # service name itself rather than the surrounding phrasing. scout is
+        # the only service choice, so an invalid-choice error naming it always
+        # means an unknown service (an invalid top-level command lists
+        # enable/disable instead, and falls through to the default handler).
+        if "invalid choice" in message and "scout" in message:
             _print_error("unknown_service")
             raise SystemExit(EXIT_CODES["unknown_service"])
         super().error(message)

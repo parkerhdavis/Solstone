@@ -1236,7 +1236,7 @@ def start_link_server() -> RunnerManagedProcess:
     return _launch_process("link", cmd, restart=True)
 
 
-def start_vllm_servers() -> list[ManagedProcess]:
+def start_vllm_servers() -> list[RunnerManagedProcess]:
     """Launch one supervised process per configured vLLM server.
 
     Reads ``providers.vllm.servers`` from journal config; returns an empty
@@ -1247,7 +1247,7 @@ def start_vllm_servers() -> list[ManagedProcess]:
     from solstone.think.utils import get_config
 
     servers = get_config().get("providers", {}).get("vllm", {}).get("servers", {}) or {}
-    procs: list[ManagedProcess] = []
+    procs: list[RunnerManagedProcess] = []
     for name in sorted(servers):
         cmd = ["sol", "call", "vllm", "serve", "--name", name, "-v"]
         procs.append(_launch_process(f"vllm-{name}", cmd, restart=True))

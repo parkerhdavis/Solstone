@@ -4,14 +4,16 @@
     "google": false,
     "local": false,
     "mlx": false,
-    "openai": false
+    "openai": false,
+    "vllm": false
   },
   "auth": {
     "anthropic": "platform",
     "google": "platform",
     "local": "platform",
     "mlx": "platform",
-    "openai": "platform"
+    "openai": "platform",
+    "vllm": "platform"
   },
   "bundled": {
     "anthropic": {
@@ -657,6 +659,14 @@
         "OPENAI_API_KEY not set",
         "bundled runtime not installed — run `sol call settings providers install openhands` missing: openhands.sdk, litellm"
       ]
+    },
+    "vllm": {
+      "cogitate_cli": "",
+      "cogitate_cli_found": false,
+      "cogitate_ready": false,
+      "configured": false,
+      "generate_ready": false,
+      "issues": []
     }
   },
   "providers": [
@@ -669,6 +679,11 @@
       "env_key": "",
       "label": "MLX (Local, Apple Silicon)",
       "name": "mlx"
+    },
+    {
+      "env_key": "",
+      "label": "vLLM (Local)",
+      "name": "vllm"
     },
     {
       "env_key": "ANTHROPIC_API_KEY",

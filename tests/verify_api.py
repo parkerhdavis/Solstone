@@ -539,8 +539,11 @@ def normalize_for_compare(
     normalized = normalize(data, journal_path)
     if endpoint["app"] == "settings" and endpoint["name"] == "transcribe":
         if isinstance(normalized, dict):
-            # runtime_label is environment-dependent; tested separately.
+            # runtime_label and the probed hardware block are machine-specific
+            # (GPU name, driver version, host class); tested separately. Drop
+            # them so the baseline stays portable across machines.
             normalized.pop("runtime_label", None)
+            normalized.pop("hardware", None)
     return normalized
 
 
@@ -644,7 +647,7 @@ def update_all(
                 "still writing normalized payload"
             )
 
-        normalized = normalize(payload, journal_path)
+        normalized = normalize_for_compare(endpoint, payload, journal_path)
         path.write_text(
             json.dumps(normalized, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
         )
