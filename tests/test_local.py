@@ -307,6 +307,37 @@ def test_local_server_spawn_binds_loopback(monkeypatch):
     ]
 
 
+def test_reattach_rejects_server_serving_a_different_model(monkeypatch):
+    """A healthy server on the service port that serves a different model must
+    NOT be reattached — otherwise an in-process model switch silently keeps
+    serving the previously-loaded model."""
+    from solstone.think.providers import local_server
+
+    monkeypatch.setattr(local_server, "read_service_port", lambda service: 2468)
+    monkeypatch.setattr(local_server, "_probe_health", lambda port: ("ready", None))
+    # The live server serves a different model than the one requested.
+    monkeypatch.setattr(
+        local_server,
+        "_serves_model",
+        lambda port, model_id: model_id == "local/other-model",
+    )
+
+    assert local_server._reattach_if_ready("local/qwen2.5-coder-7b") is None
+
+
+def test_reattach_accepts_server_serving_the_requested_model(monkeypatch):
+    from solstone.think.providers import local_server
+
+    monkeypatch.setattr(local_server, "read_service_port", lambda service: 2468)
+    monkeypatch.setattr(local_server, "_probe_health", lambda port: ("ready", None))
+    monkeypatch.setattr(local_server, "_serves_model", lambda port, model_id: True)
+
+    info = local_server._reattach_if_ready("local/qwen2.5-coder-7b")
+    assert info is not None
+    assert info.port == 2468
+    assert info.model_id == "local/qwen2.5-coder-7b"
+
+
 def test_migrate_ollama_to_local_idempotent():
     from solstone.apps.settings.maint._migrate_ollama_to_local import migrate_config
 
