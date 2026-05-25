@@ -26,11 +26,14 @@ VENV_PY := $(VENV_BIN)/python
 PYTHON := $(VENV_PY)
 PARAKEET_ONNX_VARIANT ?= $(shell if nvidia-smi -L >/dev/null 2>&1; then echo cuda; else echo cpu; fi)
 
-# Dev install extras: Darwin lacks arm64 wheels for parakeet-onnx-cuda's
-# nvidia-* deps, so on Darwin we sync only the platform-agnostic extras and
-# skip the full extras sync (which would otherwise force resolution of
-# parakeet variants and fail). All other hosts (Linux primary) keep it.
+# Dev install extras: parakeet-onnx-cuda's onnxruntime-gpu / nvidia-* deps have
+# no arm64 wheels, so on any arm64 host (Darwin arm64 and Linux aarch64 alike --
+# e.g. the DGX Spark) we sync only the platform-agnostic extras and skip the
+# full extras sync (which would otherwise force resolution of parakeet variants
+# and fail). x86_64 Linux keeps the full set.
 ifeq ($(shell uname -s),Darwin)
+EXTRAS_ARGS := --extra pdf --extra whisper
+else ifeq ($(shell uname -m),aarch64)
 EXTRAS_ARGS := --extra pdf --extra whisper
 else
 EXTRAS_ARGS := --all-extras
