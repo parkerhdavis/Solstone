@@ -141,12 +141,39 @@ def _current_process_ready(model_id: str) -> LocalServerInfo | None:
     return None
 
 
+def _serves_model(port: int, model_id: str, timeout_s: float = 2.0) -> bool:
+    """Whether the llama-server at ``port`` currently serves ``model_id``.
+
+    llama-server reports the loaded model under the ``--alias`` set at spawn
+    (the model id). Used to guard reattach: the service-port file points at
+    whatever server last started, which may still be serving a different
+    model after an in-process switch.
+    """
+    import httpx
+
+    try:
+        response = httpx.get(f"{_base_url(port)}/v1/models", timeout=timeout_s)
+        response.raise_for_status()
+        data = response.json().get("data") or []
+    except Exception:
+        return False
+    return any(
+        isinstance(entry, dict) and entry.get("id") == model_id for entry in data
+    )
+
+
 def _reattach_if_ready(model_id: str) -> LocalServerInfo | None:
     port = read_service_port(_SERVICE_NAME)
     if port is None:
         return None
     state, _ = _probe_health(port)
     if state != STATE_READY:
+        return None
+    # Verify the live server actually serves the requested model before
+    # reattaching. Otherwise an in-process model switch silently latches onto
+    # the previously-loaded model's still-running server — the service-port
+    # file points at it and /health is READY, but it serves the wrong model.
+    if not _serves_model(port, model_id):
         return None
     return LocalServerInfo(
         model_id=model_id,
