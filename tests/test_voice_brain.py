@@ -77,7 +77,11 @@ def test_schedule_start_and_wait_until_ready(monkeypatch, journal_copy):
 
     start_voice_runtime(app)
     try:
-        assert brain.wait_until_ready(app, 1.0) is True
+        # Generous timeout: wait_until_ready returns the instant the (mocked)
+        # worker sets the readiness event, so a larger value is free on the
+        # happy path and only bounds the worst case. 1.0s flaked under parallel
+        # test load (xdist CPU contention) on the Spark.
+        assert brain.wait_until_ready(app, 10.0) is True
         assert app.voice_brain_session == "session-2"
         assert app.voice_brain_instruction == "Ready voice"
         assert isinstance(brain.brain_age_seconds(app), int)
@@ -128,7 +132,9 @@ def test_brain_session_file_stays_on_bound_journal(monkeypatch, tmp_path):
     start_voice_runtime(app)
     try:
         monkeypatch.setenv("SOLSTONE_JOURNAL", str(later_journal))
-        assert brain.wait_until_ready(app, 1.0) is True
+        # Generous timeout — see note in test_schedule_start_and_wait_until_ready;
+        # guards against parallel-load flakiness on contended CI hosts.
+        assert brain.wait_until_ready(app, 10.0) is True
         assert (initial_journal / "health" / "voice-brain-session").read_text(
             encoding="utf-8"
         ) == "session-4"
