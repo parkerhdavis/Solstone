@@ -61,6 +61,24 @@ LLAMA_SERVER_PINS: dict[str, dict[str, str]] = {
         "sha256": "8cb79eb596cc5cc15a6089ceadaa2723e3d75c1e7b37cfb9977ad1d4dc4a41eb",
         "binary_name": "llama-server",
     },
+    # Fork-only: aarch64-Linux CUDA build for the DGX Spark (GB10/sm_121).
+    # No upstream prebuilt exists for this platform, so the binary is built
+    # from ggml-org/llama.cpp@b9291 against CUDA 13.0 (NOT 13.2 — gibberish
+    # for Nemotron Omni per Unsloth) and self-hosted as a release asset; the
+    # ``url`` override points at it. See the Obsidian runbook "Spark llama.cpp
+    # CUDA Build & Pin" for build/host provenance. Keep this annotated so a
+    # future upstream aarch64 pin (likely CPU, same key) surfaces as a
+    # recognizable merge collision rather than a silent clobber.
+    "aarch64-unknown-linux-gnu": {
+        "release_tag": "b9291",
+        "filename": "llama-server-spark-b9291-cuda13.0-sm121.tar.gz",
+        "url": (
+            "https://github.com/parkerhdavis/Solstone/releases/download/"
+            "llama-server-spark-b9291/llama-server-spark-b9291-cuda13.0-sm121.tar.gz"
+        ),
+        "sha256": "4763466dc051d496d42c8882fdb8b80945dd5e0c988a4b9d70571ced01495c9a",
+        "binary_name": "llama-server",
+    },
 }
 
 
