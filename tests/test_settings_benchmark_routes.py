@@ -67,11 +67,13 @@ class TestSegmentRoute:
         assert "per_talent" in body
         assert "confidence" in body
         assert "tier_models" in body
-        # Default tier-model fill should populate all three tier roles
-        # from the smallest registry models (vision/generate/cogitate
-        # all have at least one capable model in the shipped registry).
-        for tier in ("vision", "generate", "cogitate"):
+        # The bundled local registry is text-only (v1), so default tier-model
+        # fill populates generate/cogitate from local models. There is no
+        # vision-capable model until the provider gains image support
+        # (Phase C), so the vision role is legitimately absent.
+        for tier in ("generate", "cogitate"):
             assert tier in body["tier_models"]
+        assert "vision" not in body["tier_models"]
         assert body["scenario"] == "solo_active"
 
     def test_specified_scenario_passes_through(self, journal_copy):

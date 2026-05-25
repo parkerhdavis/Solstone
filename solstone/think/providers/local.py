@@ -19,6 +19,7 @@ from typing import Any
 from solstone.think.models import LOCAL_FLASH, LOCAL_LITE, LOCAL_PRO
 from solstone.think.providers._image import is_image_part
 from solstone.think.providers.shared import (
+    BenchmarkResult,
     GenerateResult,
     classify_provider_error,
     safe_raw,
@@ -330,6 +331,115 @@ def validate_key(provider: str = "local", api_key: str = "") -> dict[str, Any]:
         }
 
 
+def bench_ensure_installed(model: str, *, allow_pull: bool) -> None:
+    """Ensure the bundled binary + GGUF for ``model`` are installed for benchmarking.
+
+    Unlike vLLM (one model pinned per server, no pull), the local bundle
+    supports pull-on-demand: when ``allow_pull`` is set, any missing artifact
+    is downloaded via the bundle's installer. Raises SystemExit with
+    remediation guidance when something is missing and pulling is disabled.
+    """
+    from solstone.think.providers import local_install
+
+    model_id = normalize_model_id(model)
+    readiness = local_install.inspect_readiness(model_id)
+    if readiness["binary_installed"] and readiness["model_installed"]:
+        return
+
+    missing = []
+    if not readiness["binary_installed"]:
+        missing.append("llama-server binary")
+    if not readiness["model_installed"]:
+        missing.append(f"model {model_id}")
+    if not allow_pull:
+        raise SystemExit(
+            "Local provider not ready for benchmarking — missing: "
+            f"{', '.join(missing)}. Re-run with --pull to download via the bundle."
+        )
+
+    if not readiness["binary_installed"]:
+        local_install.install_llama_server()
+    if not readiness["model_installed"]:
+        local_install.install_model(model_id)
+
+
+def bench_run_once(
+    model: str,
+    *,
+    prompt: str,
+    image_b64: str | None = None,
+    audio_b64: str | None = None,
+    audio_format: str = "wav",
+    max_output_tokens: int = 256,
+) -> BenchmarkResult:
+    """Send one benchmark request to the bundled llama-server; return a BenchmarkResult.
+
+    The v1 local provider is text-only, so image/audio blocks raise
+    ``unsupported_capability`` (multimodal arrives in Phase C via libmtmd /
+    ``--mmproj``). llama-server reports per-request ``timings``, so native
+    output/prompt tok/s are populated when present — the harness prefers these
+    over the wall-clock-derived rate.
+    """
+    import time
+
+    import httpx
+
+    from solstone.think.providers import local_server
+
+    if image_b64 is not None or audio_b64 is not None:
+        raise LocalProviderError(
+            "unsupported_capability",
+            "The local provider is text-only (v1); image/audio benchmarking "
+            "lands in Phase C (libmtmd / --mmproj).",
+        )
+    del audio_format
+
+    model_id = normalize_model_id(model)
+    messages = _build_messages(prompt, None)
+    server = local_server.ensure_running(model_id)
+    body = _build_request_body(model_id, messages, 0.2, max_output_tokens, False, None)
+    # Disable llama-server's prompt cache for benchmarking: the harness reuses
+    # the same prompt across warmup + measured runs, and a cached prefix makes
+    # the native prompt_per_second timing reflect near-zero work (misleading).
+    # Production generates keep caching (run_generate omits this).
+    body["cache_prompt"] = False
+
+    start = time.perf_counter()
+    response = httpx.post(
+        f"{server.base_url}/v1/chat/completions", json=body, timeout=600.0
+    )
+    elapsed = time.perf_counter() - start
+    response.raise_for_status()
+    raw = response.json()
+
+    usage = _extract_usage(raw) or {"input_tokens": 0, "output_tokens": 0}
+    choices = raw.get("choices") or []
+    choice = choices[0] if isinstance(choices, list) and choices else {}
+    message = choice.get("message") if isinstance(choice, dict) else {}
+    content = message.get("content") if isinstance(message, dict) else None
+    text = content if isinstance(content, str) else ""
+
+    timings = raw.get("timings")
+    timings = timings if isinstance(timings, dict) else {}
+    native_output = timings.get("predicted_per_second")
+    native_prompt = timings.get("prompt_per_second")
+
+    return BenchmarkResult(
+        elapsed_s=elapsed,
+        prompt_tokens=int(usage["input_tokens"]),
+        output_tokens=int(usage["output_tokens"]),
+        native_output_tok_s=(
+            float(native_output) if isinstance(native_output, int | float) else None
+        ),
+        native_prompt_tok_s=(
+            float(native_prompt) if isinstance(native_prompt, int | float) else None
+        ),
+        finish_reason=choice.get("finish_reason") if isinstance(choice, dict) else None,
+        text=text,
+        raw=raw,
+    )
+
+
 __all__ = [
     "LOCAL_MODEL_SPECS",
     "LocalModelSpec",
@@ -340,4 +450,6 @@ __all__ = [
     "run_cogitate",
     "list_models",
     "validate_key",
+    "bench_ensure_installed",
+    "bench_run_once",
 ]

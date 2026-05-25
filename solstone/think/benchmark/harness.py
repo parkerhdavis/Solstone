@@ -30,12 +30,12 @@ Three modes:
 
 Usage::
 
-    # Synthetic tok/s benchmark
-    python -m solstone.think.benchmark.harness --model vllm-local/qwen3.5:9b-awq \\
-        --class dgx-spark
+    # Synthetic tok/s benchmark (bundled llama-server; --pull to fetch the GGUF)
+    python -m solstone.think.benchmark.harness --model local/qwen2.5-coder-7b \\
+        --class dgx-spark --pull
 
     # Task-time benchmark (vision flag auto-applied when task.mode=vision)
-    python -m solstone.think.benchmark.harness --model vllm-local/qwen3.5:9b-awq \\
+    python -m solstone.think.benchmark.harness --model local/qwen2.5-coder-7b \\
         --class dgx-spark --task chat_reply
 
     # Transcriber RTF (point at any mono 16kHz audio file)
@@ -147,16 +147,19 @@ def _resolve_provider(model: str) -> ModuleType:
     """Resolve the provider module for a given model id.
 
     Routes by prefix:
+        ``local/...``      -> ``solstone.think.providers.local`` (bundled llama-server)
         ``vllm-local/...`` -> ``solstone.think.providers.vllm``
 
     Raises SystemExit with a clear message for unknown prefixes so the
     harness fails fast rather than reaching some half-implemented path.
     """
+    if model.startswith("local/"):
+        return importlib.import_module("solstone.think.providers.local")
     if model.startswith("vllm-local/"):
         return importlib.import_module("solstone.think.providers.vllm")
     raise SystemExit(
         f"Cannot resolve benchmark provider for model id: {model!r}. "
-        f"Expected a 'vllm-local/' prefix."
+        f"Expected a 'local/' or 'vllm-local/' prefix."
     )
 
 
@@ -255,10 +258,15 @@ def ensure_installed(model: str, *, allow_pull: bool) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Benchmark a local vLLM-served model.")
+    parser = argparse.ArgumentParser(
+        description="Benchmark a local model (bundled llama-server or vLLM)."
+    )
     parser.add_argument(
         "--model",
-        help="Model ID, e.g. vllm-local/qwen3.5:9b-awq. Required unless --transcriber is set.",
+        help=(
+            "Model ID, e.g. local/qwen2.5-coder-7b or vllm-local/qwen3.5:9b-awq. "
+            "Required unless --transcriber is set."
+        ),
     )
     parser.add_argument(
         "--class",
@@ -271,7 +279,8 @@ def main() -> int:
         action="store_true",
         help=(
             "Request an install if the model is not already available. "
-            "No-op for vLLM, which pins one model per server at startup."
+            "Pulls the GGUF via the bundle for local/ models; no-op for vLLM, "
+            "which pins one model per server at startup."
         ),
     )
     parser.add_argument(
