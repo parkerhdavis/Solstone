@@ -5,9 +5,11 @@ A reference for *which provider does what* in Solstone's pipelines, and *what ea
 - **Routing matrix** — for every layer/task in Solstone, which providers handle it today and what happens if any one provider is unavailable.
 - **Capability matrix** — for every registered provider/model, which roles it can fill and where the caveats are.
 
-This is a *capability* doc, not an implementation guide. For the developer-facing "how to add a new provider" walkthrough, see [PROVIDERS.md](PROVIDERS.md). For the deeper architectural story — including the spike-then-decide arc that landed vLLM as a peer provider — see the Obsidian notes under `40-69 Projects/43 sol pbc/solstone/20-29 Tech/Local Models & Benchmarking` and `90-99 Agents/Transient/vLLM vs Ollama Comparison`.
+This is a *capability* doc, not an implementation guide. For the developer-facing "how to add a new provider" walkthrough, see [PROVIDERS.md](PROVIDERS.md).
 
-The matrix reflects the system as of the vLLM peer-provider promotion (2026-04-30). Re-check when adding new providers, models, or modalities.
+The matrix reflects the system **as of the PR #44 upstream merge (2026-05-25)**, which dropped the `ollama` provider in favour of upstream's bundled `local` (llama.cpp / llama-server) provider, added an `mlx` provider, and routed cloud cogitate through a unified `openhands` façade. Re-check when adding new providers, models, or modalities.
+
+> **Fork-in-transition note.** Upstream's `local` bundle pins prebuilt `llama-server` binaries only for `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu` — there is **no `aarch64-unknown-linux-gnu` pin**, so the bundle cannot install on this fork's DGX Spark (GB10) yet. Until that pin lands, **vLLM remains the only working local backend on the Spark**, and is doing more than the "additive-features-only" role this matrix originally described. The migration that makes the `local` bundle the Spark's production engine (and demotes vLLM to an optional experimental module) is planned in the Obsidian note `90-99 Agents/Transient/llama.cpp Local Bundle Migration Plan`. Rows below mark **current** vs **planned** where they differ.
 
 
 # Why two tables
@@ -30,81 +32,95 @@ For each registered provider and model, what can it be used for. Marker key:
 
 ## Cloud providers (tier-routed, require API key + outbound network)
 
+Cogitate for all three cloud providers now runs through the **`openhands` façade** (`openhands-sdk` + LiteLLM), installed on-demand via `solstone/think/providers/bundled.py`. The registry maps `google`/`openai`/`anthropic` → `solstone.think.providers.openhands` for the agentic loop; `run_generate`/`run_agenerate` stay in the per-provider modules.
+
 | Provider | Text Gen | Cogitate | Vision in | Audio in | Embeddings | Notes |
 |----------|:--------:|:--------:|:---------:|:--------:|:----------:|-------|
-| Google Gemini (PRO / FLASH / LITE) | ✓ | ✓ (Gemini agent CLI) | ✓ (PIL Image native) | ✗ | ✓ (separate model) | Default for `generate` and `cogitate` per `TYPE_DEFAULTS`. Vision is best-in-class for the existing describe pipeline. |
-| OpenAI (GPT-5.4 + variants) | ✓ | ✓ (Codex CLI) | ✓ | ◐ (gpt-4o-audio family exists; not currently wired) | ✓ | Reasoning-effort suffix support (`-high`, `-low`, `-xhigh`). |
-| Anthropic (Claude Opus / Sonnet / Haiku 4.x) | ✓ | ✓ (`claude` CLI) | ✓ | ✗ | ✗ | Default `backup` provider for both `generate` and `cogitate`. No native embeddings surface. |
+| Google Gemini (PRO / FLASH / LITE) | ✓ | ✓ (openhands) | ✓ (PIL Image native) | ✗ | ✓ (separate model) | Default for `generate` and `cogitate` per `TYPE_DEFAULTS`. Vision is best-in-class for the existing describe pipeline. |
+| OpenAI (GPT-5.4 + variants) | ✓ | ✓ (openhands) | ✓ | ◐ (gpt-4o-audio family exists; not wired) | ✓ | Reasoning-effort suffix support (`-high`, `-low`, `-xhigh`). |
+| Anthropic (Claude Opus / Sonnet / Haiku 4.x) | ✓ | ✓ (openhands) | ✓ | ✗ | ✗ | Default `backup` provider for both `generate` and `cogitate`. No native embeddings surface. |
 
-## Local — Ollama (daemon, lazy-load, GGUF Q4_K_M defaults)
+## Local — llama.cpp bundle (`local`, GGUF over llama-server's OpenAI endpoint)
 
-| Model | Text Gen | Cogitate | Vision in | Audio in | Best fit / caveats |
-|-------|:--------:|:--------:|:---------:|:--------:|--------------------|
-| `ollama-local/qwen3.5:35b-a3b-bf16` (PRO) | ✓ | ✓ | ✗ | ✗ | `OLLAMA_PRO`. Heavy cogitate workloads (chat agent, daily briefing). 70 GB pinned when loaded. |
-| `ollama-local/qwen3.5:9b` (FLASH) | ✓ | ✓ | ✗ | ✗ | `OLLAMA_FLASH`. Workhorse for most talents. |
-| `ollama-local/qwen3.5:2b` (LITE) | ✓ | ✗ | ✗ | ✗ | `OLLAMA_LITE`. `models.json` notes "skip for cogitate" — too small for reliable tool-calling. |
-| `ollama-local/qwen2.5vl:7b` | ◐ (vision-anchored only) | ✗ | ✓ | ✗ | Vision tier for the screen-frame describe pipeline. |
-| `ollama-local/qwen2.5vl:32b` / `:72b` | ◐ | ✗ | ✓ | ✗ | Larger vision models. 72B is severely memory-bandwidth-bound on Spark per registry notes — 32B is ~2.3× faster. |
-
-## Local — vLLM (server-per-model, AWQ / bf16 / NVFP4 quants)
+Upstream's bundled local provider. Downloads a pinned `llama-server` binary (`solstone/think/providers/local_install.py`), lazily starts it (`local_server.py`), and serves GGUF weights. **Text-only in v1** — `local.py` explicitly raises `unsupported_capability` on vision and has no audio path. Platform support is the pinned-binary set; the Spark needs a fork-added CUDA pin (planned — see migration plan).
 
 | Model | Text Gen | Cogitate | Vision in | Audio in | Best fit / caveats |
 |-------|:--------:|:--------:|:---------:|:--------:|--------------------|
-| `vllm-local/qwen3.5:35b-a3b` (bf16) | ✓ | ◐ (mechanically verified Phase 5; not yet wired into `vllm.py::run_cogitate`) | ✗ | ✗ | `VLLM_PRO`. Same role as Ollama PRO. Use Ollama unless explicitly wanted. |
-| `vllm-local/qwen3.5:9b-awq` | ✓ | ◐ (same caveat) | ✗ | ✗ | `VLLM_FLASH`. ~5% slower or comparable to Ollama FLASH. **Caveat:** thinking-enabled accuracy can degrade up to 33% on reasoning tasks per kaitchup benchmarks (model thinks more, hits max-output). |
-| `vllm-local/qwen3.5:2b-awq` | ✓ | ✗ | ✗ | ✗ | `VLLM_LITE`. **Notably faster than Ollama equivalent on Spark** (+13% synth, −36% chat_reply). |
-| `vllm-local/qwen2.5vl:7b-awq` | ◐ | ✗ | ✓ | ✗ | Vision counterpart of Ollama qwen2.5vl:7b. ~5–15% faster on Spark at apples-to-apples quant. |
-| `vllm-local/nemotron-omni` (NVFP4) | ✓ | ◐ (untested with multimodal + tools combined) | ✓ | **✓** | **The only model with audio-input capability.** Also handles text + image in the same call. Video claimed by NVIDIA, untested by us. ~21 GB pinned. The reason vLLM is in the system at all. |
+| `local/qwen3-coder-30b-a3b-q4_k_m` (PRO) | ✓ | ✓ (openhands against local endpoint) | ✗ | ✗ | Upstream's current PRO default. Planned to be replaced by the NVIDIA-supported set (Qwen3.6-35B-A3B, etc.). |
+| `local/qwen2.5-coder-7b` (FLASH / LITE) | ✓ | ◐ | ✗ | ✗ | Upstream's current FLASH/LITE default. |
+| *planned:* Nemotron 3 Nano Omni, Qwen3.6-35B-A3B / 27B, Gemma 4 family | ✓ | ✓ | ◐ (image, via mtmd `--mmproj` — fork Phase C) | ◐ (audio, via mtmd — experimental, fork Phase C) | NVIDIA's Spark-supported GGUF matrix. Image/audio require extending the text-only `local` provider to multimodal content blocks + projector files. |
+
+Platform pins (`LLAMA_SERVER_PINS`): `aarch64-apple-darwin` ✓, `x86_64-unknown-linux-gnu` ✓ (CPU build), `aarch64-unknown-linux-gnu` (Spark/GB10) ✗ **planned** (fork-hosted CUDA build, sm_121 — do **not** build against CUDA 13.2: gibberish output for Nemotron per Unsloth).
+
+## Local — MLX (`mlx`, Apple Silicon only)
+
+Upstream's Apple-Silicon provider (mlx-vlm). Vision-capable. **Not applicable to this fork's Spark** (aarch64 Linux, not macOS) — listed for completeness.
+
+| Model | Text Gen | Cogitate | Vision in | Audio in | Best fit / caveats |
+|-------|:--------:|:--------:|:---------:|:--------:|--------------------|
+| `qwen3.5:9b-mlx-8bit` / `gemma-4-26b-...-mlx-4bit` | ✓ | ✗ (MLX has no cogitate) | ✓ | ✗ | macOS ARM64 + mlx-vlm only. Irrelevant on the Spark. |
+
+## Local — vLLM (`vllm`, server-per-model; **fork-only, transitional**)
+
+Fork-only provider. Server-per-model (AWQ / bf16 / NVFP4 quants), multimodal content blocks. **Currently the only working local backend on the Spark** (pending the `local` CUDA pin). Slated to be demoted to an optional spin-up/down experimental module once the `local` bundle covers text + image + audio on the Spark (migration plan, Phase D). Kept for what llama.cpp can't do: NVFP4 throughput and (theoretical) video.
+
+| Model | Text Gen | Cogitate | Vision in | Audio in | Best fit / caveats |
+|-------|:--------:|:--------:|:---------:|:--------:|--------------------|
+| `vllm-local/qwen3.5:35b-a3b` (bf16) | ✓ | ◐ (mechanically verified; `vllm.py::run_cogitate` not wired) | ✗ | ✗ | `VLLM_PRO`. |
+| `vllm-local/qwen3.5:9b-awq` | ✓ | ◐ (same caveat) | ✗ | ✗ | `VLLM_FLASH`. **Caveat:** thinking-enabled accuracy can degrade up to 33% on reasoning tasks per kaitchup benchmarks. |
+| `vllm-local/qwen3.5:2b-awq` | ✓ | ✗ | ✗ | ✗ | `VLLM_LITE`. Notably faster than the Ollama-era equivalent on Spark. |
+| `vllm-local/qwen2.5vl:7b-awq` | ◐ | ✗ | ✓ | ✗ | Vision tier for the describe pipeline on the Spark today. |
+| `vllm-local/nemotron-omni` (NVFP4) | ✓ | ◐ (untested with multimodal + tools combined) | ✓ | **✓** | The only currently-wired model with audio-input capability. Text + image too. Video claimed by NVIDIA, untested. The capability the fork's vLLM exists for — and the one Phase C aims to reproduce on llama.cpp. |
 
 ## In-process specialists (not LLM providers; no tier system)
 
 | Specialist | Role | Notes |
 |------------|------|-------|
-| `faster-whisper` (large-v3 / medium / etc.) | Audio transcription, live capture | Default `transcribe.backend`. Produces sentence-level `audio.jsonl` + sentence embeddings used by speaker-attribution flywheel. |
+| `faster-whisper` (large-v3 / medium / etc.) | Audio transcription, live capture | Default `transcribe.backend` on the Spark. Produces sentence-level `audio.jsonl` + sentence embeddings used by speaker-attribution flywheel. |
 | Parakeet TDT | Audio transcription, alternative | In-process (CoreML / linux-x86_64 ONNX). Deferred on aarch64 Spark per [Transcription Backend Architecture] (Obsidian). |
 | Rev.ai | Audio transcription, cloud import only | Used for imported audio paths only, not live capture. |
-| `wespeaker` (resnet34) | Per-sentence speaker voiceprint embeddings (256-dim) | The substrate for the voiceprint-learning flywheel. Purpose-built for speaker similarity; nemotron's audio encoder is not a substitute. |
+| `wespeaker` (resnet34) | Per-sentence speaker voiceprint embeddings (256-dim) | The substrate for the voiceprint-learning flywheel. Purpose-built for speaker similarity; an omni model's audio encoder is not a substitute. |
 | Resemblyzer | Speaker embeddings, older path | Some legacy paths use this; the wespeaker pipeline is the modern one. |
 | pyannote-audio | VAD / diarization | Sentence-boundary segmentation. |
-| Tesseract / PaddleOCR / pypdf / pdf2image | OCR + PDF text extraction | Document pipeline. nemotron-omni claims OCR capability but specialist tools are faster on the document workload. |
+| Tesseract / PaddleOCR / pypdf / pdf2image | OCR + PDF text extraction | Document pipeline. Specialist tools are faster on the document workload than an omni model's OCR. |
 | OpenCV (`cv2`) | Video frame extraction | Preprocessing for the screen describe pipeline. Not AI. |
 
 
 # Routing matrix: per layer/task → provider
 
-For each layer or task in Solstone's pipelines, this shows the providers wired today, the routing pattern (specialist vs tier-routed vs vLLM-only), and the graceful-degradation behavior if vLLM specifically is unavailable.
+For each layer or task, this shows the providers wired today and the graceful-degradation behavior. "Generate" / "Cogitate" rows are tier-routed via `think/models.py::TYPE_DEFAULTS` + `PROVIDER_DEFAULTS`; the configured local provider on the Spark is **vLLM today, the `local` bundle once its CUDA pin lands**.
 
 **Patterns:**
 
-- **Specialist** — one provider, by design; not pluggable per-call (e.g., `wespeaker` is the speaker-embedding implementation, period).
-- **Journal-pluggable** — journal config picks the provider per surface or per context; tier system handles fallback. Default routing in `think/models.py::TYPE_DEFAULTS` and `PROVIDER_DEFAULTS`.
-- **vLLM-only** — feature requires vLLM; absence of vLLM means the feature is unavailable (degrades gracefully — feature missing, rest of system intact).
+- **Specialist** — one provider, by design; not pluggable per-call.
+- **Journal-pluggable** — journal config picks the provider per surface or per context; tier system handles fallback.
+- **Local-only** — feature requires a local multimodal model; absence means the feature is unavailable (degrades gracefully).
 
-| Layer / Task | Provider(s) | Pattern | If vLLM down? |
-|--------------|-------------|---------|---------------|
-| Audio transcription (live capture) | `faster-whisper` (in-process) | specialist | unaffected |
+| Layer / Task | Provider(s) | Pattern | Degradation |
+|--------------|-------------|---------|-------------|
+| Audio transcription (live capture) | `faster-whisper` (in-process) | specialist | unaffected by LLM-provider state |
 | Audio transcription (import: Plaud / Rev.ai) | configured per journal | specialist | unaffected |
 | Speaker embedding | `wespeaker` (in-process) | specialist | unaffected |
 | Speaker attribution L1–L3 (acoustic) | in-process pipeline | specialist | unaffected |
-| Speaker attribution L4 (LLM fallback) | Generate (tier-routed) | journal-pluggable | unaffected — uses configured Generate provider |
-| Screen frame categorize | Generate w/ vision (tier-routed) | journal-pluggable | unaffected |
-| Screen frame extract (selected frames only) | Generate w/ vision (tier-routed) | journal-pluggable | unaffected |
-| Segment synthesis (sense, entities, todos, summary) | Generate (tier-routed) | journal-pluggable | unaffected |
-| Daily insights, muse generators | Generate (tier-routed) | journal-pluggable | unaffected |
-| Voice-brain (text response) | Generate (tier-routed) | journal-pluggable | unaffected |
-| Cogitate (chat agent, daily briefing, agent talents) | Cogitate (tier-routed via OpenCode); Ollama default | journal-pluggable | unaffected — Ollama keeps serving; vLLM via OpenCode is mechanically verified but not yet wired into `vllm.py::run_cogitate` |
+| Speaker attribution L4 (LLM fallback) | Generate (tier-routed) | journal-pluggable | uses configured Generate provider |
+| Screen frame categorize | Generate w/ vision (tier-routed) | journal-pluggable | needs a vision-capable provider (cloud, or vLLM on the Spark today) |
+| Screen frame extract (selected frames only) | Generate w/ vision (tier-routed) | journal-pluggable | same |
+| Segment synthesis (sense, entities, todos, summary) | Generate (tier-routed) | journal-pluggable | cloud or local text covers it |
+| Daily insights, muse generators | Generate (tier-routed) | journal-pluggable | same |
+| Voice-brain (text response) | Generate (tier-routed) | journal-pluggable | same |
+| Cogitate (chat agent, daily briefing, agent talents) | Cogitate (tier-routed; cloud via openhands, local via configured local provider) | journal-pluggable | cloud or local covers it |
 | OCR / PDF text extraction | Tesseract / pypdf / PaddleOCR (in-process) | specialist | unaffected |
 | Embeddings (search & similarity) | provider-specific or `nomic-embed-text` | specialist or journal-pluggable | unaffected |
-| Multimodal-augmented meeting summary (planned B/C feature) | `nemotron-omni` via vLLM | vLLM-only | feature unavailable; existing segment record intact |
-| Voice-brain audio-tone interpretation (planned B/C) | `nemotron-omni` via vLLM | vLLM-only (opt-in) | feature unavailable; voice-brain falls back to text-only |
-| Cross-modal search (planned B/C) | `nemotron-omni` via vLLM | vLLM-only (opt-in) | feature unavailable; standard FTS search keeps working |
+| Multimodal-augmented meeting summary (planned B/C feature) | audio-omni model (vLLM today; `local`/llama.cpp targeted) | local-only | feature unavailable; segment record intact |
+| Voice-brain audio-tone interpretation (planned B/C) | audio-omni model (opt-in) | local-only | feature unavailable; voice-brain falls back to text-only |
+| Cross-modal search (planned B/C) | audio-omni model (opt-in) | local-only | feature unavailable; FTS search keeps working |
 
-**Read:** Everything currently load-bearing is journal-pluggable or specialist. vLLM only appears as a critical path for new additive capabilities that didn't exist before. If vLLM is down, Solstone degrades feature-by-feature, never wholesale.
+**Read:** Everything currently load-bearing is journal-pluggable or specialist. Audio/omni features are additive — they go missing if the omni model is down, but the rest of the segment record stays intact.
 
 
-# vLLM multi-server config
+# vLLM multi-server config (current; fork-only)
 
-vLLM serves one model per process (no hot-swap), so production routing across multiple vLLM-served models requires multiple containers, each on its own port. Configure them in `journal.json → providers.vllm.servers` as a map from *friendly name* (the part after `vllm-local/` in a model id) to a server descriptor:
+While vLLM remains in the system, it serves one model per process (no hot-swap), so production routing across multiple vLLM-served models requires multiple containers, each on its own port. Configure them in `journal.json → providers.vllm.servers` as a map from *friendly name* (the part after `vllm-local/` in a model id) to a server descriptor:
 
 ```json
 {
@@ -125,26 +141,24 @@ vLLM serves one model per process (no hot-swap), so production routing across mu
 }
 ```
 
-When the provider receives a request for `vllm-local/<friendly>`, it strips the `vllm-local/` prefix to produce the friendly name, looks it up in `servers`, and uses the resolved `base_url` + `served_model_name`. `served_model_name` defaults to the friendly name when omitted.
+When the provider receives a request for `vllm-local/<friendly>`, it strips the `vllm-local/` prefix to produce the friendly name, looks it up in `servers`, and uses the resolved `base_url` + `served_model_name`. `served_model_name` defaults to the friendly name when omitted. When `providers.vllm.servers` is absent (or lacks a friendly name), the provider falls back to env-var single-server: `VLLM_BASE_URL` (default `http://localhost:8000`).
 
-When `providers.vllm.servers` is absent (or doesn't contain a given friendly name), the provider falls back to env-var single-server: `VLLM_BASE_URL` (default `http://localhost:8000`) with `served_model_name = friendly_name`. The legacy single-server behavior is preserved exactly.
+`list_models()` and `validate_key()` enumerate across all configured servers; `build_provider_status()` reports `configured: true` if any configured server is reachable and names each unreachable URL in `issues`.
 
-`list_models()` and `validate_key()` enumerate across all configured servers when present and report partial reachability cleanly. `build_provider_status()` reports `configured: true` if any configured server is reachable; the `issues` list names each unreachable URL.
+By contrast, the `local` bundle is single-server: `local_server.ensure_running()` manages one `llama-server` process and swaps models by restart, with the port tracked via `read_service_port("local")`.
 
 
 # Cross-cutting observations
 
-Three load-bearing facts to internalize when reasoning about which provider belongs where:
+Load-bearing facts when reasoning about which provider belongs where:
 
-1. **Audio input is genuinely vLLM-only.** Across every other provider — cloud or local — audio is either text-via-Whisper (specialist path, no fusion with other modalities) or not supported. `nemotron-omni` is the only ✓ for audio-in. Any feature that needs *audio understanding* (tone, non-speech sounds, acoustic context) goes through vLLM by necessity. This is the unique-value reason vLLM exists in Solstone.
+1. **Audio input is currently a single-model capability.** Across cloud and the text-only `local` bundle, audio is either text-via-Whisper (specialist path, no fusion with other modalities) or unsupported. `vllm-local/nemotron-omni` is the only ✓ for audio-in today. The migration plan aims to reproduce this on llama.cpp (Nemotron Omni GGUF via libmtmd `--mmproj`), but llama.cpp audio is flagged "highly experimental" — so audio is a validation gate, not a given.
 
-2. **Cogitate today still routes through Ollama** even though vLLM cogitate is mechanically verified. The ◐ marks on vLLM cogitate reflect that OpenCode-against-vLLM works (Phase 5 validation), but `vllm.py::run_cogitate` isn't wired yet. Small piece of code work whenever someone wants to land it as a real production-routable surface.
+2. **The text-only `local` provider is a v1 design choice, and a fork extension point.** Vision/audio on the bundle (Phase C) means porting the content-block plumbing already built for `vllm.py` into `local.py` — fork-only code, diverging from upstream's text-only `local`.
 
-3. **The cloud↔local fallback story is symmetric for text/vision/cogitate** but **asymmetric for audio.** Text/vision/cogitate failures degrade gracefully — if cloud is down, Ollama or vLLM cover it; if vLLM is down, cloud or Ollama cover it. But if vLLM is down and a feature relies on `nemotron-omni`'s audio understanding, that feature has no fallback — the closest substitute is "Whisper transcribes, Generate-tier LLM interprets the text," which loses the audio-direct capability the feature was using.
+3. **The cloud↔local fallback story is symmetric for text/cogitate, asymmetric for vision and audio on the Spark.** Text/cogitate degrade gracefully (cloud or local cover each other). Vision on the Spark currently needs vLLM or cloud (the `local` bundle is text-only and, until its CUDA pin, absent on the Spark). Audio understanding has no local fallback if the omni model is down — the closest substitute is "Whisper transcribes, Generate-tier LLM interprets the text," which loses the audio-direct capability.
 
-The third point is the architectural constraint that shapes where vLLM-only features should live: **opt-in additive capabilities** (the multimodal augmentation goes missing when vLLM is down, the rest of the segment record is intact) rather than **critical-path replacements** (where vLLM down = synthesis stalls = downstream features stall).
-
-This is also why segment synthesis stays on Generate-tier-routed providers, not on vLLM-served `nemotron-omni`. Segment processing is the substrate-producing pipeline that downstream features (speaker attribution flywheel, search index, timeline UI) depend on; it has to be available whenever Solstone is running.
+This is why audio/omni features should stay **opt-in additive capabilities** (missing when the omni model is down, rest of the segment record intact) rather than **critical-path replacements**. Segment synthesis stays on tier-routed Generate providers, not an omni model, because it's the substrate-producing pipeline that downstream features depend on — it has to be available whenever Solstone is running.
 
 
 # Related
@@ -152,9 +166,9 @@ This is also why segment synthesis stays on Generate-tier-routed providers, not 
 - [PROVIDERS.md](PROVIDERS.md) — implementation guide for adding a new provider.
 - [THINK.md](THINK.md) — module overview for `think/`.
 - `think/providers/__init__.py` — canonical `PROVIDER_REGISTRY` and `PROVIDER_METADATA`.
+- `think/providers/local.py`, `local_install.py`, `local_server.py` — the bundled llama.cpp provider.
 - `think/models.py` — tier constants, `PROVIDER_DEFAULTS`, `TYPE_DEFAULTS`, talent-context resolution.
 - `think/benchmark/models.json` — pre-vetted local models with measured tok/s and per-task wall-clock.
-- Obsidian: `20-29 Tech/Local Models & Benchmarking` — narrative companion covering tier mapping, journal-config patterns, and the benchmarking surface.
+- Obsidian: `90-99 Agents/Transient/llama.cpp Local Bundle Migration Plan` — the staged plan to move Spark production inference onto the `local` bundle and demote vLLM.
 - Obsidian: `20-29 Tech/Solstone AI Modalities Overview` — modality-by-modality inventory of Solstone's AI usage.
-- Obsidian: `90-99 Agents/Transient/vLLM Provider & Multimodal Benchmark Plan` — the full plan that produced the vLLM peer-provider integration.
-- Obsidian: `90-99 Agents/Transient/vLLM vs Ollama Comparison` — the replace-or-coexist analysis behind the current architecture.
+- Obsidian: `90-99 Agents/Transient/vLLM Provider & Multimodal Benchmark Plan` — how the vLLM provider was built (the content-block work Phase C reuses).
