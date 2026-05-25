@@ -86,6 +86,68 @@ def test_install_llama_server_writes_canonical_sequence(tmp_path, monkeypatch):
     assert "state" not in slot
 
 
+def test_install_llama_server_url_override(tmp_path, monkeypatch):
+    """A pin's explicit ``url`` overrides the default llama.cpp-releases URL.
+
+    Platforms with no upstream prebuilt (the fork's self-hosted aarch64-CUDA
+    Spark build) carry an explicit ``url``; without the override the bundle
+    would build a ggml-org URL that 404s for that artifact.
+    """
+    _init_journal(tmp_path, monkeypatch)
+    captured: dict[str, str] = {}
+
+    def _run_with_pin(pin: dict) -> None:
+        final_path = local_install.binary_path_for_pin("test-platform", pin)
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        final_path.write_text("binary", encoding="utf-8")
+        monkeypatch.setattr(
+            local_install, "llama_server_artifact_key", lambda: "test-platform"
+        )
+        monkeypatch.setattr(local_install, "pin_for_current_platform", lambda: pin)
+
+        def fake_download(url, _dest, **_kwargs):
+            captured["url"] = url
+
+        monkeypatch.setattr(local_install, "_download_file", fake_download)
+        monkeypatch.setattr(local_install, "_verify_sha256", lambda _p, _e: None)
+        monkeypatch.setattr(local_install, "_safe_extract_tarball", lambda _t, _d: None)
+        monkeypatch.setattr(
+            local_install, "_find_extracted_binary", lambda _d, _n: final_path
+        )
+        monkeypatch.setattr(local_install, "_chmod_executable", lambda _p: None)
+        monkeypatch.setattr(local_install, "_clear_macos_quarantine", lambda _p: None)
+        local_install.install_llama_server()
+
+    # No ``url`` → derived from the ggml-org releases location.
+    _run_with_pin(
+        {
+            "release_tag": "b9291",
+            "filename": "llama.tar.gz",
+            "sha256": "abc",
+            "binary_name": "llama-server",
+        }
+    )
+    assert captured["url"] == (
+        "https://github.com/ggml-org/llama.cpp/releases/download/b9291/llama.tar.gz"
+    )
+
+    # Explicit ``url`` → used verbatim (the fork's self-hosted Spark binary).
+    fork_url = (
+        "https://github.com/parkerhdavis/Solstone/releases/download/"
+        "spark-b9291/llama-server-spark.tar.gz"
+    )
+    _run_with_pin(
+        {
+            "release_tag": "spark-b9291",
+            "filename": "llama-server-spark.tar.gz",
+            "url": fork_url,
+            "sha256": "def",
+            "binary_name": "llama-server",
+        }
+    )
+    assert captured["url"] == fork_url
+
+
 def test_install_model_writes_canonical_sequence(tmp_path, monkeypatch):
     _init_journal(tmp_path, monkeypatch)
     spec = LOCAL_MODEL_SPECS[LOCAL_FLASH]

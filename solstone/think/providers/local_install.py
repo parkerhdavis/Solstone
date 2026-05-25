@@ -250,7 +250,10 @@ def _clear_macos_quarantine(path: Path) -> None:
 def install_llama_server() -> dict[str, Any]:
     artifact_key = llama_server_artifact_key()
     pin = pin_for_current_platform()
-    url = (
+    # A pin may carry an explicit ``url`` to override the default
+    # llama.cpp-releases location — needed for platforms with no upstream
+    # prebuilt (e.g. the fork's self-hosted aarch64-CUDA build for the Spark).
+    url = pin.get("url") or (
         "https://github.com/ggml-org/llama.cpp/releases/download/"
         f"{pin['release_tag']}/{pin['filename']}"
     )
