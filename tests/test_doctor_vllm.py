@@ -51,7 +51,9 @@ class TestVllmNvidiaSmi:
     def test_ok_when_nvidia_smi_lists_gpus(self, doctor_vllm, monkeypatch):
         from solstone.think import doctor
 
-        monkeypatch.setattr(doctor_vllm.shutil, "which", lambda name: "/usr/bin/nvidia-smi")
+        monkeypatch.setattr(
+            doctor_vllm.shutil, "which", lambda name: "/usr/bin/nvidia-smi"
+        )
         monkeypatch.setattr(
             doctor_vllm,
             "run_probe",
@@ -66,7 +68,9 @@ class TestVllmNvidiaSmi:
     def test_fail_when_no_gpu_lines(self, doctor_vllm, monkeypatch):
         from solstone.think import doctor
 
-        monkeypatch.setattr(doctor_vllm.shutil, "which", lambda name: "/usr/bin/nvidia-smi")
+        monkeypatch.setattr(
+            doctor_vllm.shutil, "which", lambda name: "/usr/bin/nvidia-smi"
+        )
         monkeypatch.setattr(
             doctor_vllm,
             "run_probe",

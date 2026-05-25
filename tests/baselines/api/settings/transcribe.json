@@ -9,39 +9,64 @@
     {
       "description": "Cloud-based transcription with speaker identification",
       "env_key": "GOOGLE_API_KEY",
+      "fallback": false,
       "label": "Gemini - Cloud with speaker diarization",
       "name": "gemini",
-      "settings": []
+      "settings": [],
+      "supported_hardware": [
+        "*"
+      ]
     },
     {
       "description": "Cloud-based transcription with speaker identification",
       "env_key": "REVAI_ACCESS_TOKEN",
+      "fallback": false,
       "label": "Rev.ai - Cloud with speaker diarization",
       "name": "revai",
       "settings": [
         "model"
+      ],
+      "supported_hardware": [
+        "*"
       ]
     },
     {
       "description": "Local speech recognition using faster-whisper",
       "env_key": null,
+      "fallback": true,
       "label": "Whisper - Local processing",
       "name": "whisper",
       "settings": [
         "device",
         "model",
         "compute_type"
+      ],
+      "supported_hardware": [
+        "*"
       ]
     },
     {
       "description": "On-device speech recognition via Parakeet TDT; macOS uses a FluidAudio/CoreML helper, Linux uses onnx-asr + onnxruntime. Requires `make install`.",
       "env_key": null,
+      "fallback": false,
       "label": "Parakeet - Local processing (Apple Silicon CoreML or Linux ONNX)",
       "name": "parakeet",
       "settings": [
         "model_version",
         "device",
         "timeout_sec"
+      ],
+      "supported_hardware": [
+        "rtx-4090",
+        "rtx-4080",
+        "rtx-4070-ti",
+        "rtx-4070",
+        "rtx-3090",
+        "rtx-3080",
+        "rtx-3070",
+        "a100-80gb",
+        "h100-80gb",
+        "cpu-only"
       ]
     }
   ],
@@ -62,6 +87,5 @@
       "device": "auto",
       "model": "medium.en"
     }
-  },
-  "runtime_label": "Linux ONNX (CPU fp32)"
+  }
 }

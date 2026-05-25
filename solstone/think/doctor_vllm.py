@@ -21,10 +21,10 @@ import urllib.request
 from pathlib import Path
 
 from solstone.think.doctor import (
+    ROOT,
     Args,
     Check,
     CheckResult,
-    ROOT,
     make_result,
     run_probe,
     unexpected_output_result,

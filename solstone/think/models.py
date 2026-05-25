@@ -760,7 +760,8 @@ def get_model_provider(model: str) -> str:
     Returns
     -------
     str
-        Provider name: "openai", "google", "anthropic", "local", or "unknown"
+        Provider name: "openai", "google", "anthropic", "local", "mlx",
+        "vllm", or "unknown"
     """
     model_lower = model.lower()
 
@@ -770,6 +771,9 @@ def get_model_provider(model: str) -> str:
         return "mlx"
     elif model_lower.startswith("local/"):
         return "local"
+    elif model_lower.startswith("vllm-local/"):
+        # Fork-only: vLLM local-inference models carry the vllm-local/ prefix.
+        return "vllm"
     elif model_lower.startswith("gpt"):
         return "openai"
     elif model_lower.startswith("gemini"):
@@ -830,7 +834,7 @@ def calc_token_cost(token_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if provider_id == "unknown":
             return None
 
-        if provider_id in {"local", "mlx"}:
+        if provider_id in {"local", "mlx", "vllm"}:
             return {
                 "total_cost": 0.0,
                 "input_cost": 0.0,

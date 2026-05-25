@@ -251,11 +251,14 @@ class TestMain:
         assert path != ""
         # root should NOT end with /journal — that's --path
         assert not path.endswith("/journal")
-        # should be a parent of the journal path
+        # should be a parent of the journal path. Match case-insensitively so a
+        # capitalized checkout dir (e.g. ~/Solstone) is accepted alongside
+        # solstone / solstone-journal / worktree layouts.
+        lower_path = path.lower()
         assert (
-            path.endswith("/solstone")
-            or "/solstone" in path
-            or path.endswith("/worktree")
+            lower_path.endswith("/solstone")
+            or "/solstone" in lower_path
+            or lower_path.endswith("/worktree")
         )
 
     def test_main_unknown_command_exits(self, monkeypatch):
