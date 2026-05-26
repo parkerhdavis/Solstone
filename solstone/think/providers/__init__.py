@@ -17,9 +17,8 @@ Available providers:
 - google: Google Gemini models
 - openai: OpenAI GPT models
 - anthropic: Anthropic Claude models
-- local: bundled on-device llama-server models
+- local: bundled on-device llama-server models (text + image)
 - mlx: MLX local Apple Silicon models
-- vllm: vLLM local server (multimodal: text + image + audio)
 """
 
 import logging
@@ -47,7 +46,6 @@ PROVIDER_REGISTRY: Dict[str, str] = {
     "anthropic": "solstone.think.providers.openhands",
     "local": "solstone.think.providers.local",
     "mlx": "solstone.think.providers.mlx",
-    "vllm": "solstone.think.providers.vllm",
 }
 
 # ---------------------------------------------------------------------------
@@ -85,14 +83,6 @@ PROVIDER_METADATA: Dict[str, Dict[str, Any]] = {
     "mlx": {
         "label": "MLX (Local, Apple Silicon)",
         "env_key": "",
-    },
-    "vllm": {
-        "label": "vLLM (Local)",
-        "env_key": "",
-        # cogitate via vLLM is deferred; OpenCode could in principle drive
-        # the OpenAI-compat endpoint but is unverified. Setting empty here
-        # leaves cogitate_ready=False until the cogitate path is wired up.
-        "cogitate_cli": "",
     },
 }
 
@@ -219,27 +209,6 @@ def build_provider_status(
                 "issues": issues,
             }
             continue
-        elif name == "vllm":
-            # Multi-server aware: ping every configured server (or the env-var
-            # fallback when no providers.vllm.servers config exists). Configured
-            # = at least one reachable; issues lists each unreachable URL so the
-            # operator can see which container needs attention. Falls through to
-            # the generic tail below, where the empty cogitate_cli leaves
-            # cogitate_ready=False (cogitate via vLLM is deferred).
-            import httpx
-
-            from solstone.think.providers.vllm import _all_configured_base_urls
-
-            urls = _all_configured_base_urls()
-            reachable: list[str] = []
-            for url in urls:
-                try:
-                    resp = httpx.get(f"{url}/v1/models", timeout=2)
-                    resp.raise_for_status()
-                    reachable.append(url)
-                except Exception:
-                    issues.append(f"vLLM not reachable at {url}")
-            configured = bool(reachable)
         elif name in {"google", "anthropic", "openai"}:
             from solstone.think.providers import bundled
 
@@ -333,41 +302,27 @@ def get_provider_models(provider: str) -> list[dict]:
 
 
 def list_installed_local_models() -> set[str]:
-    """Return the set of model IDs currently usable from local providers.
+    """Return the set of local-bundle model IDs whose weights are installed.
 
-    Queries vLLM (``/v1/models``). A model id appears in the returned set
-    only when vLLM is reachable *and* the model is currently being served
-    by the running vLLM instance. vLLM has no pull-on-demand; the model is
-    fixed to whatever ``--served-model-name`` was passed at server startup,
-    so a model not in this list requires a server restart, not a pull.
-
-    vLLM contributes silently when reachable; an unreachable provider is
-    debug-logged but not raised. Callers must still work when it is down.
+    Queries the bundled ``local`` provider: a model id appears only when its
+    GGUF (and, for vision models, its mmproj projector) is present in the local
+    cache. Failures are debug-logged, not raised; callers must work when the
+    provider is unavailable.
     """
     installed: set[str] = set()
 
-    # vLLM
     try:
-        from solstone.think.providers.vllm import _VLLM_LOCAL_PREFIX
-        from solstone.think.providers.vllm import _get_client as _vllm_client
+        from solstone.think.providers import local_install
+        from solstone.think.providers.local import LOCAL_MODEL_SPECS
 
-        try:
-            client = _vllm_client()
-            response = client.get("/v1/models", timeout=5.0)
-            response.raise_for_status()
-            for entry in response.json().get("data", []) or []:
-                served_id = entry.get("id")
-                if not isinstance(served_id, str):
-                    continue
-                # vLLM list_models prefixes ids on read; the raw /v1/models
-                # response carries unprefixed ids, so add the prefix here.
-                if not served_id.startswith(_VLLM_LOCAL_PREFIX):
-                    served_id = f"{_VLLM_LOCAL_PREFIX}{served_id}"
-                installed.add(served_id)
-        except Exception as exc:
-            logger.debug("vLLM /v1/models unreachable: %s", exc)
+        for model_id in LOCAL_MODEL_SPECS:
+            try:
+                if local_install.inspect_readiness(model_id)["model_installed"]:
+                    installed.add(model_id)
+            except Exception as exc:
+                logger.debug("local readiness check failed for %s: %s", model_id, exc)
     except ImportError:
-        logger.debug("vllm provider module unavailable")
+        logger.debug("local provider module unavailable")
 
     return installed
 

@@ -671,12 +671,6 @@ CHECKS: list[tuple[Check, Callable[[Args], CheckResult]]] = [
 for _feat_name in _features.FEATURES:
     CHECKS.append(_make_feature_check(_feat_name))
 
-# Fork-only vLLM advisory checks. Lives in a separate module so upstream
-# merges don't collide in the middle of this file.
-from solstone.think.doctor_vllm import VLLM_CHECKS  # noqa: E402
-
-CHECKS.extend(VLLM_CHECKS)
-
 CHECK_MAP = {check.name: check for check, _func in CHECKS}
 
 

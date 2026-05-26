@@ -26,4 +26,4 @@ Plain prompt text. The harness reads the file and uses it as the user message fo
 
 ### Why WAV instead of FLAC
 
-WAV is universally accepted by every audio backend we benchmark (Whisper, Parakeet, vLLM-served Nemotron Omni) without extra codec deps. The ~1 MB-per-fixture cost is acceptable for the small number of audio fixtures we expect to accumulate. If we ever hit a repo-size threshold we'll re-encode to FLAC and update both the fixtures and the harness's `audio_format` argument together.
+WAV is universally accepted by every audio backend we benchmark (Whisper, Parakeet) without extra codec deps. The ~1 MB-per-fixture cost is acceptable for the small number of audio fixtures we expect to accumulate. If we ever hit a repo-size threshold we'll re-encode to FLAC and update both the fixtures and the harness's `audio_format` argument together.

@@ -1050,8 +1050,8 @@ def get_benchmark_models() -> Any:
 
     rows = list_prevetted_models(hardware)
 
-    # Attach installed flag. Queries vLLM /v1/models; an unreachable
-    # provider contributes nothing (its rows stay installed=False).
+    # Attach installed flag from the local bundle's cache; models whose
+    # weights aren't installed stay installed=False.
     from solstone.think.providers import list_installed_local_models
 
     installed_ids = list_installed_local_models()

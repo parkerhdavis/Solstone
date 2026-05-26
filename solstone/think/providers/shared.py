@@ -18,13 +18,12 @@ A user message's ``content`` field can be either:
 2. A list of ContentBlock dicts: ``TextBlock``, ``ImageBlock``, or
    ``AudioBlock``.
 
-Provider modules translate the second form into their wire format. Ollama
-extracts ``ImageBlock`` data into the per-message ``images`` array and
-concatenates ``TextBlock`` text; ``AudioBlock`` is unsupported. vLLM (and
-other OpenAI-compatible endpoints) pass the blocks through as
-``image_url`` / ``input_audio`` content blocks. Providers that cannot
-serve a given modality must raise ``NotImplementedError`` with a clear
-message.
+Provider modules translate the second form into their wire format.
+OpenAI-compatible endpoints (the bundled ``local`` llama-server, the cloud
+providers) pass the blocks through as ``image_url`` / ``input_audio`` content
+blocks. Providers that cannot serve a given modality must raise a clear
+``unsupported_capability`` error (the bundled local provider does this for
+audio, which runs through Whisper instead).
 """
 
 from __future__ import annotations
@@ -544,8 +543,8 @@ def safe_raw(
 #                  audio_format="wav", max_output_tokens) -> BenchmarkResult
 #       Send one synchronous benchmark request and return a normalized
 #       BenchmarkResult. The provider is responsible for any provider-
-#       specific request shaping (Ollama caps num_ctx; vLLM relies on
-#       max_model_len set at serve time; etc.).
+#       specific request shaping (e.g. the local bundle disables prompt
+#       caching so the prompt-eval rate is real, not cache-skewed).
 #
 # The harness owns the *policy* (which prompts, which media, when to run)
 # and the providers own the *transport* (how to reach the model and
@@ -558,9 +557,9 @@ class BenchmarkResult(TypedDict, total=False):
 
     ``elapsed_s`` is wall-clock around the provider's HTTP round-trip.
     ``native_output_tok_s`` / ``native_prompt_tok_s`` are the provider's
-    own server-side counters when available (Ollama reports nanosecond
-    eval durations; vLLM does not). Harness reporting prefers native when
-    present and falls back to ``output_tokens / elapsed_s`` otherwise.
+    own server-side counters when available (the bundled local provider
+    reads llama-server's per-request ``timings``). Harness reporting prefers
+    native when present and falls back to ``output_tokens / elapsed_s``.
     """
 
     elapsed_s: Required[float]
