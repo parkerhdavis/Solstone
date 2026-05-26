@@ -138,6 +138,14 @@ def model_path(model_id: str) -> Path:
     return model_dir(spec.model_id) / spec.filename
 
 
+def projector_path(model_id: str) -> Path | None:
+    """Path to the model's mmproj projector GGUF, or None for text-only models."""
+    spec = LOCAL_MODEL_SPECS[normalize_model_id(model_id)]
+    if not spec.mmproj_filename:
+        return None
+    return model_dir(spec.model_id) / spec.mmproj_filename
+
+
 def _read_local_status() -> InstallStatus:
     return read_install_status(scope="bundled", name=LOCAL_PROVIDER_NAME)
 
@@ -325,16 +333,32 @@ def install_model(model_id: str = LOCAL_FLASH) -> dict[str, Any]:
     url = f"https://huggingface.co/{spec.repo}/resolve/{spec.revision}/{spec.filename}"
     dest = model_path(spec.model_id)
 
+    mmproj_dest = (
+        model_dir(spec.model_id) / spec.mmproj_filename
+        if spec.mmproj_filename
+        else None
+    )
+
     try:
         _write_local_status(
             transition_state(_read_local_status(), new_state="downloading")
         )
         _write_local_metadata({"model_id": spec.model_id})
         _download_file(url, dest, on_progress=_record_local_progress)
+        # Vision models ship an mmproj projector alongside the main weights;
+        # download it in the same phase so the model is usable in one pass.
+        if spec.mmproj_filename and mmproj_dest is not None:
+            mmproj_url = (
+                f"https://huggingface.co/{spec.repo}/resolve/"
+                f"{spec.revision}/{spec.mmproj_filename}"
+            )
+            _download_file(mmproj_url, mmproj_dest, on_progress=_record_local_progress)
         _write_local_status(
             transition_state(_read_local_status(), new_state="verifying")
         )
         _verify_sha256(dest, spec.sha256)
+        if mmproj_dest is not None and spec.mmproj_sha256:
+            _verify_sha256(mmproj_dest, spec.mmproj_sha256)
         _write_local_metadata(
             {
                 "model_id": spec.model_id,
@@ -378,14 +402,19 @@ def inspect_readiness(model_id: str | None = None) -> dict[str, Any]:
     spec = LOCAL_MODEL_SPECS[selected_model]
     binary_path = Path(record.get("binary_path") or binary_path_for_pin())
     gguf_path = Path(record.get("model_path") or model_path(selected_model))
+    proj_path = projector_path(selected_model)
+    # A vision model isn't fully installed without its projector.
+    projector_installed = proj_path is None or proj_path.exists()
     ram_sufficient = _ram_sufficient(spec)
     return {
         "install_state": status["install_state"],
         "binary_installed": binary_path.exists() and os.access(binary_path, os.X_OK),
-        "model_installed": gguf_path.exists(),
+        "model_installed": gguf_path.exists() and projector_installed,
+        "projector_installed": projector_installed,
         "ram_sufficient": ram_sufficient,
         "binary_path": str(binary_path),
         "model_path": str(gguf_path),
+        "projector_path": str(proj_path) if proj_path is not None else None,
         "model_id": selected_model,
         "install_error": status["install_error"],
     }
@@ -414,6 +443,7 @@ __all__ = [
     "pin_for_current_platform",
     "binary_path_for_pin",
     "model_path",
+    "projector_path",
     "install_llama_server",
     "install_model",
     "install_local",

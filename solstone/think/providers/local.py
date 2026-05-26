@@ -17,10 +17,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from solstone.think.models import LOCAL_FLASH, LOCAL_LITE, LOCAL_PRO
-from solstone.think.providers._image import is_image_part
 from solstone.think.providers.shared import (
     BenchmarkResult,
     GenerateResult,
+    _is_content_block_list,
     classify_provider_error,
     safe_raw,
 )
@@ -29,6 +29,12 @@ LOG = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = 120.0
 _LOCAL_PREFIX = "local/"
+
+
+# Fork-only model id for the experimental omni model (vision on the bundle;
+# audio stays on Whisper — llama-server b9291 rejects Nemotron audio input,
+# see the Phase C spike in the migration plan).
+LOCAL_OMNI = "local/nemotron-3-nano-omni"
 
 
 @dataclass(frozen=True)
@@ -40,6 +46,16 @@ class LocalModelSpec:
     sha256: str
     size_bytes: int
     min_ram_bytes: int
+    # Multimodal projector (mmproj) for vision-capable models; None for
+    # text-only. When set, local_install downloads it alongside the main GGUF
+    # and local_server passes --mmproj at launch (libmtmd vision path).
+    mmproj_filename: str | None = None
+    mmproj_sha256: str | None = None
+    mmproj_size_bytes: int = 0
+
+    @property
+    def supports_vision(self) -> bool:
+        return bool(self.mmproj_filename)
 
 
 LOCAL_MODEL_SPECS: dict[str, LocalModelSpec] = {
@@ -60,6 +76,21 @@ LOCAL_MODEL_SPECS: dict[str, LocalModelSpec] = {
         sha256="ab4fc2b27b2043483a9e346c802809dfbe9b775efbeea7ca74dc2fd1aa4a0f71",
         size_bytes=18_556_688_704,
         min_ram_bytes=32 * 1024**3,
+    ),
+    # Fork-only: NVIDIA Nemotron 3 Nano Omni (Q8_0) + its vision mmproj, from
+    # ggml-org. Vision-capable on the bundle; audio is NOT wired (llama-server
+    # b9291 returns "audio input is not supported" — audio stays on Whisper).
+    LOCAL_OMNI: LocalModelSpec(
+        model_id=LOCAL_OMNI,
+        repo="ggml-org/NVIDIA-Nemotron-3-Nano-Omni",
+        filename="nemotron-3-nano-omni-ga_v1.0-Q8_0.gguf",
+        revision="main",
+        sha256="98e5cbdb3cb9bd172ddfeb164edb3fea049364750eea2fc20d1011e640748571",
+        size_bytes=33_585_495_872,
+        min_ram_bytes=48 * 1024**3,
+        mmproj_filename="mmproj-nemotron-3-nano-omni-ga_v1.0.gguf",
+        mmproj_sha256="797d096c07c80a5d49ec3793b6d96889fa394a1207e0aa558effebde6928c2a9",
+        mmproj_size_bytes=1_587_540_672,
     ),
 }
 
@@ -88,43 +119,96 @@ def normalize_model_id(model: str | None) -> str:
     return model_id
 
 
-def _contains_image(value: Any) -> bool:
-    if is_image_part(value):
-        return True
-    if isinstance(value, dict):
-        return any(_contains_image(item) for item in value.values())
-    if isinstance(value, list | tuple):
-        return any(_contains_image(item) for item in value)
-    return False
+def _translate_content_blocks(
+    content: list[dict[str, Any]], *, supports_vision: bool
+) -> list[dict[str, Any]]:
+    """Translate Solstone ContentBlocks into llama-server OpenAI-compat entries.
+
+    TextBlock  -> {"type": "text", "text": ...}
+    ImageBlock -> {"type": "image_url", "image_url": {"url": "data:<mime>;base64,..."}}
+
+    Images require a vision-capable model (one with an mmproj projector); on a
+    text-only model they raise ``unsupported_capability``. AudioBlock always
+    raises: llama-server b9291 rejects Nemotron audio input ("audio input is
+    not supported"), so audio stays on the Whisper STT pipeline (Phase C spike).
+    """
+    out: list[dict[str, Any]] = []
+    for block in content:
+        btype = block.get("type")
+        if btype == "text":
+            out.append({"type": "text", "text": block.get("text", "")})
+        elif btype == "image":
+            if not supports_vision:
+                raise LocalProviderError(
+                    "unsupported_capability",
+                    "Image input requires a vision-capable local model "
+                    "(one with an mmproj projector, e.g. local/nemotron-3-nano-omni).",
+                )
+            data = block.get("data")
+            if not data:
+                raise LocalProviderError(
+                    "provider_request_invalid",
+                    "ImageBlock missing 'data' (base64-encoded bytes).",
+                )
+            mime = block.get("mime") or "image/jpeg"
+            out.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{data}"},
+                }
+            )
+        elif btype == "audio":
+            raise LocalProviderError(
+                "unsupported_capability",
+                "The local bundle does not support audio input (llama-server "
+                "rejects it for this model); audio runs through Whisper STT.",
+            )
+        else:
+            raise LocalProviderError(
+                "provider_request_invalid", f"Unknown content-block type: {btype!r}"
+            )
+    return out
 
 
 def _build_messages(
     contents: str | list[Any],
     system_instruction: str | None = None,
-) -> list[dict[str, str]]:
-    if _contains_image(contents):
-        raise LocalProviderError(
-            "unsupported_capability",
-            "Local provider does not support vision inputs in v1.",
-        )
-
-    messages: list[dict[str, str]] = []
+    *,
+    supports_vision: bool = False,
+) -> list[dict[str, Any]]:
+    messages: list[dict[str, Any]] = []
     if system_instruction:
         messages.append({"role": "system", "content": system_instruction})
 
     if isinstance(contents, str):
         messages.append({"role": "user", "content": contents})
+    elif _is_content_block_list(contents):
+        messages.append(
+            {
+                "role": "user",
+                "content": _translate_content_blocks(
+                    contents, supports_vision=supports_vision
+                ),
+            }
+        )
     elif isinstance(contents, list):
         if contents and isinstance(contents[0], dict) and "role" in contents[0]:
             for item in contents:
                 role = str(item.get("role", "user"))
                 content = item.get("content", "")
-                if not isinstance(content, str):
-                    raise LocalProviderError(
-                        "unsupported_capability",
-                        "Local provider supports text message content only in v1.",
+                if _is_content_block_list(content):
+                    messages.append(
+                        {
+                            "role": role,
+                            "content": _translate_content_blocks(
+                                content, supports_vision=supports_vision
+                            ),
+                        }
                     )
-                messages.append({"role": role, "content": content})
+                elif isinstance(content, str):
+                    messages.append({"role": role, "content": content})
+                else:
+                    messages.append({"role": role, "content": str(content)})
         else:
             messages.append(
                 {"role": "user", "content": "\n".join(str(item) for item in contents)}
@@ -218,7 +302,11 @@ def run_generate(
     from solstone.think.providers import local_server
 
     model_id = normalize_model_id(model)
-    messages = _build_messages(contents, system_instruction)
+    messages = _build_messages(
+        contents,
+        system_instruction,
+        supports_vision=LOCAL_MODEL_SPECS[model_id].supports_vision,
+    )
     server = local_server.ensure_running(model_id)
     body = _build_request_body(
         model_id,
