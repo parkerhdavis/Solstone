@@ -8786,13 +8786,13 @@ function primaryTaskForTier(model, role) {
   return candidates[0] ? { id: candidates[0][0], ...candidates[0][1] } : null;
 }
 
-// CSS/DOM names retain the "ollama" prefix for cherry-pick simplicity, but
-// these renderers now serve any local provider (ollama or vllm). The data is
-// already provider-agnostic — model rows are filtered by model_id prefix to
-// match the type's currently-selected provider.
+// CSS/DOM names retain the legacy "ollama" prefix for cherry-pick simplicity.
+// (The ollama recommendations UI below is vestigial — ollama was removed
+// upstream in PR #44 — but left intact here; it's gated on an 'ollama'
+// provider that no longer exists, so it simply never renders.) Model rows are
+// filtered by model_id prefix to match the type's currently-selected provider.
 const LOCAL_PROVIDER_PREFIXES = {
   ollama: 'ollama-local/',
-  vllm: 'vllm-local/',
 };
 
 function renderOllamaDetailsFor(type) {
@@ -8916,10 +8916,8 @@ function renderRecommendedSection() {
   const list = document.getElementById('ollamaRecommendedList');
   if (!section || !list || !benchmarkData) return;
 
-  // Only show recommendations when ollama is selected anywhere. vLLM
-  // recommendations are out of scope here — installing a vLLM model means
-  // editing providers.vllm.servers in journal config, not a one-line `ollama
-  // pull`, so it needs a different UX surface.
+  // Only show recommendations when ollama is selected anywhere (vestigial —
+  // ollama no longer exists as a provider, so this never renders).
   const providers = [
     document.getElementById('field-generate-provider')?.value,
     document.getElementById('field-cogitate-provider')?.value,
@@ -8930,7 +8928,7 @@ function renderRecommendedSection() {
   }
 
   // Filter to ollama-local rows only — the install command below is hardcoded
-  // to `ollama pull <name>`, which is wrong for vllm-local rows.
+  // to `ollama pull <name>`.
   const ollamaPrefix = LOCAL_PROVIDER_PREFIXES.ollama;
   const notInstalled = (benchmarkData.models || []).filter(
     m => !m.installed && m.model_id.startsWith(ollamaPrefix)

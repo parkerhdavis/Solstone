@@ -422,10 +422,9 @@ def validate_key(provider: str = "local", api_key: str = "") -> dict[str, Any]:
 def bench_ensure_installed(model: str, *, allow_pull: bool) -> None:
     """Ensure the bundled binary + GGUF for ``model`` are installed for benchmarking.
 
-    Unlike vLLM (one model pinned per server, no pull), the local bundle
-    supports pull-on-demand: when ``allow_pull`` is set, any missing artifact
-    is downloaded via the bundle's installer. Raises SystemExit with
-    remediation guidance when something is missing and pulling is disabled.
+    The local bundle supports pull-on-demand: when ``allow_pull`` is set, any
+    missing artifact is downloaded via the bundle's installer. Raises SystemExit
+    with remediation guidance when something is missing and pulling is disabled.
     """
     from solstone.think.providers import local_install
 

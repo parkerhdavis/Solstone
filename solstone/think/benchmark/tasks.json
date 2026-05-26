@@ -103,7 +103,7 @@
     },
     "audio_transcribe": {
       "label": "Audio transcribe",
-      "description": "Verbatim transcription of a 30s speech clip via a multimodal LLM. Comparable to Whisper/Parakeet ASR for speed; uniquely exercises the audio-input modality of vLLM-served omni models. Audio encoder ~380 tokens per 30s, text prompt adds ~25.",
+      "description": "Verbatim transcription of a 30s speech clip via a multimodal LLM. Comparable to Whisper/Parakeet ASR for speed; exercises the audio-input modality of omni models. Audio encoder ~380 tokens per 30s, text prompt adds ~25. (No current local provider accepts audio input — the bundled llama-server rejects it — so this task is unbenchmarked on the bundle.)",
       "prompt_tokens": 406,
       "output_tokens": 120,
       "mode": "audio",

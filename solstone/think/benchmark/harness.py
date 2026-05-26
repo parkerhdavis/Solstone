@@ -147,19 +147,16 @@ def _resolve_provider(model: str) -> ModuleType:
     """Resolve the provider module for a given model id.
 
     Routes by prefix:
-        ``local/...``      -> ``solstone.think.providers.local`` (bundled llama-server)
-        ``vllm-local/...`` -> ``solstone.think.providers.vllm``
+        ``local/...`` -> ``solstone.think.providers.local`` (bundled llama-server)
 
     Raises SystemExit with a clear message for unknown prefixes so the
     harness fails fast rather than reaching some half-implemented path.
     """
     if model.startswith("local/"):
         return importlib.import_module("solstone.think.providers.local")
-    if model.startswith("vllm-local/"):
-        return importlib.import_module("solstone.think.providers.vllm")
     raise SystemExit(
         f"Cannot resolve benchmark provider for model id: {model!r}. "
-        f"Expected a 'local/' or 'vllm-local/' prefix."
+        f"Expected a 'local/' prefix."
     )
 
 
@@ -169,8 +166,8 @@ def _load_audio_b64(audio_fixture: str | None) -> tuple[str, str]:
     ``audio_fixture`` is a filename relative to ``_FIXTURES_DIR`` (e.g.
     ``audio_30s.wav``). ``None`` means "use the default fixture." The
     return ``format`` is the file extension lowercased without the dot,
-    matching what vLLM's ``input_audio.format`` field expects (``wav``,
-    ``flac``, ``mp3``, etc.).
+    matching the OpenAI ``input_audio.format`` field (``wav``, ``flac``,
+    ``mp3``, etc.).
     """
     name = audio_fixture or _DEFAULT_AUDIO_FIXTURE
     path = _FIXTURES_DIR / name
@@ -259,12 +256,12 @@ def ensure_installed(model: str, *, allow_pull: bool) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Benchmark a local model (bundled llama-server or vLLM)."
+        description="Benchmark a bundled local (llama-server) model."
     )
     parser.add_argument(
         "--model",
         help=(
-            "Model ID, e.g. local/qwen2.5-coder-7b or vllm-local/qwen3.5:9b-awq. "
+            "Model ID, e.g. local/qwen2.5-coder-7b. "
             "Required unless --transcriber is set."
         ),
     )
@@ -279,8 +276,7 @@ def main() -> int:
         action="store_true",
         help=(
             "Request an install if the model is not already available. "
-            "Pulls the GGUF via the bundle for local/ models; no-op for vLLM, "
-            "which pins one model per server at startup."
+            "Pulls the GGUF (and any mmproj) via the bundle for local/ models."
         ),
     )
     parser.add_argument(
@@ -299,8 +295,8 @@ def main() -> int:
             "Audio mode: include the default audio fixture (audio_30s.wav, a "
             "30s LibriVox PD speech clip) in the prompt. Use for omni models "
             "so prompt-eval captures audio-encoder cost. Auto-enabled when "
-            "--task specifies an audio-mode task. Provider must support "
-            "audio (currently vLLM-served omni models)."
+            "--task specifies an audio-mode task. Requires a provider that "
+            "accepts audio input (the bundled local provider does not)."
         ),
     )
     parser.add_argument(
@@ -351,8 +347,7 @@ def _bench_tok_s(result: BenchmarkResult) -> tuple[float, float]:
     native is missing — and leaves prompt_tok_s at 0.0 in that case, since
     wall-clock prompt-eval rate would conflate prefill with decode and
     report a misleading number. Providers that lack native prompt-eval
-    timing (e.g. vLLM) will need a separate measurement pass for prompt
-    rate.
+    timing will need a separate measurement pass for prompt rate.
     """
     elapsed = result.get("elapsed_s") or 0.0
     output_tokens = result.get("output_tokens") or 0

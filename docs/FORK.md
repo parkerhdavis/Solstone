@@ -2,7 +2,15 @@
 
 This document tracks significant changes made on this fork of Solstone.
 
+## ✂️ vLLM Provider Removed — Local Bundle Migration (Phase D)
+
+**Removed (2026-05-25).** The fork-only vLLM provider and all its tooling were deleted, completing the migration to upstream's bundled `local` (llama-server) provider as the Spark's production local backend. The `local` bundle now covers production locally — **text + image** (Phase A CUDA pin for the GB10; Phase C Nemotron 3 Nano Omni image via `--mmproj`) — with **audio on the Whisper STT pipeline** (llama-server rejects Nemotron audio input; see the migration plan). vLLM no longer had a production role, was the single largest source of fork↔upstream merge friction, and its remaining capabilities (NVFP4 throughput, unified video) were speculative — git history preserves it if ever resurrected.
+
+Production routing (`generate`/`cogitate`) was repointed from `vllm` → `local` primary first, then the provider was stripped: `solstone/think/providers/vllm.py`, `solstone/apps/vllm/`, `solstone/think/doctor_vllm.py` (+ its `doctor.py` wire-in) and `tests/test_doctor_vllm.py`; the `VLLM_*` constants + `PROVIDER_DEFAULTS["vllm"]` (`models.py`), `supervisor.start_vllm_servers` + `--no-vllm`, the `PROVIDER_REGISTRY`/`PROVIDER_METADATA` entry, the benchmark harness's vLLM branch, and the settings-UI prefix/recommendation bits. `list_installed_local_models()` now queries the local bundle's cache instead of a vLLM server. Full rationale in the Obsidian `llama.cpp Local Bundle Migration Plan`.
+
 ## 🪡 vLLM (Local) Provider — Multimodal Local Inference
+
+> **Superseded — the vLLM provider was removed in Phase D (see the entry above). The section below is retained as historical changelog of when it was added.**
 
 ![AI Providers settings tab showing Generate routed to vLLM (Local) at the Fast/Lightweight tier with Ollama as backup. Benchmark card reads "Qwen 3.5 2B (AWQ-Int4) — vLLM-served (LITE-tier promotable)" with a "not installed" badge and "98 tok/s measured" — the same per-tier details panel that was previously Ollama-only.](../.github/vllm-provider-add-2026-04-30.png)
 

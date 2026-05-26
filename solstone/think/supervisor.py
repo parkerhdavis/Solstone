@@ -1264,24 +1264,6 @@ def start_link_server() -> RunnerManagedProcess:
     return _launch_process("link", cmd, restart=True)
 
 
-def start_vllm_servers() -> list[RunnerManagedProcess]:
-    """Launch one supervised process per configured vLLM server.
-
-    Reads ``providers.vllm.servers`` from journal config; returns an empty
-    list when the section is absent so this is a no-op for installs that
-    don't run a local vLLM. Each server gets its own ``vllm-<name>``
-    managed process running ``sol call vllm serve --name <name>``.
-    """
-    from solstone.think.utils import get_config
-
-    servers = get_config().get("providers", {}).get("vllm", {}).get("servers", {}) or {}
-    procs: list[RunnerManagedProcess] = []
-    for name in sorted(servers):
-        cmd = ["sol", "call", "vllm", "serve", "--name", name, "-v"]
-        procs.append(_launch_process(f"vllm-{name}", cmd, restart=True))
-    return procs
-
-
 def start_convey_server(
     verbose: bool, debug: bool = False, port: int = 0
 ) -> tuple[RunnerManagedProcess, int]:
@@ -1811,11 +1793,6 @@ def parse_args() -> argparse.ArgumentParser:
         help="Do not start the link tunnel service",
     )
     parser.add_argument(
-        "--no-vllm",
-        action="store_true",
-        help="Do not start any configured vLLM server containers",
-    )
-    parser.add_argument(
         "--no-convey",
         action="store_true",
         help="Do not start the Convey web application",
@@ -2051,13 +2028,6 @@ def main() -> None:
         if not args.no_link:
             print("  Starting link...", flush=True)
             procs.append(start_link_server())
-        # vLLM containers — one per configured providers.vllm.servers entry;
-        # no-op when nothing is configured (opt-out via --no-vllm)
-        if not args.no_vllm:
-            vllm_procs = start_vllm_servers()
-            for vp in vllm_procs:
-                print(f"  Starting {vp.name}...", flush=True)
-            procs.extend(vllm_procs)
 
     # Make procs accessible to restart handler
     _managed_procs = procs

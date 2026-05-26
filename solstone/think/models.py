@@ -156,17 +156,6 @@ MLX_PRO = QWEN_35_9B
 MLX_FLASH = QWEN_35_9B
 MLX_LITE = QWEN_35_9B
 
-# vLLM tier defaults — same Qwen 3.5 family as Ollama, picked for apples-to-apples
-# quant parity (bf16 for the MoE, AWQ-Int4 from cyankiwi for the dense models).
-# Not the system-default provider; opt in via journal config:
-#   "providers": {"cogitate": {"provider": "vllm", "tier": 1}}
-# See ~/Obsidian/.../20-29 Tech/Local Models & Benchmarking for the full story
-# and 90-99 Agents/Transient/vLLM vs Ollama Comparison.md for the rationale.
-VLLM_PRO = "vllm-local/qwen3.5:35b-a3b"
-VLLM_FLASH = "vllm-local/qwen3.5:9b-awq"
-VLLM_LITE = "vllm-local/qwen3.5:2b-awq"
-
-
 # Per-model request parameter capability overrides.
 # Anthropic reasoning-model temperature deprecation: Opus 4.7 rejects temperature.
 # Canonical error string: 'temperature' is deprecated for this model.
@@ -209,11 +198,6 @@ PROVIDER_DEFAULTS: Dict[str, Dict[int, str]] = {
         TIER_PRO: MLX_PRO,
         TIER_FLASH: MLX_FLASH,
         TIER_LITE: MLX_LITE,
-    },
-    "vllm": {
-        TIER_PRO: VLLM_PRO,
-        TIER_FLASH: VLLM_FLASH,
-        TIER_LITE: VLLM_LITE,
     },
 }
 
@@ -775,7 +759,7 @@ def get_model_provider(model: str) -> str:
     -------
     str
         Provider name: "openai", "google", "anthropic", "local", "mlx",
-        "vllm", or "unknown"
+        or "unknown"
     """
     model_lower = model.lower()
 
@@ -785,9 +769,6 @@ def get_model_provider(model: str) -> str:
         return "mlx"
     elif model_lower.startswith("local/"):
         return "local"
-    elif model_lower.startswith("vllm-local/"):
-        # Fork-only: vLLM local-inference models carry the vllm-local/ prefix.
-        return "vllm"
     elif model_lower.startswith("gpt"):
         return "openai"
     elif model_lower.startswith("gemini"):
@@ -848,7 +829,7 @@ def calc_token_cost(token_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if provider_id == "unknown":
             return None
 
-        if provider_id in {"local", "mlx", "vllm"}:
+        if provider_id in {"local", "mlx"}:
             return {
                 "total_cost": 0.0,
                 "input_cost": 0.0,
