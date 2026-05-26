@@ -37,7 +37,11 @@ def test_local_model_prefix_maps_to_provider():
 def test_local_model_specs():
     provider = _provider()
 
-    assert set(provider.LOCAL_MODEL_SPECS) == {LOCAL_FLASH, LOCAL_PRO}
+    assert set(provider.LOCAL_MODEL_SPECS) == {
+        LOCAL_FLASH,
+        LOCAL_PRO,
+        provider.LOCAL_OMNI,
+    }
     lite = provider.LOCAL_MODEL_SPECS[LOCAL_FLASH]
     pro = provider.LOCAL_MODEL_SPECS[LOCAL_PRO]
     assert lite.repo == "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF"
@@ -46,11 +50,17 @@ def test_local_model_specs():
         == "509287f78cb4d4cf6b3843734733b914b2c158e43e22a7f4bf5e963800894d3c"
     )
     assert lite.min_ram_bytes == 12 * 1024**3
+    assert lite.supports_vision is False
     assert pro.repo == "giladgd/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M-GGUF"
     assert (
         pro.sha256 == "ab4fc2b27b2043483a9e346c802809dfbe9b775efbeea7ca74dc2fd1aa4a0f71"
     )
     assert pro.min_ram_bytes == 32 * 1024**3
+    # The fork-only Nemotron omni spec carries a vision mmproj projector.
+    omni = provider.LOCAL_MODEL_SPECS[provider.LOCAL_OMNI]
+    assert omni.repo == "ggml-org/NVIDIA-Nemotron-3-Nano-Omni"
+    assert omni.mmproj_filename == "mmproj-nemotron-3-nano-omni-ga_v1.0.gguf"
+    assert omni.supports_vision is True
 
 
 def test_local_provider_defaults_and_registry():
@@ -72,7 +82,11 @@ def test_local_provider_defaults_and_registry():
 def test_list_models_returns_specs():
     models = _provider().list_models("local")
 
-    assert [model["model"] for model in models] == [LOCAL_FLASH, LOCAL_PRO]
+    assert [model["model"] for model in models] == [
+        LOCAL_FLASH,
+        LOCAL_PRO,
+        _provider().LOCAL_OMNI,
+    ]
     assert models[0]["min_ram_bytes"] == 12 * 1024**3
 
 
@@ -142,11 +156,47 @@ def test_run_generate_posts_to_loopback(monkeypatch):
     }
 
 
-def test_run_generate_rejects_vision_inputs():
+def test_run_generate_rejects_image_on_text_only_model():
     provider = _provider()
 
     with pytest.raises(provider.LocalProviderError) as exc:
-        provider.run_generate([b"\x89PNG\r\n\x1a\nbad"], model=LOCAL_FLASH)
+        provider.run_generate(
+            [{"type": "image", "data": "aGVsbG8=", "mime": "image/png"}],
+            model=LOCAL_FLASH,
+        )
+
+    assert exc.value.reason_code == "unsupported_capability"
+
+
+def test_translate_content_blocks_image_gated_on_vision():
+    provider = _provider()
+    blocks = [
+        {"type": "text", "text": "describe"},
+        {"type": "image", "data": "aGVsbG8=", "mime": "image/png"},
+    ]
+
+    # Vision-capable model: image becomes an OpenAI image_url data URI.
+    out = provider._translate_content_blocks(blocks, supports_vision=True)
+    assert out[0] == {"type": "text", "text": "describe"}
+    assert out[1]["type"] == "image_url"
+    assert out[1]["image_url"]["url"] == "data:image/png;base64,aGVsbG8="
+
+    # Text-only model: image is rejected.
+    with pytest.raises(provider.LocalProviderError) as exc:
+        provider._translate_content_blocks(
+            [{"type": "image", "data": "aGVsbG8="}], supports_vision=False
+        )
+    assert exc.value.reason_code == "unsupported_capability"
+
+
+def test_translate_content_blocks_audio_always_unsupported():
+    provider = _provider()
+
+    with pytest.raises(provider.LocalProviderError) as exc:
+        provider._translate_content_blocks(
+            [{"type": "audio", "data": "aGVsbG8=", "format": "wav"}],
+            supports_vision=True,
+        )
 
     assert exc.value.reason_code == "unsupported_capability"
 

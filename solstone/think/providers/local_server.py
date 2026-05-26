@@ -199,6 +199,10 @@ def _spawn_server(
         "--port",
         str(port),
     ]
+    # Vision-capable models load their mmproj projector for the libmtmd path.
+    projector = local_install.projector_path(model_id)
+    if projector is not None:
+        cmd.extend(["--mmproj", str(projector)])
     if "0.0.0.0" in cmd:
         raise LocalProviderError("unsafe_bind", "Local server may not bind 0.0.0.0.")
     _PROCESS = RunnerManagedProcess.spawn(cmd, ref="local-server")
