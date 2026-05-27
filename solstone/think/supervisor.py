@@ -111,9 +111,6 @@ def _candidate_journal(proc: "psutil.Process") -> Path | None:
 
 
 def _sweep_orphaned_sol_processes(journal: Path, grace: float = 5.0) -> int:
-    if sys.platform != "linux":
-        return 0
-
     journal = journal.resolve()
     current_user = getpass.getuser()
     own_pid = os.getpid()
@@ -208,9 +205,9 @@ class SupervisorArgumentParser(argparse.ArgumentParser):
         if mistaken:
             self.exit(
                 2,
-                "sol supervisor is the server-launch command (takes a port). "
-                "For lifecycle, use: sol service <verb>. "
-                f"Did you mean: sol service {mistaken} ?\n",
+                "journal supervisor is the server-launch command (takes a port). "
+                "For lifecycle, use: journal service <verb>. "
+                f"Did you mean: journal service {mistaken} ?\n",
             )
         super().error(message)
 
@@ -251,9 +248,9 @@ class TaskQueue:
     def get_command_name(cmd: list[str]) -> str:
         """Extract command name from cmd array for queue serialization.
 
-        For 'sol X' commands, returns X. Otherwise returns cmd[0] basename.
+        For 'sol X' or 'journal X' commands, returns X. Otherwise returns cmd[0] basename.
         """
-        if cmd and cmd[0] == "sol" and len(cmd) > 1:
+        if cmd and cmd[0] in ("sol", "journal") and len(cmd) > 1:
             return cmd[1]
         return Path(cmd[0]).name if cmd else "unknown"
 
@@ -694,11 +691,14 @@ class TaskQueue:
             if managed.is_running():
                 duration = int(now - managed.start_time)
                 cmd_name = TaskQueue.get_command_name(managed.cmd)
+                cap = self._caps.get(cmd_name)
                 tasks.append(
                     {
                         "ref": ref,
                         "name": cmd_name,
                         "duration_seconds": duration,
+                        "max_runtime_seconds": cap,
+                        "stuck": cap is not None and duration > cap,
                     }
                 )
         return tasks
@@ -1168,8 +1168,8 @@ def collect_status(procs: list[RunnerManagedProcess]) -> dict:
 
 
 def start_sense() -> RunnerManagedProcess:
-    """Launch sol sense with output logging."""
-    return _launch_process("sense", ["sol", "sense", "-v"], restart=True)
+    """Launch journal sense with output logging."""
+    return _launch_process("sense", ["journal", "sense", "-v"], restart=True)
 
 
 def start_callosum_in_process() -> CallosumServer:
@@ -1254,7 +1254,7 @@ def stop_callosum_in_process() -> None:
 
 def start_cortex_server() -> RunnerManagedProcess:
     """Launch the Cortex WebSocket API server."""
-    cmd = ["sol", "cortex", "-v"]
+    cmd = ["journal", "cortex", "-v"]
     return _launch_process("cortex", cmd, restart=True)
 
 
@@ -1276,7 +1276,7 @@ def start_convey_server(
     # Resolve port 0 to an available port before launching
     resolved_port = port if port != 0 else find_available_port()
 
-    cmd = ["sol", "convey", "--port", str(resolved_port)]
+    cmd = ["journal", "convey", "--port", str(resolved_port)]
     if debug:
         cmd.append("-d")
     elif verbose:
@@ -1443,7 +1443,7 @@ def handle_daily_tasks() -> None:
 
         # Submit oldest-first so yesterday is processed last
         for day_str in days_to_process:
-            cmd = ["sol", "think", "-v", "--day", day_str]
+            cmd = ["journal", "think", "-v", "--day", day_str]
             if _task_queue:
                 _task_queue.submit(cmd, day=day_str)
                 logging.debug("Submitted daily think for %s", day_str)
@@ -1456,7 +1456,7 @@ def handle_daily_tasks() -> None:
 def _handle_segment_observed(message: dict) -> None:
     """Handle segment completion events (from live observation or imports).
 
-    Submits sol think in segment mode via task queue, which handles both
+    Submits journal think in segment mode via task queue, which handles both
     generators and segment agents. Also updates flush state to track
     segment recency.
     """
@@ -1482,7 +1482,7 @@ def _handle_segment_observed(message: dict) -> None:
     logging.info(f"Segment observed: {day}/{segment}, submitting processing...")
 
     # Submit via task queue — serializes with other think invocations
-    cmd = ["sol", "think", "-v", "--day", day, "--segment", segment]
+    cmd = ["journal", "think", "-v", "--day", day, "--segment", segment]
     if stream:
         cmd.extend(["--stream", stream])
     if _task_queue:
@@ -1497,7 +1497,7 @@ def _check_segment_flush(force: bool = False) -> None:
     """Check if the last observed segment needs flushing.
 
     If no new segments have arrived within FLUSH_TIMEOUT seconds, runs
-    ``sol think --flush`` on the last segment to let flush-enabled agents
+    ``journal think --flush`` on the last segment to let flush-enabled agents
     close out dangling state (e.g., end active activities).
 
     Args:
@@ -1524,7 +1524,7 @@ def _check_segment_flush(force: bool = False) -> None:
     _flush_state["flushed"] = True
 
     stream = _flush_state.get("stream")
-    cmd = ["sol", "think", "-v", "--day", day, "--segment", segment, "--flush"]
+    cmd = ["journal", "think", "-v", "--day", day, "--segment", segment, "--flush"]
     if stream:
         cmd.extend(["--stream", stream])
     if _task_queue:
@@ -1590,7 +1590,7 @@ def _handle_activity_recorded(message: dict) -> None:
         logging.warning("activity.recorded event missing required fields")
         return
 
-    cmd = ["sol", "think", "--activity", record_id, "--facet", facet, "--day", day]
+    cmd = ["journal", "think", "--activity", record_id, "--facet", facet, "--day", day]
 
     if _task_queue:
         _task_queue.submit(cmd, day=day)
@@ -1626,7 +1626,7 @@ def _handle_think_daily_complete(message: dict) -> None:
         except ValueError:
             pass  # Corrupt PID file, proceed
 
-    cmd = ["sol", "heartbeat"]
+    cmd = ["journal", "heartbeat"]
     if _task_queue:
         _task_queue.submit(cmd)
         logging.info("Queued heartbeat after daily think completion")
@@ -1813,10 +1813,46 @@ def parse_args() -> argparse.ArgumentParser:
 def handle_shutdown(signum, frame):
     """Handle shutdown signals gracefully."""
     global shutdown_requested
-    if not shutdown_requested:  # Only log once
+    if not shutdown_requested:
         shutdown_requested = True
-        logging.info("Shutdown requested, cleaning up...")
-    raise KeyboardInterrupt
+        logger.info("shutdown requested via signal %d", signum)
+        live = [managed for managed in _managed_procs if managed.is_running()]
+        if live:
+            logger.info("shutdown: signaling %d managed child(ren)", len(live))
+            for managed in live:
+                try:
+                    managed.process.terminate()
+                except Exception:
+                    logger.exception("shutdown: terminate failed for %s", managed.name)
+
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                if all(not managed.is_running() for managed in live):
+                    break
+                time.sleep(0.05)
+
+            kills = 0
+            for managed in live:
+                if managed.is_running():
+                    try:
+                        managed.process.kill()
+                        logger.warning(
+                            "shutdown: SIGKILL pid=%s name=%s",
+                            managed.process.pid,
+                            managed.name,
+                        )
+                        kills += 1
+                    except Exception:
+                        logger.exception("shutdown: kill failed for %s", managed.name)
+
+            cleanly = len(live) - kills
+            logger.info(
+                "shutdown: reap complete (%d exited cleanly, %d SIGKILL'd)",
+                cleanly,
+                kills,
+            )
+        raise KeyboardInterrupt
+    # Second signal during shutdown: cleanup is already in progress.
 
 
 def _ensure_venv_bin_on_path() -> None:
@@ -2086,7 +2122,7 @@ def main() -> None:
             )
 
             for day_str in days_to_process:
-                cmd = ["sol", "think", "-v", "--day", day_str]
+                cmd = ["journal", "think", "-v", "--day", day_str]
                 if _task_queue:
                     _task_queue.submit(cmd, day=day_str)
                     logging.debug("Startup catchup: submitted think for %s", day_str)

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2026 sol pbc
 
-"""sol config — show and rewrite the embedded journal path in the wrapper."""
+"""journal config — show and rewrite the embedded journal path in the wrapper."""
 
 from __future__ import annotations
 
@@ -15,11 +15,10 @@ from pathlib import Path
 
 from solstone.think.install_guard import (
     alias_path,
+    alias_paths,
+    install_wrappers,
     parse_wrapper,
-    render_wrapper,
     validate_journal_path_for_wrapper,
-    wrapper_lock,
-    write_wrapper_atomic,
 )
 from solstone.think.service import service_is_installed, service_is_running
 from solstone.think.utils import (
@@ -32,7 +31,7 @@ from solstone.think.utils import (
 
 MERGE_INSTRUCTIONS = "\n".join(
     [
-        "sol config: --merge is not handled here.",
+        "journal config: --merge is not handled here.",
         "use 'sol call journal merge <source> --dry-run' to preview the merge.",
         "use 'sol call journal merge <source>' to perform the merge.",
     ]
@@ -74,6 +73,7 @@ class JournalChange:
     yes: bool
     dry_run: bool
     sol_bin: str
+    service_bin: str
     alias: Path
 
 
@@ -105,8 +105,8 @@ def _read_wrapper_status() -> tuple[str, str | None]:
 
 def _wrapper_refusal(alias: Path) -> str:
     return (
-        "sol config: refused: "
-        f"{alias} is not a managed wrapper (run 'sol setup' from the solstone "
+        "journal config: refused: "
+        f"{alias} is not a managed wrapper (run 'journal setup' from the solstone "
         "source checkout to install the wrapper first)"
     )
 
@@ -123,27 +123,27 @@ def _valid_flags(change: JournalChange) -> str:
 
 def _refusal_message(change: JournalChange) -> str:
     return (
-        "sol config: refused: "
+        "journal config: refused: "
         f"current is {_state_label(change.current_active)} and target is "
         f"{_state_label(change.target_active)}; valid flags: {_valid_flags(change)}"
     )
 
 
 def _move_target_exists_message(change: JournalChange) -> str:
-    return f"sol config: refused: move target already exists: {change.target_path}"
+    return f"journal config: refused: move target already exists: {change.target_path}"
 
 
 def _move_missing_current_message(change: JournalChange) -> str:
-    return f"sol config: refused: move source does not exist: {change.current_path}"
+    return f"journal config: refused: move source does not exist: {change.current_path}"
 
 
 def _move_missing_parent_message(change: JournalChange) -> str:
-    return f"sol config: refused: move target parent does not exist: {change.target_path.parent}"
+    return f"journal config: refused: move target parent does not exist: {change.target_path.parent}"
 
 
 def _move_cross_filesystem_message(change: JournalChange) -> str:
     return (
-        "sol config: refused: cannot move across filesystems "
+        "journal config: refused: cannot move across filesystems "
         f"(current device={change.current_device}, target parent device={change.target_parent_device}); "
         "use 'sol call journal merge <source>' instead"
     )
@@ -151,7 +151,7 @@ def _move_cross_filesystem_message(change: JournalChange) -> str:
 
 def _move_requires_inactive_target_message(change: JournalChange) -> str:
     return (
-        "sol config: refused: "
+        "journal config: refused: "
         f"--move requires a not active target; current is {_state_label(change.current_active)} "
         f"and target is {_state_label(change.target_active)}; valid flags: --switch, --merge, --force"
     )
@@ -182,7 +182,7 @@ def _service_summary(change: JournalChange, decision: Decision) -> str:
 
 def render_plan(change: JournalChange, decision: Decision) -> str:
     lines = [
-        "sol config journal - plan summary",
+        "journal config journal - plan summary",
         "",
         f"current: {change.current_path} ({_state_label(change.current_active)})",
         f"target:  {change.target_path} ({_state_label(change.target_active)})",
@@ -199,7 +199,7 @@ def render_plan(change: JournalChange, decision: Decision) -> str:
             [
                 "",
                 "current journal is left intact. "
-                f"to re-adopt it later: sol config journal {change.current_path} --switch --yes",
+                f"to re-adopt it later: journal config journal {change.current_path} --switch --yes",
             ]
         )
 
@@ -208,27 +208,34 @@ def render_plan(change: JournalChange, decision: Decision) -> str:
 
 
 def _rewrite_wrapper(change: JournalChange) -> str | None:
-    try:
-        current_content = change.alias.read_text(encoding="utf-8")
-    except OSError as exc:
-        print(
-            f"sol config: refused: cannot read {change.alias}: {exc}",
-            file=sys.stderr,
-        )
-        return None
-
-    current = parse_wrapper(current_content)
-    if current is None:
-        print(_wrapper_refusal(change.alias), file=sys.stderr)
-        return None
-
     target_str = str(change.target_path)
-    if current["journal"] == target_str:
-        return current["sol_bin"]
+    sol_bins: dict[str, str] = {}
+    for binary, alias in alias_paths().items():
+        if not alias.exists() and not alias.is_symlink():
+            if binary == "journal":
+                sol_bins[binary] = str(Path(change.sol_bin).with_name("journal"))
+                continue
+            print(_wrapper_refusal(alias), file=sys.stderr)
+            return None
+        if alias.is_symlink():
+            print(_wrapper_refusal(alias), file=sys.stderr)
+            return None
+        try:
+            current_content = alias.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(
+                f"journal config: refused: cannot read {alias}: {exc}",
+                file=sys.stderr,
+            )
+            return None
+        current = parse_wrapper(current_content)
+        if current is None:
+            print(_wrapper_refusal(alias), file=sys.stderr)
+            return None
+        sol_bins[binary] = current["sol_bin"]
 
-    new_content = render_wrapper(target_str, current["sol_bin"])
-    write_wrapper_atomic(change.alias, new_content)
-    return current["sol_bin"]
+    install_wrappers(target_str, sol_bins)
+    return sol_bins["journal"]
 
 
 def _service_command(sol_bin: str, subcommand: str) -> subprocess.CompletedProcess:
@@ -244,10 +251,10 @@ def _maybe_restart_current_service(change: JournalChange) -> None:
     if not change.service_running:
         return
     try:
-        _service_command(change.sol_bin, "start")
+        _service_command(change.service_bin, "start")
     except FileNotFoundError as exc:
         print(
-            f"sol config: rollback warning: could not restart service ({exc})",
+            f"journal config: rollback warning: could not restart service ({exc})",
             file=sys.stderr,
         )
 
@@ -257,20 +264,19 @@ def _run_switch(change: JournalChange) -> int:
         change.target_path.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         print(
-            f"sol config: refused: cannot create {change.target_path}: {exc}",
+            f"journal config: refused: cannot create {change.target_path}: {exc}",
             file=sys.stderr,
         )
         return 1
 
-    with wrapper_lock():
-        try:
-            restart_sol = _rewrite_wrapper(change)
-        except OSError as exc:
-            print(
-                f"sol config: refused: cannot rewrite {change.alias}: {exc}",
-                file=sys.stderr,
-            )
-            return 1
+    try:
+        restart_sol = _rewrite_wrapper(change)
+    except OSError as exc:
+        print(
+            f"journal config: refused: cannot rewrite {change.alias}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
 
     if restart_sol is None:
         return 1
@@ -290,15 +296,15 @@ def _run_switch(change: JournalChange) -> int:
         )
     except FileNotFoundError as exc:
         print(
-            f"sol config: wrapper rewritten to {change.target_path} but service restart could not run ({exc}); restart manually",
+            f"journal config: wrapper rewritten to {change.target_path} but journal service restart could not run ({exc}); restart manually",
             file=sys.stderr,
         )
         return 2
 
     if result.returncode != 0:
         print(
-            "sol config: wrapper rewritten to "
-            f"{change.target_path} but 'sol service restart --if-installed' exited "
+            "journal config: wrapper rewritten to "
+            f"{change.target_path} but 'journal service restart --if-installed' exited "
             f"{result.returncode}; investigate and restart manually",
             file=sys.stderr,
         )
@@ -327,16 +333,16 @@ def _run_move(change: JournalChange) -> int:
 
     if change.service_running:
         try:
-            stop_result = _service_command(change.sol_bin, "stop")
+            stop_result = _service_command(change.service_bin, "stop")
         except FileNotFoundError as exc:
             print(
-                f"sol config: could not stop service before move ({exc})",
+                f"journal config: could not stop service before move ({exc})",
                 file=sys.stderr,
             )
             return 2
         if stop_result.returncode != 0:
             print(
-                "sol config: could not stop service before move",
+                "journal config: could not stop service before move",
                 file=sys.stderr,
             )
             return 2
@@ -345,36 +351,35 @@ def _run_move(change: JournalChange) -> int:
         os.rename(current, target)
     except OSError as exc:
         _maybe_restart_current_service(change)
-        print(f"sol config: move failed: {exc}", file=sys.stderr)
+        print(f"journal config: move failed: {exc}", file=sys.stderr)
         return 1
 
-    with wrapper_lock():
+    try:
+        restart_sol = _rewrite_wrapper(change)
+    except OSError as exc:
+        rollback_ok = True
         try:
-            restart_sol = _rewrite_wrapper(change)
-        except OSError as exc:
-            rollback_ok = True
-            try:
-                if target.exists():
-                    os.rename(target, current)
-            except OSError as rollback_exc:
-                rollback_ok = False
-                print(
-                    f"sol config: rollback failed after wrapper write error: {rollback_exc}",
-                    file=sys.stderr,
-                )
-            _maybe_restart_current_service(change)
-            message = f"sol config: move failed during wrapper update: {exc}"
-            if rollback_ok:
-                message += "; restored original journal"
-            print(message, file=sys.stderr)
-            return 2
+            if target.exists():
+                os.rename(target, current)
+        except OSError as rollback_exc:
+            rollback_ok = False
+            print(
+                f"journal config: rollback failed after wrapper write error: {rollback_exc}",
+                file=sys.stderr,
+            )
+        _maybe_restart_current_service(change)
+        message = f"journal config: move failed during wrapper update: {exc}"
+        if rollback_ok:
+            message += "; restored original journal"
+        print(message, file=sys.stderr)
+        return 2
 
     if restart_sol is None:
         try:
             os.rename(target, current)
         except OSError as rollback_exc:
             print(
-                f"sol config: rollback failed after wrapper validation error: {rollback_exc}",
+                f"journal config: rollback failed after wrapper validation error: {rollback_exc}",
                 file=sys.stderr,
             )
         _maybe_restart_current_service(change)
@@ -409,7 +414,7 @@ def _run_move(change: JournalChange) -> int:
 
 
 def _run_noop(change: JournalChange, _decision: Decision) -> int:
-    print(f"sol config: journal already set to {change.target_path}")
+    print(f"journal config: journal already set to {change.target_path}")
     return 0
 
 
@@ -466,7 +471,7 @@ def decide(change: JournalChange) -> Decision:
 def execute(change: JournalChange, decision: Decision) -> int:
     if change.action is RequestedAction.FORCE:
         print(
-            "sol config: warning: --force bypasses confirmation and target activity checks",
+            "journal config: warning: --force bypasses confirmation and target activity checks",
             file=sys.stderr,
         )
 
@@ -532,6 +537,7 @@ def build_change(
         yes=args.yes,
         dry_run=args.dry_run,
         sol_bin=sol_bin,
+        service_bin=str(Path(sol_bin).with_name("journal")),
         alias=alias_path,
     )
 
@@ -542,7 +548,7 @@ def cmd_show() -> int:
     try:
         path, info_source = get_journal_info()
     except SolstoneNotConfigured as exc:
-        print(f"sol config: {exc}", file=sys.stderr)
+        print(f"journal config: {exc}", file=sys.stderr)
         return 1
 
     if info_source == "env":
@@ -579,14 +585,14 @@ def cmd_journal(
     try:
         validate_journal_path_for_wrapper(target_str)
     except ValueError as exc:
-        print(f"sol config: refused: {exc}", file=sys.stderr)
+        print(f"journal config: refused: {exc}", file=sys.stderr)
         return 1
 
     project_root = Path(get_project_root())
     source_tree_journal = (project_root / "journal").resolve()
     if target == source_tree_journal and not is_source_checkout():
         print(
-            "sol config: refused: "
+            "journal config: refused: "
             f"{target_str} is the source-tree fallback path but this is not a "
             "source checkout",
             file=sys.stderr,
@@ -595,7 +601,7 @@ def cmd_journal(
 
     if action is RequestedAction.MOVE and not target.parent.exists():
         print(
-            f"sol config: refused: move target parent does not exist: {target.parent}",
+            f"journal config: refused: move target parent does not exist: {target.parent}",
             file=sys.stderr,
         )
         return 1
@@ -608,7 +614,7 @@ def cmd_journal(
     try:
         content = alias.read_text(encoding="utf-8")
     except OSError as exc:
-        print(f"sol config: refused: cannot read {alias}: {exc}", file=sys.stderr)
+        print(f"journal config: refused: cannot read {alias}: {exc}", file=sys.stderr)
         return 1
 
     parsed = parse_wrapper(content)
@@ -633,7 +639,7 @@ def cmd_journal(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(prog="sol config")
+    parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="cmd", required=True)
     subparsers.add_parser("show", help="show the configured journal path and source")
     journal_parser = subparsers.add_parser(

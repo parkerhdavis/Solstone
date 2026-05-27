@@ -78,7 +78,7 @@ def test_start_sense(tmp_path, mock_callosum, monkeypatch):
     # Test start_sense()
     sense_proc = mod.start_sense()
     assert sense_proc is not None
-    assert any(cmd == ["sol", "sense", "-v"] for cmd, _, _ in started)
+    assert any(cmd == ["journal", "sense", "-v"] for cmd, _, _ in started)
 
     # Check that stdout and stderr capture pipes
     for cmd, stdout, stderr in started:
@@ -96,7 +96,7 @@ def test_launch_process_records_service_state(monkeypatch):
         process=process,
         name="unit",
         log_writer=MagicMock(),
-        cmd=["sol", "sense"],
+        cmd=["journal", "sense"],
         _threads=[],
         ref="ref-1",
         _start_time=100.0,
@@ -104,7 +104,7 @@ def test_launch_process_records_service_state(monkeypatch):
     )
 
     def fake_spawn(cmd, *, ref=None, callosum=None, day=None):
-        assert cmd == ["sol", "sense"]
+        assert cmd == ["journal", "sense"]
         assert ref == "ref-1"
         assert day is None
         return managed
@@ -113,7 +113,7 @@ def test_launch_process_records_service_state(monkeypatch):
 
     result = mod._launch_process(
         "unit",
-        ["sol", "sense"],
+        ["journal", "sense"],
         restart=True,
         shutdown_timeout=7,
         ref="ref-1",
@@ -158,9 +158,9 @@ def test_parse_args_lifecycle_verb_hint(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert exc_info.value.code == 2
     assert (
-        "sol supervisor is the server-launch command (takes a port). "
-        "For lifecycle, use: sol service <verb>. "
-        "Did you mean: sol service stop ?"
+        "journal supervisor is the server-launch command (takes a port). "
+        "For lifecycle, use: journal service <verb>. "
+        "Did you mean: journal service stop ?"
     ) in captured.err
 
 
@@ -243,7 +243,7 @@ def test_graceful_shutdown_calls_stop_process_for_each_managed_proc(
 
     procs = []
     for name in ["convey", "sense", "cortex", "link"]:
-        managed = _TaskManagedStub(cmd=["sol", name])
+        managed = _TaskManagedStub(cmd=[("sol" if name == "link" else "journal"), name])
         managed.name = name
         procs.append(managed)
 
@@ -285,7 +285,7 @@ def test_get_command_name():
     # sol X -> X
     assert get(["sol", "indexer", "--rescan"]) == "indexer"
     assert get(["sol", "insight", "20240101"]) == "insight"
-    assert get(["sol", "think", "--day", "20240101"]) == "think"
+    assert get(["journal", "think", "--day", "20240101"]) == "think"
 
     # Other commands -> basename
     assert get(["/usr/bin/python", "script.py"]) == "python"
@@ -689,6 +689,7 @@ class _TaskManagedStub:
         self.ref = "ref-1"
         self.terminate = MagicMock()
         self.cleanup = MagicMock()
+        self.is_running = MagicMock(return_value=True)
 
 
 def test_ensure_venv_bin_on_path_prepends_when_missing(monkeypatch):
@@ -757,7 +758,7 @@ def test_task_queue_history_records_completion(tmp_path, monkeypatch):
 
     queue._run_task(
         ["ref-1"],
-        ["sol", "heartbeat"],
+        ["journal", "heartbeat"],
         "heartbeat",
         None,
         "heartbeat",
@@ -766,7 +767,7 @@ def test_task_queue_history_records_completion(tmp_path, monkeypatch):
     assert list(queue._history) == [
         {
             "name": "heartbeat",
-            "cmd": ["sol", "heartbeat"],
+            "cmd": ["journal", "heartbeat"],
             "ref": "ref-1",
             "ended_at": queue._history[0]["ended_at"],
             "exit_status": "ok",
@@ -791,7 +792,7 @@ def test_scheduler_completion_updates_scheduler_json(tmp_path, monkeypatch):
         ended_at=123.0,
         exit_status="ok",
         ref="ref-1",
-        cmd=["sol", "heartbeat"],
+        cmd=["journal", "heartbeat"],
     )
 
     data = json.loads(state_path.read_text(encoding="utf-8"))
@@ -841,7 +842,7 @@ def test_run_task_completes_when_scheduler_writeback_fails(monkeypatch):
 
     queue._run_task(
         ["ref-1"],
-        ["sol", "heartbeat"],
+        ["journal", "heartbeat"],
         "heartbeat",
         None,
         "heartbeat",
@@ -1046,6 +1047,52 @@ def test_enforce_deadlines_terminates_when_elapsed_exceeds_cap(caplog, monkeypat
     ) in caplog.text
 
 
+def test_collect_task_status_no_cap(monkeypatch):
+    mod = importlib.import_module("solstone.think.supervisor")
+    queue = mod.TaskQueue(on_queue_change=None)
+    managed = _TaskManagedStub(cmd=["sol", "providers"], start_time=100.0)
+    queue._active["ref-1"] = managed
+    monkeypatch.setattr(mod.time, "time", lambda: 112.0)
+
+    assert queue.collect_task_status() == [
+        {
+            "ref": "ref-1",
+            "name": "providers",
+            "duration_seconds": 12,
+            "max_runtime_seconds": None,
+            "stuck": False,
+        }
+    ]
+
+
+def test_collect_task_status_under_cap(monkeypatch):
+    mod = importlib.import_module("solstone.think.supervisor")
+    queue = mod.TaskQueue(on_queue_change=None)
+    managed = _TaskManagedStub(cmd=["sol", "providers"], start_time=100.0)
+    queue._active["ref-1"] = managed
+    queue.set_cap("providers", 300)
+    monkeypatch.setattr(mod.time, "time", lambda: 112.0)
+
+    status = queue.collect_task_status()
+
+    assert status[0]["max_runtime_seconds"] == 300
+    assert status[0]["stuck"] is False
+
+
+def test_collect_task_status_over_cap(monkeypatch):
+    mod = importlib.import_module("solstone.think.supervisor")
+    queue = mod.TaskQueue(on_queue_change=None)
+    managed = _TaskManagedStub(cmd=["sol", "providers"], start_time=100.0)
+    queue._active["ref-1"] = managed
+    queue.set_cap("providers", 5)
+    monkeypatch.setattr(mod.time, "time", lambda: 112.0)
+
+    status = queue.collect_task_status()
+
+    assert status[0]["max_runtime_seconds"] == 5
+    assert status[0]["stuck"] is True
+
+
 def test_enforce_deadlines_terminates_stopped_task(caplog, monkeypatch):
     mod = importlib.import_module("solstone.think.supervisor")
     proc = subprocess.Popen(["sh", "-c", "kill -STOP $$; sleep 60"])
@@ -1116,7 +1163,7 @@ def test_enforce_deadlines_noop_when_no_cap():
 
 def test_restart_service_uses_single_termination_path(monkeypatch):
     mod = importlib.import_module("solstone.think.supervisor")
-    managed = _TaskManagedStub(cmd=["sol", "sense"], start_time=100.0)
+    managed = _TaskManagedStub(cmd=["journal", "sense"], start_time=100.0)
     managed.name = "sense"
     managed.ref = "ref-sense"
     mod._managed_procs = [managed]

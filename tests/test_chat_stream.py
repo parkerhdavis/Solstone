@@ -154,6 +154,20 @@ def test_append_rejects_missing_required_fields(tmp_path, monkeypatch):
         )
 
 
+def test_chat_queue_depth_event_validates_depth(tmp_path, monkeypatch):
+    _setup_journal(tmp_path, monkeypatch)
+    ts = _ms(2026, 4, 20, 12, 0, 0)
+
+    event = append_chat_event("chat_queue_depth", ts=ts, depth=3)
+
+    assert event["kind"] == "chat_queue_depth"
+    assert read_chat_events("20260420") == [event]
+    with pytest.raises(ValueError, match="chat_queue_depth requires fields: depth"):
+        append_chat_event("chat_queue_depth", ts=ts + 1)
+    with pytest.raises(ValueError, match="chat_queue_depth depth must be an int"):
+        append_chat_event("chat_queue_depth", ts=ts + 2, depth="3")
+
+
 def test_chat_error_preserves_optional_provider(tmp_path, monkeypatch):
     _setup_journal(tmp_path, monkeypatch)
     ts = _ms(2026, 4, 20, 12, 0, 0)
@@ -188,6 +202,69 @@ def test_chat_error_preserves_optional_detail_verbatim(tmp_path, monkeypatch):
     events = read_chat_events("20260420")
     assert events == [event]
     assert events[0]["detail"] == detail
+
+
+def test_thinking_payload_round_trips_for_sol_message_and_talent_finished(
+    tmp_path, monkeypatch
+):
+    _setup_journal(tmp_path, monkeypatch)
+    ts = _ms(2026, 4, 20, 12, 0, 0)
+    thinking = {
+        "content": "reasoning text",
+        "provider": "openai",
+        "model": "gpt-reasoning",
+        "tokens": 100,
+    }
+
+    sol_event = append_chat_event(
+        "sol_message",
+        ts=ts,
+        use_id="1713626000000",
+        text="hello",
+        notes="ready",
+        requested_target=None,
+        requested_task=None,
+        thinking=thinking,
+    )
+    talent_event = append_chat_event(
+        "talent_finished",
+        ts=ts + 1_000,
+        use_id="1713626000001",
+        name="exec",
+        summary="done",
+        thinking=thinking,
+    )
+
+    events = read_chat_events("20260420")
+    assert events == [sol_event, talent_event]
+    assert events[0]["thinking"] == thinking
+    assert events[1]["thinking"] == thinking
+
+
+def test_historical_events_without_thinking_replay_unchanged(tmp_path, monkeypatch):
+    journal = _setup_journal(tmp_path, monkeypatch)
+    fixture = (
+        '{"kind": "sol_message", "ts": 1776708000000, '
+        '"use_id": "1713626000000", "text": "hello", "notes": "ready", '
+        '"requested_target": null, "requested_task": null}\n'
+    )
+    chat_dir = journal / "chronicle" / "20260420" / "chat" / "120000_300"
+    chat_dir.mkdir(parents=True)
+    (chat_dir / "chat.jsonl").write_text(fixture, encoding="utf-8")
+
+    events = read_chat_events("20260420")
+    assert events == [json.loads(fixture)]
+    assert "thinking" not in events[0]
+    replayed = "".join(json.dumps(event, ensure_ascii=False) + "\n" for event in events)
+    assert replayed == fixture
+    state = reduce_chat_state("20260420")
+    assert state["latest_sol_message"] is not None
+    assert "thinking" not in state["latest_sol_message"]
+
+    import solstone.convey.chat_stream as chat_stream
+
+    assert "thinking" not in chat_stream._VALID_KINDS["sol_message"]
+    assert "thinking" not in chat_stream._VALID_KINDS["talent_finished"]
 
 
 def test_owner_message_preserves_optional_source(tmp_path, monkeypatch):
@@ -424,6 +501,20 @@ def test_reduce_chat_state_extracts_latest_sol_and_active_talents(
             "finished_at": start + 3_000,
         }
     ]
+    assert reduced["queue_depth"] == 0
+
+
+def test_reduce_chat_state_returns_last_queue_depth(tmp_path, monkeypatch):
+    _setup_journal(tmp_path, monkeypatch)
+    start = _ms(2026, 4, 20, 12, 0, 0)
+
+    assert reduce_chat_state("20260420")["queue_depth"] == 0
+
+    append_chat_event("chat_queue_depth", ts=start, depth=2)
+    append_chat_event("chat_queue_depth", ts=start + 1_000, depth=5)
+    append_chat_event("chat_queue_depth", ts=start + 2_000, depth=1)
+
+    assert reduce_chat_state("20260420")["queue_depth"] == 1
 
 
 def test_append_reflection_ready_event(tmp_path, monkeypatch):

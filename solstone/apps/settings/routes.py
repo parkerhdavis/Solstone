@@ -16,6 +16,12 @@ from typing import Any
 
 from flask import Blueprint, abort, jsonify, render_template, request
 
+from solstone.apps.chat import copy as chat_copy
+from solstone.apps.chat.config import (
+    THINKING_SURFACES_VALUES,
+    load_chat_config,
+    save_chat_config,
+)
 from solstone.apps.settings import copy as settings_copy
 from solstone.apps.settings import install_copy, local_bootstrap, mlx_bootstrap
 from solstone.apps.settings.copy import (
@@ -171,6 +177,8 @@ def _inject_settings_copy() -> dict[str, Any]:
         "install_copy": {
             name: getattr(install_copy, name) for name in install_copy.__all__
         },
+        "chat_config": load_chat_config(),
+        "chat_copy": chat_copy,
         "settings_copy": settings_copy,
         "sol_voice_copy": sol_voice_copy,
     }
@@ -635,6 +643,55 @@ def update_sol_voice() -> Any:
         )
 
 
+# ---------------------------------------------------------------------------
+# Chat API
+# ---------------------------------------------------------------------------
+
+
+@settings_bp.route("/api/chat")
+def get_chat() -> Any:
+    """Return chat display settings."""
+    try:
+        return jsonify(load_chat_config())
+    except Exception:
+        logger.exception("error loading chat settings")
+        return error_response(
+            SETTINGS_OPERATION_FAILED,
+            detail="unable to load chat settings",
+        )
+
+
+@settings_bp.route("/api/chat", methods=["PUT"])
+def update_chat() -> Any:
+    """Persist partial chat display settings."""
+    try:
+        updates = request.get_json()
+        if not isinstance(updates, dict):
+            return error_response(
+                INVALID_CONFIG_VALUE,
+                detail="chat update must be an object",
+            )
+        thinking_surfaces = updates.get("thinking_surfaces")
+        if (
+            "thinking_surfaces" in updates
+            and thinking_surfaces not in THINKING_SURFACES_VALUES
+        ):
+            logger.warning(
+                "invalid chat thinking_surfaces value: %r", thinking_surfaces
+            )
+            return error_response(
+                INVALID_CONFIG_VALUE,
+                detail="invalid thinking_surfaces",
+            )
+        return jsonify(save_chat_config(updates))
+    except Exception:
+        logger.exception("error saving chat settings")
+        return error_response(
+            SETTINGS_OPERATION_FAILED,
+            detail="unable to save chat settings",
+        )
+
+
 @settings_bp.route("/api/sol_voice/throttled")
 def get_sol_voice_throttled() -> Any:
     """Return recent sol-initiated chat throttle rows."""
@@ -897,7 +954,6 @@ def get_providers() -> Any:
         )
         from solstone.think.providers import (
             build_provider_status,
-            bundled,
             get_provider_list,
         )
         from solstone.think.talent import get_talent_configs
@@ -976,10 +1032,6 @@ def get_providers() -> Any:
                 pass
 
         provider_status = build_provider_status(providers_list, vertex_creds_configured)
-        bundled_status = {
-            provider: bundled.get_provider_state(provider)
-            for provider in ("anthropic", "openai", "openhands")
-        }
         local_model_id = request.args.get("local_model") or LOCAL_FLASH
         if local_model_id not in LOCAL_MODEL_SPECS:
             return _local_model_error(local_model_id)
@@ -1002,7 +1054,6 @@ def get_providers() -> Any:
                 "api_keys": api_keys,
                 "auth": auth,
                 "key_validation": key_validation,
-                "bundled": bundled_status,
                 "local": local_status,
                 "mlx": {"active_model": mlx_active_model, **mlx_status},
                 "google_backend": providers_config.get("google_backend", "auto"),
@@ -1197,24 +1248,6 @@ def _configured_transcriber() -> str | None:
     return "parakeet"
 
 
-@settings_bp.route("/api/providers/bundled")
-def get_bundled_providers() -> Any:
-    """Return bundled cogitate provider status."""
-
-    try:
-        from solstone.think.providers import bundled
-
-        return jsonify(
-            {
-                provider: bundled.get_provider_state(provider)
-                for provider in ("anthropic", "openai", "openhands")
-            }
-        )
-    except Exception:
-        logger.exception("error loading bundled providers")
-        return _settings_operation_failed()
-
-
 @settings_bp.route("/api/providers/local/status")
 def get_local_provider_status() -> Any:
     """Return local provider readiness status."""
@@ -1231,63 +1264,6 @@ def get_local_provider_status() -> Any:
     except Exception:
         logger.exception("error loading local provider status")
         return _settings_operation_failed()
-
-
-def _bundled_action_response(name: str, action: str) -> Any:
-    from solstone.think.providers import bundled
-
-    actions = {
-        "install": bundled.install_provider,
-        "uninstall": bundled.uninstall_provider,
-        "disable": bundled.disable_provider,
-        "enable": bundled.enable_provider,
-        "validate-key": bundled.validate_key,
-    }
-    try:
-        return jsonify(actions[action](name))
-    except bundled.CogitateProviderInstallInFlight:
-        return jsonify(
-            {"error": "install in flight", "install_state": "installing"}
-        ), 409
-    except bundled.UnsupportedBundledProvider as exc:
-        return error_response(INVALID_CONFIG_VALUE, detail=str(exc))
-    except bundled.BundledProviderError as exc:
-        return _settings_operation_failed(str(exc))
-
-
-@settings_bp.route("/api/providers/<name>/install", methods=["POST"])
-def install_bundled_provider(name: str) -> Any:
-    """Install or retry a bundled cogitate provider."""
-
-    return _bundled_action_response(name, "install")
-
-
-@settings_bp.route("/api/providers/<name>/uninstall", methods=["POST"])
-def uninstall_bundled_provider(name: str) -> Any:
-    """Uninstall a bundled cogitate provider."""
-
-    return _bundled_action_response(name, "uninstall")
-
-
-@settings_bp.route("/api/providers/<name>/disable", methods=["POST"])
-def disable_bundled_provider(name: str) -> Any:
-    """Disable a bundled cogitate provider."""
-
-    return _bundled_action_response(name, "disable")
-
-
-@settings_bp.route("/api/providers/<name>/enable", methods=["POST"])
-def enable_bundled_provider(name: str) -> Any:
-    """Enable a bundled cogitate provider."""
-
-    return _bundled_action_response(name, "enable")
-
-
-@settings_bp.route("/api/providers/<name>/validate-key", methods=["POST"])
-def validate_bundled_provider_key(name: str) -> Any:
-    """Validate a bundled provider API key."""
-
-    return _bundled_action_response(name, "validate-key")
 
 
 @settings_bp.route("/api/validate-keys", methods=["POST"])

@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import calendar
+from collections import deque
 from datetime import date, datetime
 from typing import Any
 
 from flask import Blueprint, abort, jsonify, redirect, render_template, url_for
 
+from solstone.apps.chat import copy as chat_copy
+from solstone.apps.chat.config import load_chat_config
 from solstone.convey.chat_stream import read_chat_events
 from solstone.convey.reasons import INVALID_MONTH
 from solstone.convey.sol_initiated import copy as sol_voice_copy
@@ -44,6 +47,7 @@ def day(day: str) -> str:
     today_day = date.today().strftime("%Y%m%d")
     owner_name, agent_name = _resolve_identity()
     events = read_chat_events(day)
+    chat_config = load_chat_config()
     if day == today_day:
         # Page loads are engagement signals in Lode 2, so prior open facts do not
         # suppress another page-load open. Dismiss and supersede facts still do.
@@ -57,6 +61,13 @@ def day(day: str) -> str:
                 surface=SURFACE_CONVEY,
             )
     sol_message_origins = _build_sol_message_origins(events)
+    retry_texts = _build_chat_error_retry_texts(events)
+    events = [
+        {**event, "retry_text": retry_texts[index]}
+        if event.get("kind") == "chat_error" and index in retry_texts
+        else event
+        for index, event in enumerate(events)
+    ]
 
     return render_template(
         "app.html",
@@ -67,6 +78,8 @@ def day(day: str) -> str:
         owner_name=owner_name,
         agent_name=agent_name,
         sol_message_origins=sol_message_origins,
+        thinking_surfaces=chat_config["thinking_surfaces"],
+        chat_copy=chat_copy,
         sol_voice_copy=sol_voice_copy,
     )
 
@@ -156,6 +169,29 @@ def _build_sol_message_origins(
                 origin["superseded_time"] = _format_origin_time(event.get("ts"))
 
     return origins
+
+
+def _build_chat_error_retry_texts(
+    events: list[dict[str, Any]],
+) -> dict[int, str]:
+    """Map chat_error event index -> originating owner_message text.
+
+    Walks events forward, maintaining a FIFO of pending owner texts.
+    Pops on sol_message and chat_error to mirror the placeholder lifecycle.
+    """
+    retry_texts: dict[int, str] = {}
+    pending: deque[str] = deque()
+    for index, event in enumerate(events):
+        kind = event.get("kind")
+        if kind == "owner_message":
+            pending.append(str(event.get("text") or ""))
+        elif kind == "sol_message":
+            if pending:
+                pending.popleft()
+        elif kind == "chat_error":
+            if pending:
+                retry_texts[index] = pending.popleft()
+    return retry_texts
 
 
 def _format_origin_time(raw_ts: object) -> str:

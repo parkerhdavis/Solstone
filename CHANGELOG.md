@@ -6,8 +6,52 @@ Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), al
 
 ## [Unreleased]
 
+### Changed
+- cogitate is now baseline — the openhands-sdk runtime that powers sol's tool-calling agents ships in the wheel, so a fresh install with a hosted provider key runs cogitate immediately with no extra install step. wheel size grows by about 337 MB on install to carry openhands-sdk, litellm, and their transitive dependencies.
+- minimum python is now 3.12 (was 3.11) — required by the openhands-sdk runtime that ships baseline. if you installed solstone with a 3.11 interpreter, reinstall under 3.12+ before updating.
+
 ### Removed
 - the built-in `sol observer install` command is gone. linux and tmux observers now install from their own published packages: `pipx install solstone-linux` (or `solstone-tmux`), `solstone-linux install-service` (or `solstone-tmux install-service`), then `sol observer create <name>` mints a key you give the observer. the macOS observer continues to come from the signed app bundle at solstone.app/observers.
+- the bundled per-provider install commands are gone — `sol call settings providers install` now accepts `local` only (cogitate runs out of the box for hosted providers with a key set), and `uninstall`/`disable`/`enable`/`validate-key` are removed entirely. local install continues to work via `sol call settings providers install local`.
+
+## [0.4.3] - 2026-05-27
+
+### Added
+- a dedicated reader for facet newsletters at `/app/news/`. reverse-chrono index across all your facets, per-day detail with a copy button and a pdf download, and a sample newsletter so you can see the shape before your first one lands. newsletters sit next to reflections in the sidebar.
+
+### Changed
+- the participation tab on an activity now shows a structured list of people, grouped into attendees and mentioned, with a short note next to each name about how that person showed up in the activity. low-confidence entries appear muted with a "less certain" tag, and empty or unavailable states read in plain language instead of raw json.
+
+### Fixed
+- weekly reflection writes a full reflection to your journal again. on busy journals it was running out of room mid-gather and either saving nothing or saving only a short summary; both paths are resolved, and the reflections page renders again.
+- attendee lists are stricter about who counts as an attendee. someone whose name only appeared in a transcript, without other corroboration, is now demoted to mentioned rather than surfaced as an attendee. reported by Ryan during a walkthrough.
+- background work sol runs through google (morning briefings and other scheduled talents) no longer fails silently on a size limit. a request-budget calculation was landing one over the supported maximum, rejecting every call on the default settings; the calculation is corrected.
+- sidebar labels in the expanded menu no longer truncate. entities, transcripts, and other longer labels show in full at narrower window widths. reported by Ryan.
+
+## [0.4.2] - 2026-05-26
+
+### fixed
+- on a fresh install, `journal setup` could stop on a doctor check that flagged the `sol` command on your machine as out of place — even when it was the one journal had just put there. if you hit this setting up 0.4.1, this resolves it.
+
+## [0.4.1] - 2026-05-26
+
+### fixed
+- some 0.4.0 installs didn't come back up after upgrading — sol wouldn't start, and journal commands timed out. this resolves it.
+
+## [0.4.0] — 2026-05-26
+
+### changed
+- **service commands moved fully to `journal`.** Service commands (supervisor, cortex, heartbeat, setup, transcribe, services, etc.) are no longer surfaced under `sol` — they live exclusively under `journal`. Your existing solstone service migrates itself automatically on the next service restart; no action needed.
+- `journal start` is now the canonical run command (replaces `journal supervisor` as the service-unit entry point — old units self-migrate).
+- the `sol` CLI continues to be your day-to-day surface (chat, call, top, import, search across the journal).
+
+### removed
+- `sol <service-cmd>` paths typed by a human now redirect to `journal <cmd>` with a clear error and exit non-zero. Service units still pointing at the old paths self-migrate; nothing on disk breaks.
+
+## [0.3.10] — 2026-05-26
+
+### Added
+- **journal CLI** — `solstone` now installs two CLI binaries: `sol` (the day-to-day surface for talking to your journal — chat, call, top, import, etc.) and `journal` (host operations — supervisor, setup, install-models, the daemons that tend your journal). `sol --help` shows both surfaces; `journal --help` shows just the host commands. Existing `sol <cmd>` invocations all keep working. Internal docs and scripts use `journal <cmd>` for host operations going forward.
 
 ## [0.3.9] - 2026-05-25
 
