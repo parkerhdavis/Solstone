@@ -360,14 +360,14 @@ as **"MLX (Local, Apple Silicon)"**.
 
 ### Benchmark Surface (speed heuristic)
 
-Users picking an Ollama tier need to know what that means on their machine.
+Users picking a local tier need to know what that means on their machine.
 The ``benchmark`` app provides a speed heuristic that doesn't require
 pulling the models first:
 
 - ``sol call benchmark profile`` — probes the host (CPU / RAM / NVIDIA
   GPUs via ``nvidia-smi``) and caches the result at
   ``journal/health/hardware.json``. NVIDIA-only for Phase 1.
-- ``sol call benchmark list-models`` — lists pre-vetted Ollama models
+- ``sol call benchmark list-models`` — lists pre-vetted local models
   alongside their estimated output tok/s on this host, VRAM requirements,
   and installed/not-installed status.
 - ``sol call benchmark estimate <model-id>`` — single-model estimate.
@@ -385,18 +385,18 @@ To seed measurements on new hardware, maintainers run the harness:
 
 ```
 # Text-generation models
-python -m think.benchmark.harness --model ollama-local/qwen3.5:9b \
+python -m solstone.think.benchmark.harness --model local/qwen2.5-coder-7b \
     --class rtx-4090
 
 # Vision-language models (add --vision so prompt-eval captures the
 # image-encoder cost, not just text tokens)
-python -m think.benchmark.harness --model ollama-local/qwen2.5vl:7b \
+python -m solstone.think.benchmark.harness --model local/nemotron-3-nano-omni \
     --class rtx-4090 --vision
 ```
 
 The harness caps the benchmark to an 8K context to keep the compute
-graph tractable on unified-memory hosts (Ollama's default is 256K,
-which balloons memory for large models). Output includes a ``mode``
+graph tractable on unified-memory hosts (serving a model's full trained
+context would balloon memory for large models). Output includes a ``mode``
 field (``text_only`` vs ``vision``). The harness prints a JSON snippet
 to paste into ``models.json``; it does not edit the registry itself.
 

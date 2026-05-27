@@ -32,7 +32,7 @@ For each registered provider and model, what can it be used for. Marker key:
 
 ## Cloud providers (tier-routed, require API key + outbound network)
 
-Cogitate for all three cloud providers now runs through the **`openhands` façade** (`openhands-sdk` + LiteLLM), installed on-demand via `solstone/think/providers/bundled.py`. The registry maps `google`/`openai`/`anthropic` → `solstone.think.providers.openhands` for the agentic loop; `run_generate`/`run_agenerate` stay in the per-provider modules.
+Cogitate for all three cloud providers now runs through the **`openhands` façade** (`openhands-sdk` + LiteLLM), which ships as a base dependency — no install step; cogitate is ready as soon as the provider's env key is set. The registry maps `google`/`openai`/`anthropic` → `solstone.think.providers.openhands` for the agentic loop; `run_generate`/`run_agenerate` stay in the per-provider modules.
 
 | Provider | Text Gen | Cogitate | Vision in | Audio in | Embeddings | Notes |
 |----------|:--------:|:--------:|:---------:|:--------:|:----------:|-------|
