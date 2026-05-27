@@ -4,17 +4,17 @@
 """Cross-platform background service management for solstone.
 
 Usage:
-    sol service install [--port PORT]  Install solstone as a background service
-    sol service uninstall              Remove the background service
-    sol service start                  Start the background service
-    sol service stop                   Stop the background service
-    sol service restart [--if-installed]  Restart the background service
-    sol service status                 Show service installation and runtime status
-    sol service logs                   View service logs
-    sol service logs -f                Follow service logs
+    journal service install [--port PORT]  Install solstone as a background service
+    journal service uninstall              Remove the background service
+    journal service start                  Start the background service
+    journal service stop                   Stop the background service
+    journal service restart [--if-installed]  Restart the background service
+    journal service status                 Show service installation and runtime status
+    journal service logs                   View service logs
+    journal service logs -f                Follow service logs
 
-    sol up                             Install (if needed), start, and show status
-    sol down                           Stop the background service
+    journal up                             Install (if needed), start, and show status
+    journal down                           Stop the background service
 
 Default convey port for installed services is 5015.
 """
@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import os
 import plistlib
+import shlex
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from xml.parsers.expat import ExpatError
 
@@ -38,10 +40,18 @@ DEFAULT_SERVICE_PORT = 5015
 READY_TIMEOUT_SECONDS = 60.0
 
 
+@dataclass(frozen=True)
+class Reconciled:
+    was_stale: bool
+    stale_binary: str | None
+    stale_verb: str | None
+    canonical_path: Path | None
+
+
 def _ready_timeout_message() -> str:
     return (
         f"Service did not become ready within {READY_TIMEOUT_SECONDS:g}s — "
-        "run 'sol service status' or 'sol doctor' for diagnostics"
+        "run 'journal service status' or 'sol doctor' for diagnostics"
     )
 
 
@@ -64,9 +74,9 @@ def _unit_path() -> Path:
     return Path.home() / ".config" / "systemd" / "user" / f"{SYSTEMD_UNIT}.service"
 
 
-def _sol_bin() -> str:
-    """Return absolute path to the managed sol wrapper."""
-    return str(Path.home() / ".local" / "bin" / "sol")
+def _managed_wrapper(binary: str) -> str:
+    """Return absolute path to a managed user wrapper."""
+    return str(Path.home() / ".local" / "bin" / binary)
 
 
 def service_is_installed() -> bool:
@@ -106,7 +116,7 @@ def _collect_env() -> dict[str, str]:
     from journal.json at process startup via setup_cli().
 
     Never propagate SOLSTONE_JOURNAL into service files. Installed services
-    invoke ~/.local/bin/sol, which is a managed wrapper that sets
+    invoke ~/.local/bin/journal, which is a managed wrapper that sets
     SOLSTONE_JOURNAL itself. The service's job is to start the wrapper, not
     to configure the journal path.
     """
@@ -129,12 +139,12 @@ def _generate_plist(
 ) -> bytes:
     """Generate a launchd plist for the solstone supervisor."""
     validate_journal_path_for_wrapper(journal_path)
-    sol = _sol_bin()
+    journal = _managed_wrapper("journal")
     service_log = str(Path(journal_path) / "health" / "service.log")
 
     plist = {
         "Label": SERVICE_LABEL,
-        "ProgramArguments": [sol, "supervisor", str(port)],
+        "ProgramArguments": [journal, "start", str(port)],
         "EnvironmentVariables": env,
         "StandardOutPath": service_log,
         "StandardErrorPath": service_log,
@@ -142,6 +152,153 @@ def _generate_plist(
         "KeepAlive": {"SuccessfulExit": False},
     }
     return plistlib.dumps(plist)
+
+
+def _not_loaded_markers() -> tuple[str, ...]:
+    return (
+        "could not find",
+        "service not found",
+        "no such process",
+        "not currently loaded",
+    )
+
+
+def _parse_exec_start(line: str) -> list[str] | None:
+    if not line.startswith("ExecStart="):
+        return None
+    value = line.removeprefix("ExecStart=").strip()
+    if not value:
+        return None
+    return shlex.split(value)
+
+
+def _exec_start_parts_from_lines(path: Path, lines: list[str]) -> list[str] | None:
+    for line in lines:
+        try:
+            parts = _parse_exec_start(line.rstrip("\n"))
+        except ValueError as exc:
+            print(f"skipping {path}: invalid ExecStart: {exc}", file=sys.stderr)
+            return None
+        if parts is not None:
+            return parts
+    print(f"skipping {path}: no ExecStart", file=sys.stderr)
+    return None
+
+
+def _systemd_exec_start_parts(path: Path) -> tuple[list[str] | None, list[str]]:
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    parts = _exec_start_parts_from_lines(path, lines)
+    return parts, lines
+
+
+def _classify_unit_args(args: list[str]) -> tuple[str, str, list[str], bool] | None:
+    if len(args) < 2:
+        return None
+    binary = Path(args[0]).name
+    verb = args[1]
+    rest = args[2:]
+    if binary not in {"sol", "journal"}:
+        return None
+    is_canonical = binary == "journal" and verb == "start"
+    return binary, verb, rest, is_canonical
+
+
+def _canonical_start_args(rest: list[str]) -> list[str]:
+    return [_managed_wrapper("journal"), "start", *rest]
+
+
+def _reconcile_systemd_unit() -> Reconciled:
+    path = _unit_path()
+    if not path.exists():
+        return Reconciled(False, None, None, None)
+
+    parts, lines = _systemd_exec_start_parts(path)
+    if parts is None:
+        return Reconciled(False, None, None, path)
+
+    classified = _classify_unit_args(parts)
+    if classified is None:
+        return Reconciled(False, None, None, path)
+
+    binary, verb, rest, is_canonical = classified
+    canonical = _canonical_start_args(rest)
+    if is_canonical and parts == canonical:
+        return Reconciled(False, None, None, path)
+
+    if verb not in {"supervisor", "start"}:
+        return Reconciled(False, None, None, path)
+
+    new_exec = f"ExecStart={shlex.join(canonical)}\n"
+    rewritten = []
+    replaced = False
+    for line in lines:
+        if not replaced and line.startswith("ExecStart="):
+            rewritten.append(new_exec if line.endswith("\n") else new_exec.rstrip("\n"))
+            replaced = True
+        else:
+            rewritten.append(line)
+
+    path.write_text("".join(rewritten), encoding="utf-8")
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+    return Reconciled(True, binary, verb, path)
+
+
+def _reconcile_launchd_plist() -> Reconciled:
+    path = _plist_path()
+    if not path.exists():
+        return Reconciled(False, None, None, None)
+
+    try:
+        with path.open("rb") as handle:
+            data = plistlib.load(handle)
+    except (plistlib.InvalidFileException, ValueError, ExpatError) as exc:
+        print(f"skipping {path}: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return Reconciled(False, None, None, path)
+
+    program_arguments = data.get("ProgramArguments")
+    if not isinstance(program_arguments, list):
+        print(f"skipping {path}: no ProgramArguments", file=sys.stderr)
+        return Reconciled(False, None, None, path)
+
+    args = [str(arg) for arg in program_arguments]
+    classified = _classify_unit_args(args)
+    if classified is None:
+        return Reconciled(False, None, None, path)
+
+    binary, verb, rest, is_canonical = classified
+    canonical = _canonical_start_args(rest)
+    if is_canonical and args == canonical:
+        return Reconciled(False, None, None, path)
+
+    if verb not in {"supervisor", "start"}:
+        return Reconciled(False, None, None, path)
+
+    data["ProgramArguments"] = canonical
+    path.write_bytes(plistlib.dumps(data))
+
+    uid = os.getuid()
+    subprocess.run(
+        ["launchctl", "bootout", f"gui/{uid}", str(path)],
+        capture_output=True,
+    )
+    result = subprocess.run(
+        ["launchctl", "bootstrap", f"gui/{uid}", str(path)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"launchctl bootstrap {path}: {result.stderr.strip()}")
+
+    return Reconciled(True, binary, verb, path)
+
+
+def reconcile_installed_unit() -> Reconciled:
+    """Rewrite installed service units to the canonical ``journal start`` shape."""
+    if sys.platform == "darwin":
+        return _reconcile_launchd_plist()
+    if sys.platform.startswith("linux"):
+        return _reconcile_systemd_unit()
+    return Reconciled(False, None, None, None)
 
 
 def remove_stale_plists() -> tuple[int, int]:
@@ -153,16 +310,11 @@ def remove_stale_plists() -> tuple[int, int]:
     if not scan_dir.is_dir():
         return (0, 0)
 
-    current = _sol_bin()
+    current_wrappers = {_managed_wrapper("sol"), _managed_wrapper("journal")}
     uid = os.getuid()
     removed = 0
     failed = 0
-    not_loaded_markers = (
-        "could not find",
-        "service not found",
-        "no such process",
-        "not currently loaded",
-    )
+    not_loaded_markers = _not_loaded_markers()
 
     for path in sorted(scan_dir.glob("*.plist")):
         try:
@@ -192,10 +344,10 @@ def remove_stale_plists() -> tuple[int, int]:
             print(f"skipping {path}: no Program or ProgramArguments", file=sys.stderr)
             continue
 
-        if not extracted.endswith("/sol"):
+        if not extracted.endswith(("/sol", "/journal")):
             continue
 
-        if extracted == current:
+        if extracted in current_wrappers:
             continue
 
         result = subprocess.run(
@@ -221,9 +373,63 @@ def remove_stale_plists() -> tuple[int, int]:
 
         print(
             f"Removed stale launchd plist {path} "
-            f"(referenced {extracted}, current is {current})"
+            f"(referenced {extracted}, current wrappers are {sorted(current_wrappers)})"
         )
         removed += 1
+
+    return (removed, failed)
+
+
+def _systemd_unit_references_solstone(path: Path, lines: list[str]) -> bool:
+    if path.name == f"{SYSTEMD_UNIT}.service":
+        return True
+    return any(
+        line.startswith("Description=") and "solstone" in line.lower() for line in lines
+    )
+
+
+def remove_stale_systemd_units() -> tuple[int, int]:
+    """Remove stale systemd user units from prior installs."""
+    if not sys.platform.startswith("linux"):
+        return (0, 0)
+
+    scan_dir = _unit_path().parent
+    if not scan_dir.is_dir():
+        return (0, 0)
+
+    current_wrappers = {_managed_wrapper("sol"), _managed_wrapper("journal")}
+    removed = 0
+    failed = 0
+
+    for path in sorted(scan_dir.glob("*.service")):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        except OSError as exc:
+            print(f"skipping {path}: {type(exc).__name__}: {exc}", file=sys.stderr)
+            continue
+        if not _systemd_unit_references_solstone(path, lines):
+            continue
+        parts = _exec_start_parts_from_lines(path, lines)
+        if parts is None:
+            continue
+
+        extracted = parts[0]
+        if (
+            Path(extracted).name not in {"sol", "journal"}
+            or extracted not in current_wrappers
+        ):
+            try:
+                path.unlink()
+            except (OSError, PermissionError) as exc:
+                print(f"failed to remove {path}: {exc}", file=sys.stderr)
+                failed += 1
+                continue
+
+            print(
+                f"Removed stale systemd unit {path} "
+                f"(referenced {extracted}, current wrappers are {sorted(current_wrappers)})"
+            )
+            removed += 1
 
     return (removed, failed)
 
@@ -236,7 +442,7 @@ def _generate_systemd_unit(
 ) -> str:
     """Generate a systemd user unit for the solstone supervisor."""
     validate_journal_path_for_wrapper(journal_path)
-    sol = _sol_bin()
+    journal = _managed_wrapper("journal")
     env_lines = "\n".join(f"Environment={k}={v}" for k, v in sorted(env.items()))
     service_log = str(Path(journal_path) / "health" / "service.log")
 
@@ -249,7 +455,7 @@ def _generate_systemd_unit(
         f"\n"
         f"[Service]\n"
         f"Type=notify\n"
-        f"ExecStart={sol} supervisor {port}\n"
+        f"ExecStart={journal} start {port}\n"
         f"Restart=on-failure\n"
         f"RestartSec=5\n"
         f"KillMode=control-group\n"
@@ -316,6 +522,7 @@ def _install(port: int = DEFAULT_SERVICE_PORT) -> int:
         print("Service loaded into launchd")
 
     else:
+        remove_stale_systemd_units()
         unit_content = _generate_systemd_unit(env, port=port, journal_path=journal_path)
         path = _unit_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -379,7 +586,7 @@ def _start() -> int:
         path = _plist_path()
         if not path.exists():
             print(
-                "Error: service not installed. Run 'sol service install' first.",
+                "Error: service not installed. Run 'journal service install' first.",
                 file=sys.stderr,
             )
             return 1
@@ -394,7 +601,7 @@ def _start() -> int:
     else:
         if not _unit_path().exists():
             print(
-                "Error: service not installed. Run 'sol service install' first.",
+                "Error: service not installed. Run 'journal service install' first.",
                 file=sys.stderr,
             )
             return 1
@@ -443,7 +650,7 @@ def _restart(if_installed: bool = False) -> int:
         if if_installed:
             return 0
         print(
-            "Error: service not installed. Run 'sol service install' first.",
+            "Error: service not installed. Run 'journal service install' first.",
             file=sys.stderr,
         )
         return 1
@@ -491,7 +698,9 @@ def _status() -> int:
 
     if not service_is_installed():
         print("Service: not installed")
-        print("Run 'sol service install' to install, or 'sol up' to install and start.")
+        print(
+            "Run 'journal service install' to install, or 'journal up' to install and start."
+        )
         return 1
 
     print("Service: installed")
@@ -584,6 +793,17 @@ _SUBCOMMANDS = {
 }
 
 
+def _print_usage() -> None:
+    print("Usage: journal service <install|uninstall|start|stop|restart|status|logs>")
+    print("       journal service install [--port PORT]  (default: 5015)")
+    print(
+        "       journal service restart [--if-installed]  "
+        "(restart; --if-installed noops if not installed)"
+    )
+    print("       journal up [--port PORT]               (install + start + status)")
+    print("       journal down                           (stop)")
+
+
 def _parse_port(args: list[str]) -> int:
     """Extract --port PORT from args, return DEFAULT_SERVICE_PORT if absent."""
     for i, arg in enumerate(args):
@@ -603,22 +823,19 @@ def _parse_port(args: list[str]) -> int:
 
 
 def main() -> None:
-    """Entry point for ``sol service``."""
+    """Entry point for ``journal service``."""
     args = sys.argv[1:]
 
     if args and args[0] == "logs":
         follow = "-f" in args[1:] or "--follow" in args[1:]
         sys.exit(_logs(follow=follow))
 
+    if "--help" in args or "-h" in args:
+        _print_usage()
+        sys.exit(0)
+
     if not args:
-        print("Usage: sol service <install|uninstall|start|stop|restart|status|logs>")
-        print("       sol service install [--port PORT]  (default: 5015)")
-        print(
-            "       sol service restart [--if-installed]  "
-            "(restart; --if-installed noops if not installed)"
-        )
-        print("       sol up [--port PORT]               (install + start + status)")
-        print("       sol down                           (stop)")
+        _print_usage()
         sys.exit(1)
 
     subcmd = args[0]

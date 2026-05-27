@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -12,6 +12,8 @@ import frontmatter
 from flask import Blueprint, Response, jsonify, redirect, render_template, url_for
 from markdown import Markdown
 
+from solstone.apps.reflections import copy as reflections_copy
+from solstone.apps.reflections.dates import next_reflection_sunday
 from solstone.convey.reasons import INVALID_MONTH
 from solstone.convey.utils import DATE_RE, error_response, format_date
 from solstone.think.features import require_extra
@@ -116,6 +118,19 @@ def _canonical_redirect(endpoint: str, day: str) -> Response | None:
 
 @reflections_bp.route("/")
 def index() -> str:
+    tz = get_owner_timezone()
+    today: date = datetime.now(tz).date()
+    journal = Path(get_journal())
+    next_sunday = next_reflection_sunday(journal, today, tz)
+    if next_sunday is None:
+        empty_next = reflections_copy.EMPTY_NEXT_NO_DATE
+        populated_next_footer = None
+    else:
+        empty_next = reflections_copy.EMPTY_NEXT_WITH_DATE.format(sunday=next_sunday)
+        populated_next_footer = reflections_copy.POPULATED_NEXT_FOOTER.format(
+            sunday=next_sunday
+        )
+
     weeks = [
         {
             "day": day,
@@ -129,6 +144,15 @@ def index() -> str:
         app="reflections",
         view_mode="index",
         weeks=weeks,
+        subtitle=reflections_copy.SUBTITLE,
+        empty_body=reflections_copy.EMPTY_BODY,
+        empty_next=empty_next,
+        empty_until_then=reflections_copy.EMPTY_UNTIL_THEN,
+        sample_link_label=reflections_copy.SAMPLE_LINK_LABEL,
+        sample_url=url_for("app:reflections.sample"),
+        populated_framing=reflections_copy.POPULATED_FRAMING,
+        populated_sample_link=reflections_copy.POPULATED_SAMPLE_LINK,
+        populated_next_footer=populated_next_footer,
     )
 
 
@@ -208,6 +232,28 @@ def week_pdf(day: str) -> Any:
                 f'attachment; filename="reflection-{canonical_day}.pdf"'
             )
         },
+    )
+
+
+@reflections_bp.route("/sample")
+def sample() -> Any:
+    post = frontmatter.loads(reflections_copy.SAMPLE_CONTENT)
+    return render_template(
+        "app.html",
+        app="reflections",
+        view_mode="sample",
+        reflection_markdown=post.content,
+        raw_url=url_for("app:reflections.sample_raw"),
+        sample_banner=reflections_copy.SAMPLE_BANNER,
+    )
+
+
+@reflections_bp.route("/sample/raw")
+def sample_raw() -> Any:
+    return (
+        reflections_copy.SAMPLE_CONTENT,
+        200,
+        {"Content-Type": "text/markdown; charset=utf-8"},
     )
 
 

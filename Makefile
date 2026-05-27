@@ -111,7 +111,7 @@ install: .installed
 		exit 1; \
 	fi
 	@touch .installed
-	@$(VENV_BIN)/sol install-models || { echo "sol install-models failed" >&2; exit 1; }
+	@$(VENV_BIN)/journal install-models || { echo "journal install-models failed" >&2; exit 1; }
 
 # Setup skill symlinks
 skills:
@@ -119,7 +119,7 @@ skills:
 
 # Start local dev stack against fixture journal (no observers, no daily processing)
 dev: .installed
-	$(TEST_ENV) PATH=$(CURDIR)/$(VENV_BIN):$$PATH $(VENV_BIN)/sol supervisor 0 --no-daily
+	$(TEST_ENV) PATH=$(CURDIR)/$(VENV_BIN):$$PATH $(VENV_BIN)/journal supervisor 0 --no-daily
 
 # Start sandbox stack: fixture copy + background supervisor + readiness wait
 sandbox: .installed
@@ -141,7 +141,7 @@ sandbox: .installed
 	echo "Sandbox journal: $$SANDBOX_JOURNAL"; \
 	# Boot supervisor in background \
 	SOLSTONE_JOURNAL="$$SANDBOX_JOURNAL" PATH=$(CURDIR)/$(VENV_BIN):$$PATH \
-		$(VENV_BIN)/sol supervisor 0 --no-daily \
+		$(VENV_BIN)/journal supervisor 0 --no-daily \
 		> "$$SANDBOX_JOURNAL/health/supervisor.log" 2>&1 & \
 	echo $$! > .sandbox.pid; \
 	echo "Supervisor PID: $$(cat .sandbox.pid)"; \
@@ -241,7 +241,7 @@ install-pinchtab:
 # Install and verify local ML models
 install-models:
 	@test -x "$(VENV_BIN)/sol" || { echo "missing $(VENV_BIN)/sol; run make install first" >&2; exit 1; }
-	$(VENV_BIN)/sol install-models
+	$(VENV_BIN)/journal install-models
 
 # Build the parakeet helper binary (macOS/arm64 only, requires Xcode CLT)
 parakeet-helper:
@@ -456,10 +456,10 @@ clean:
 
 # Follow installed service logs
 service-logs:
-	$(VENV_BIN)/sol service logs -f
+	$(VENV_BIN)/journal service logs -f
 
 uninstall:
-	@echo "Error: 'make uninstall' is disabled. Use 'sol service uninstall', 'sol skills uninstall', and 'python -m solstone.think.install_guard uninstall' to remove installed user artifacts, or 'make clean-install' to rebuild the local dev environment." >&2
+	@echo "Error: 'make uninstall' is disabled. Use 'journal service uninstall', 'sol skills uninstall', and 'python -m solstone.think.install_guard uninstall' to remove installed user artifacts, or 'make clean-install' to rebuild the local dev environment." >&2
 	@exit 1
 
 FORCE:

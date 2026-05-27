@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date, datetime
 
 import pytest
@@ -26,8 +27,14 @@ def _reset_chat_state(chat_module) -> None:
     with chat_module._state_lock:
         chat_module._current_chat_use_id = None
         chat_module._current_chat_state = None
-        chat_module._queued_trigger = None
+        chat_module._queued_triggers.clear()
         chat_module._active_talents.clear()
+        chat_module._reserved_use_ids.clear()
+        chat_module._thinking_buffers.clear()
+        chat_module._thinking_providers.clear()
+        for timer in chat_module._watchdog_timers.values():
+            timer.cancel()
+        chat_module._watchdog_timers.clear()
         chat_module._last_use_id = 0
 
 
@@ -47,6 +54,30 @@ def _write_talent_log(
     )
 
 
+def _post_chat_message(client, message: str):
+    return client.post(
+        "/api/chat",
+        json={
+            "message": message,
+            "app": "sol",
+            "path": "/app/sol",
+            "facet": "work",
+        },
+    )
+
+
+def _set_current_chat(chat_module, logical_use_id: str, raw_use_id: str | None) -> None:
+    with chat_module._state_lock:
+        chat_module._current_chat_use_id = logical_use_id
+        chat_module._current_chat_state = {
+            "raw_use_id": raw_use_id,
+            "raw_use_ids_seen": {raw_use_id} if raw_use_id else set(),
+            "trigger": {"type": "owner_message", "message": "help"},
+            "location": {"app": "sol", "path": "/app/sol", "facet": "work"},
+            "retry_count": 0,
+        }
+
+
 @pytest.fixture
 def chat_client(tmp_path, monkeypatch):
     import solstone.convey.chat as chat
@@ -58,6 +89,445 @@ def chat_client(tmp_path, monkeypatch):
     app.config["TESTING"] = True
     app.register_blueprint(chat_bp)
     return app.test_client()
+
+
+def test_cortex_thinking_reaches_sol_message(chat_client, monkeypatch):
+    import solstone.convey.chat as chat
+
+    monkeypatch.setattr(
+        "solstone.convey.chat._emit_cortex_event", lambda *_args, **_kwargs: None
+    )
+    _set_current_chat(chat, "logical-chat", "raw-chat")
+
+    chat._handle_callosum_message(
+        {
+            "tract": "cortex",
+            "event": "start",
+            "use_id": "raw-chat",
+            "provider": "openai",
+        }
+    )
+    for summary in ("first thought", "second thought"):
+        chat._handle_callosum_message(
+            {
+                "tract": "cortex",
+                "event": "thinking",
+                "use_id": "raw-chat",
+                "summary": summary,
+            }
+        )
+    chat._on_cortex_finish(
+        {
+            "use_id": "raw-chat",
+            "model": "gpt-reasoning",
+            "usage": {"reasoning_tokens": 100},
+            "result": json.dumps(
+                {
+                    "message": "done",
+                    "notes": "ok",
+                    "talent_request": None,
+                }
+            ),
+        }
+    )
+
+    sol_message = next(
+        event
+        for event in read_chat_events(date.today().strftime("%Y%m%d"))
+        if event["kind"] == "sol_message"
+    )
+    assert sol_message["thinking"] == {
+        "content": "first thought\n\nsecond thought",
+        "provider": "openai",
+        "model": "gpt-reasoning",
+        "tokens": 100,
+    }
+    assert "raw-chat" not in chat._thinking_buffers
+    assert "raw-chat" not in chat._thinking_providers
+
+
+def test_cortex_thinking_reaches_talent_finished(chat_client, monkeypatch):
+    import solstone.convey.chat as chat
+
+    monkeypatch.setattr(
+        "solstone.convey.chat._emit_cortex_event", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr("solstone.convey.chat._run_next_action", lambda _action: None)
+    monkeypatch.setattr(
+        "solstone.convey.chat._arm_watchdog_locked", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        "solstone.convey.chat._cancel_watchdog_locked", lambda *_args, **_kwargs: None
+    )
+    _set_current_chat(chat, "logical-chat", None)
+    with chat._state_lock:
+        chat._active_talents["talent-raw"] = {
+            "chat_use_id": "logical-chat",
+            "target": "exec",
+            "task": "research",
+            "location": {"app": "sol", "path": "/app/sol", "facet": "work"},
+        }
+
+    chat._handle_callosum_message(
+        {
+            "tract": "cortex",
+            "event": "start",
+            "use_id": "talent-raw",
+            "provider": "anthropic",
+        }
+    )
+    chat._handle_callosum_message(
+        {
+            "tract": "cortex",
+            "event": "thinking",
+            "use_id": "talent-raw",
+            "summary": "talent thought",
+        }
+    )
+    chat._on_cortex_finish(
+        {
+            "use_id": "talent-raw",
+            "model": "claude-reasoning",
+            "usage": {"reasoning_tokens": 7},
+            "result": "summary",
+        }
+    )
+
+    finished = next(
+        event
+        for event in read_chat_events(date.today().strftime("%Y%m%d"))
+        if event["kind"] == "talent_finished"
+    )
+    assert finished["thinking"] == {
+        "content": "talent thought",
+        "provider": "anthropic",
+        "model": "claude-reasoning",
+        "tokens": 7,
+    }
+
+
+def test_sol_message_omits_thinking_when_not_emitted(chat_client, monkeypatch, caplog):
+    import solstone.convey.chat as chat
+
+    monkeypatch.setattr(
+        "solstone.convey.chat._emit_cortex_event", lambda *_args, **_kwargs: None
+    )
+    _set_current_chat(chat, "logical-chat", "raw-chat")
+
+    with caplog.at_level(logging.WARNING, logger="solstone.convey.chat"):
+        chat._on_cortex_finish(
+            {
+                "use_id": "raw-chat",
+                "result": {
+                    "message": "done",
+                    "notes": "ok",
+                    "talent_request": None,
+                },
+            }
+        )
+
+    sol_message = next(
+        event
+        for event in read_chat_events(date.today().strftime("%Y%m%d"))
+        if event["kind"] == "sol_message"
+    )
+    assert "thinking" not in sol_message
+    assert caplog.records == []
+
+
+def test_empty_thinking_summary_is_suppressed(chat_client, monkeypatch):
+    import solstone.convey.chat as chat
+
+    monkeypatch.setattr(
+        "solstone.convey.chat._emit_cortex_event", lambda *_args, **_kwargs: None
+    )
+    _set_current_chat(chat, "logical-chat", "raw-chat")
+
+    chat._handle_callosum_message(
+        {
+            "tract": "cortex",
+            "event": "thinking",
+            "use_id": "raw-chat",
+            "summary": "   \n",
+        }
+    )
+    chat._on_cortex_finish(
+        {
+            "use_id": "raw-chat",
+            "result": {
+                "message": "done",
+                "notes": "ok",
+                "talent_request": None,
+            },
+        }
+    )
+
+    sol_message = next(
+        event
+        for event in read_chat_events(date.today().strftime("%Y%m%d"))
+        if event["kind"] == "sol_message"
+    )
+    assert "thinking" not in sol_message
+
+
+def test_thinking_buffers_are_isolated_and_cleared(chat_client, monkeypatch):
+    import solstone.convey.chat as chat
+
+    monkeypatch.setattr(
+        "solstone.convey.chat._emit_cortex_event", lambda *_args, **_kwargs: None
+    )
+    _set_current_chat(chat, "logical-chat", "raw-chat")
+    with chat._state_lock:
+        chat._active_talents["talent-raw"] = {
+            "chat_use_id": "logical-chat",
+            "target": "exec",
+            "task": "research",
+            "location": {"app": "sol", "path": "/app/sol", "facet": "work"},
+        }
+
+    chat._handle_callosum_message(
+        {
+            "tract": "cortex",
+            "event": "thinking",
+            "use_id": "raw-chat",
+            "summary": "chat thought",
+        }
+    )
+    chat._handle_callosum_message(
+        {
+            "tract": "cortex",
+            "event": "thinking",
+            "use_id": "talent-raw",
+            "summary": "talent thought",
+        }
+    )
+    chat._on_cortex_finish(
+        {
+            "use_id": "raw-chat",
+            "result": {
+                "message": "done",
+                "notes": "ok",
+                "talent_request": None,
+            },
+        }
+    )
+
+    sol_message = next(
+        event
+        for event in read_chat_events(date.today().strftime("%Y%m%d"))
+        if event["kind"] == "sol_message"
+    )
+    assert sol_message["thinking"]["content"] == "chat thought"
+    assert "raw-chat" not in chat._thinking_buffers
+    assert chat._thinking_buffers["talent-raw"] == ["talent thought"]
+
+
+def test_thinking_buffer_evicted_on_retry_rotation(chat_client, monkeypatch):
+    import solstone.convey.chat as chat
+
+    monkeypatch.setattr(
+        "solstone.convey.chat._emit_cortex_event", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr("solstone.convey.chat._run_next_action", lambda _action: None)
+    monkeypatch.setattr(
+        "solstone.convey.chat._arm_watchdog_locked", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        "solstone.convey.chat._cancel_watchdog_locked", lambda *_args, **_kwargs: None
+    )
+    _set_current_chat(chat, "logical-chat", "raw-old")
+    chat._handle_callosum_message(
+        {
+            "tract": "cortex",
+            "event": "thinking",
+            "use_id": "raw-old",
+            "summary": "old thought",
+        }
+    )
+
+    chat._on_cortex_finish({"use_id": "raw-old", "result": "not json"})
+
+    with chat._state_lock:
+        raw_new = str(chat._current_chat_state["raw_use_id"])
+    assert "raw-old" not in chat._thinking_buffers
+    chat._handle_callosum_message(
+        {
+            "tract": "cortex",
+            "event": "thinking",
+            "use_id": raw_new,
+            "summary": "new thought",
+        }
+    )
+    chat._on_cortex_finish(
+        {
+            "use_id": raw_new,
+            "result": {
+                "message": "done",
+                "notes": "ok",
+                "talent_request": None,
+            },
+        }
+    )
+
+    sol_message = next(
+        event
+        for event in read_chat_events(date.today().strftime("%Y%m%d"))
+        if event["kind"] == "sol_message"
+    )
+    assert sol_message["thinking"]["content"] == "new thought"
+
+
+def test_thinking_buffer_clear_across_synthetic_max_active_rotation(
+    chat_client, monkeypatch
+):
+    import solstone.convey.chat as chat
+
+    monkeypatch.setattr(
+        "solstone.convey.chat._emit_cortex_event", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr("solstone.convey.chat._run_next_action", lambda _action: None)
+    monkeypatch.setattr(
+        "solstone.convey.chat._active_talent_count_for_today_locked",
+        lambda: chat.MAX_ACTIVE_TALENTS,
+    )
+    monkeypatch.setattr(
+        "solstone.convey.chat._arm_watchdog_locked", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        "solstone.convey.chat._cancel_watchdog_locked", lambda *_args, **_kwargs: None
+    )
+    _set_current_chat(chat, "logical-chat", "raw-old")
+    chat._handle_callosum_message(
+        {
+            "tract": "cortex",
+            "event": "thinking",
+            "use_id": "raw-old",
+            "summary": "old thought",
+        }
+    )
+
+    chat._on_cortex_finish(
+        {
+            "use_id": "raw-old",
+            "result": {
+                "message": "checking",
+                "notes": "ok",
+                "talent_request": {
+                    "target": "exec",
+                    "task": "research",
+                    "context": "{}",
+                },
+            },
+        }
+    )
+
+    with chat._state_lock:
+        raw_new = str(chat._current_chat_state["raw_use_id"])
+    assert "raw-old" not in chat._thinking_buffers
+    chat._handle_callosum_message(
+        {
+            "tract": "cortex",
+            "event": "thinking",
+            "use_id": raw_new,
+            "summary": "synthetic thought",
+        }
+    )
+    assert chat._thinking_buffers[raw_new] == ["synthetic thought"]
+
+
+def test_late_thinking_arrival_drops_without_mutating_events(
+    chat_client, monkeypatch, caplog
+):
+    import solstone.convey.chat as chat
+
+    monkeypatch.setattr(
+        "solstone.convey.chat._emit_cortex_event", lambda *_args, **_kwargs: None
+    )
+    events_before = list(read_chat_events(date.today().strftime("%Y%m%d")))
+
+    with caplog.at_level(logging.DEBUG, logger="solstone.convey.chat"):
+        chat._handle_callosum_message(
+            {
+                "tract": "cortex",
+                "event": "thinking",
+                "use_id": "late-raw",
+                "summary": "too late",
+            }
+        )
+
+    assert "dropping late thinking event use_id=late-raw" in caplog.text
+    assert read_chat_events(date.today().strftime("%Y%m%d")) == events_before
+    assert chat._thinking_buffers == {}
+
+
+def test_talent_error_evicts_but_does_not_attach_thinking(chat_client, monkeypatch):
+    import solstone.convey.chat as chat
+
+    monkeypatch.setattr(
+        "solstone.convey.chat._emit_cortex_event", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr("solstone.convey.chat._run_next_action", lambda _action: None)
+    _set_current_chat(chat, "logical-chat", None)
+    with chat._state_lock:
+        chat._active_talents["talent-raw"] = {
+            "chat_use_id": "logical-chat",
+            "target": "exec",
+            "task": "research",
+            "location": {"app": "sol", "path": "/app/sol", "facet": "work"},
+        }
+    chat._handle_callosum_message(
+        {
+            "tract": "cortex",
+            "event": "thinking",
+            "use_id": "talent-raw",
+            "summary": "do not attach",
+        }
+    )
+
+    chat._on_cortex_error({"use_id": "talent-raw", "error": "boom"})
+
+    errored = next(
+        event
+        for event in read_chat_events(date.today().strftime("%Y%m%d"))
+        if event["kind"] == "talent_errored"
+    )
+    assert "thinking" not in errored
+    assert "talent-raw" not in chat._thinking_buffers
+
+
+def test_chat_watchdog_timeout_evicts_thinking_buffers(chat_client, monkeypatch):
+    import solstone.convey.chat as chat
+
+    monkeypatch.setattr(
+        "solstone.convey.chat._emit_cortex_event", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr("solstone.convey.chat._run_next_action", lambda _action: None)
+    _set_current_chat(chat, "logical-chat", "raw-timeout")
+
+    chat._handle_callosum_message(
+        {
+            "tract": "cortex",
+            "event": "start",
+            "use_id": "raw-timeout",
+            "provider": "openai",
+        }
+    )
+    chat._handle_callosum_message(
+        {
+            "tract": "cortex",
+            "event": "thinking",
+            "use_id": "raw-timeout",
+            "summary": "thinking before timeout",
+        }
+    )
+
+    assert chat._thinking_buffers["raw-timeout"] == ["thinking before timeout"]
+    assert chat._thinking_providers["raw-timeout"] == "openai"
+
+    chat._on_watchdog_timeout("raw-timeout", "chat", "logical-chat")
+
+    assert "raw-timeout" not in chat._thinking_buffers
+    assert "raw-timeout" not in chat._thinking_providers
 
 
 def test_post_chat_appends_owner_message_and_returns_reserved_use_id(
@@ -87,6 +557,176 @@ def test_post_chat_appends_owner_message_and_returns_reserved_use_id(
     assert payload["queued"] is False
     assert payload["use_id"].isdigit()
     assert starts and starts[-1]["logical_use_id"] == payload["use_id"]
+
+
+def test_post_chat_dispatches_queued_messages_fifo(chat_client, monkeypatch):
+    import solstone.convey.chat as chat
+
+    starts: list[dict] = []
+    monkeypatch.setattr(
+        "solstone.think.identity.ensure_identity_directory", lambda: None
+    )
+    monkeypatch.setattr(
+        "solstone.convey.chat._spawn_chat_generate",
+        lambda action: starts.append(action) or ChatSpawnResult(ok=True),
+    )
+    monkeypatch.setattr(
+        "solstone.convey.chat._emit_cortex_event", lambda *_args, **_kwargs: None
+    )
+
+    responses = [_post_chat_message(chat_client, f"msg {idx}") for idx in range(5)]
+
+    assert [response.status_code for response in responses] == [200] * 5
+    assert [response.get_json()["queued"] for response in responses] == [
+        False,
+        True,
+        True,
+        True,
+        True,
+    ]
+    assert len(starts) == 1
+
+    index = 0
+    while index < len(starts):
+        action = starts[index]
+        message = action["trigger"]["message"]
+        chat._on_cortex_finish(
+            {
+                "use_id": action["raw_use_id"],
+                "result": json.dumps(
+                    {
+                        "message": f"reply {message}",
+                        "notes": "ok",
+                        "talent_request": None,
+                    }
+                ),
+            }
+        )
+        index += 1
+
+    assert [action["trigger"]["message"] for action in starts] == [
+        "msg 0",
+        "msg 1",
+        "msg 2",
+        "msg 3",
+        "msg 4",
+    ]
+    events = read_chat_events(date.today().strftime("%Y%m%d"))
+    replies = [event["text"] for event in events if event["kind"] == "sol_message"]
+    assert replies == [
+        "reply msg 0",
+        "reply msg 1",
+        "reply msg 2",
+        "reply msg 3",
+        "reply msg 4",
+    ]
+
+
+def test_post_chat_rejects_when_queue_depth_cap_reached(chat_client, monkeypatch):
+    import solstone.convey.chat as chat
+
+    monkeypatch.setattr(
+        "solstone.think.identity.ensure_identity_directory", lambda: None
+    )
+    with chat._state_lock:
+        chat._current_chat_use_id = "current"
+        chat._current_chat_state = {
+            "raw_use_id": "raw-current",
+            "raw_use_ids_seen": {"raw-current"},
+            "trigger": {"type": "owner_message", "message": "busy"},
+            "location": {"app": "sol", "path": "/app/sol", "facet": "work"},
+            "retry_count": 0,
+        }
+        for index in range(10):
+            chat._queued_triggers.append(
+                {
+                    "use_id": str(index + 1),
+                    "trigger": {"type": "owner_message", "message": f"queued {index}"},
+                    "location": {"app": "sol", "path": "/app/sol", "facet": "work"},
+                }
+            )
+
+    response = _post_chat_message(chat_client, "one too many")
+
+    assert response.status_code == 429
+    assert response.get_json() == {
+        "error": "Chat queue full",
+        "reason_code": "chat_queue_full",
+        "detail": "",
+    }
+    events = read_chat_events(date.today().strftime("%Y%m%d"))
+    assert [event for event in events if event["kind"] == "owner_message"] == []
+    assert [event for event in events if event["kind"] == "chat_queue_depth"] == []
+
+
+def test_chat_error_starts_next_queued_message(chat_client, monkeypatch):
+    import solstone.convey.chat as chat
+
+    starts: list[dict] = []
+    monkeypatch.setattr(
+        "solstone.think.identity.ensure_identity_directory", lambda: None
+    )
+    monkeypatch.setattr(
+        "solstone.convey.chat._spawn_chat_generate",
+        lambda action: starts.append(action) or ChatSpawnResult(ok=True),
+    )
+    monkeypatch.setattr(
+        "solstone.convey.chat._emit_cortex_event", lambda *_args, **_kwargs: None
+    )
+
+    assert _post_chat_message(chat_client, "first").status_code == 200
+    assert _post_chat_message(chat_client, "second").status_code == 200
+    assert len(starts) == 1
+
+    chat._handle_chat_failure(starts[0]["logical_use_id"], "unknown")
+
+    assert [action["trigger"]["message"] for action in starts] == [
+        "first",
+        "second",
+    ]
+    errors = [
+        event
+        for event in read_chat_events(date.today().strftime("%Y%m%d"))
+        if event["kind"] == "chat_error"
+    ]
+    assert errors[-1]["use_id"] == starts[0]["logical_use_id"]
+    assert errors[-1]["reason"] == "unknown"
+
+
+def test_queue_depth_events_emit_on_enqueue_and_dequeue(chat_client, monkeypatch):
+    import solstone.convey.chat as chat
+
+    starts: list[dict] = []
+    monkeypatch.setattr(
+        "solstone.think.identity.ensure_identity_directory", lambda: None
+    )
+    monkeypatch.setattr(
+        "solstone.convey.chat._spawn_chat_generate",
+        lambda action: starts.append(action) or ChatSpawnResult(ok=True),
+    )
+    monkeypatch.setattr(
+        "solstone.convey.chat._emit_cortex_event", lambda *_args, **_kwargs: None
+    )
+
+    for message in ("first", "second", "third"):
+        assert _post_chat_message(chat_client, message).status_code == 200
+
+    for index in range(2):
+        action = starts[index]
+        chat._on_cortex_finish(
+            {
+                "use_id": action["raw_use_id"],
+                "result": {
+                    "message": f"reply {action['trigger']['message']}",
+                    "notes": "ok",
+                    "talent_request": None,
+                },
+            }
+        )
+
+    events = read_chat_events(date.today().strftime("%Y%m%d"))
+    depths = [event["depth"] for event in events if event["kind"] == "chat_queue_depth"]
+    assert depths == [1, 2, 1, 0]
 
 
 def test_handle_chat_failure_threads_pipeline_unavailable(chat_client, monkeypatch):

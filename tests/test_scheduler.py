@@ -255,7 +255,7 @@ class TestLoadConfig:
                     "max_runtime": "30m",
                 },
                 "heartbeat": {
-                    "cmd": ["sol", "heartbeat"],
+                    "cmd": ["journal", "heartbeat"],
                     "every": "daily",
                 },
             },
@@ -563,7 +563,7 @@ class TestWeeklyTime:
             {
                 "weekly_day": "sunday",
                 "weekly_time": "04:00",
-                "w": {"cmd": ["sol", "think", "--weekly"], "every": "weekly"},
+                "w": {"cmd": ["journal", "think", "--weekly"], "every": "weekly"},
             },
         )
         entries = mod.load_config()
@@ -697,7 +697,7 @@ class TestWeeklyTime:
             {
                 "weekly_day": "sunday",
                 "weekly_time": "03:00",
-                "w": {"cmd": ["sol", "think", "--weekly"], "every": "weekly"},
+                "w": {"cmd": ["journal", "think", "--weekly"], "every": "weekly"},
             },
         )
 
@@ -711,7 +711,11 @@ class TestWeeklyTime:
             mod.check()
 
         callosum.emit.assert_called_once()
-        assert callosum.emit.call_args[1]["cmd"] == ["sol", "think", "--weekly"]
+        assert callosum.emit.call_args[1]["cmd"] == [
+            "journal",
+            "think",
+            "--weekly",
+        ]
 
     def test_check_no_fire_before_weekly_boundary(self, journal_path):
         """check() does not fire weekly tasks before the weekly boundary."""
@@ -725,7 +729,7 @@ class TestWeeklyTime:
             {
                 "weekly_day": "sunday",
                 "weekly_time": "03:00",
-                "w": {"cmd": ["sol", "think", "--weekly"], "every": "weekly"},
+                "w": {"cmd": ["journal", "think", "--weekly"], "every": "weekly"},
             },
         )
 
@@ -757,7 +761,7 @@ class TestWeeklyTime:
             {
                 "weekly_day": "sunday",
                 "weekly_time": "03:00",
-                "w": {"cmd": ["sol", "think", "--weekly"], "every": "weekly"},
+                "w": {"cmd": ["journal", "think", "--weekly"], "every": "weekly"},
             },
         )
 
@@ -1150,15 +1154,38 @@ class TestHeartbeatSchedule:
         mod.register_defaults()
 
         assert "heartbeat" in mod._entries
-        assert mod._entries["heartbeat"]["cmd"] == ["sol", "heartbeat"]
+        assert mod._entries["heartbeat"]["cmd"] == ["journal", "heartbeat"]
         assert mod._entries["heartbeat"]["every"] == "daily"
+        assert mod._entries["heartbeat"]["max_runtime"] == 600
 
         config_path = journal_path / "config" / "schedules.json"
         assert config_path.exists()
         with open(config_path) as f:
             raw = json.load(f)
         assert "heartbeat" in raw
-        assert raw["heartbeat"]["cmd"] == ["sol", "heartbeat"]
+        assert raw["heartbeat"]["cmd"] == ["journal", "heartbeat"]
+        assert raw["heartbeat"]["max_runtime"] == "10m"
+        assert raw["weekly-agents"]["max_runtime"] == "30m"
+
+    def test_register_defaults_creates_providers(self, journal_path):
+        """register_defaults() creates a providers health check entry."""
+        import solstone.think.scheduler as mod
+
+        mock_cal = Mock()
+        mod.init(mock_cal)
+        mod.register_defaults()
+
+        config_path = journal_path / "config" / "schedules.json"
+        with open(config_path) as f:
+            raw = json.load(f)
+
+        assert raw["providers"] == {
+            "cmd": ["sol", "providers", "check"],
+            "every": "daily",
+            "enabled": True,
+            "max_runtime": "5m",
+        }
+        assert mod._entries["providers"]["max_runtime"] == 300
 
     def test_register_defaults_idempotent(self, journal_path):
         """register_defaults() does not overwrite existing heartbeat config."""
@@ -1168,7 +1195,7 @@ class TestHeartbeatSchedule:
             journal_path,
             {
                 "heartbeat": {
-                    "cmd": ["sol", "heartbeat", "--custom"],
+                    "cmd": ["journal", "heartbeat", "--custom"],
                     "every": "daily",
                     "enabled": True,
                 }
@@ -1179,13 +1206,59 @@ class TestHeartbeatSchedule:
         mod.init(mock_cal)
         mod.register_defaults()
 
-        assert mod._entries["heartbeat"]["cmd"] == ["sol", "heartbeat", "--custom"]
+        assert mod._entries["heartbeat"]["cmd"] == [
+            "journal",
+            "heartbeat",
+            "--custom",
+        ]
+        config_path = journal_path / "config" / "schedules.json"
+        with open(config_path) as f:
+            raw = json.load(f)
+        assert "max_runtime" not in raw["heartbeat"]
+
+    def test_register_defaults_preserves_disabled_providers(self, journal_path):
+        """register_defaults() does not overwrite disabled providers config."""
+        import solstone.think.scheduler as mod
+
+        existing = {
+            "cmd": ["sol", "providers", "check", "--custom"],
+            "every": "daily",
+            "enabled": False,
+        }
+        _write_config(journal_path, {"providers": existing})
+
+        mock_cal = Mock()
+        mod.init(mock_cal)
+        mod.register_defaults()
+
+        config_path = journal_path / "config" / "schedules.json"
+        with open(config_path) as f:
+            raw = json.load(f)
+        assert raw["providers"] == existing
+
+    def test_register_defaults_second_call_writes_nothing(
+        self, journal_path, monkeypatch
+    ):
+        """register_defaults() is idempotent once defaults are present."""
+        import solstone.think.scheduler as mod
+
+        mock_cal = Mock()
+        mod.init(mock_cal)
+        mod.register_defaults()
+
+        monkeypatch.setattr(
+            mod.tempfile,
+            "mkstemp",
+            lambda *args, **kwargs: pytest.fail("register_defaults rewrote config"),
+        )
+
+        mod.register_defaults()
 
     def test_heartbeat_is_due_when_never_run(self, journal_path):
         """_is_due returns True for heartbeat entry with no prior run."""
         import solstone.think.scheduler as mod
 
-        entry = {"cmd": ["sol", "heartbeat"], "every": "daily", "enabled": True}
+        entry = {"cmd": ["journal", "heartbeat"], "every": "daily", "enabled": True}
         now = datetime(2026, 3, 19, 10, 0, 0)
         assert mod._is_due(entry, None, now) is True
 
@@ -1193,7 +1266,7 @@ class TestHeartbeatSchedule:
         """_is_due returns False for heartbeat entry that ran after the daily mark."""
         import solstone.think.scheduler as mod
 
-        entry = {"cmd": ["sol", "heartbeat"], "every": "daily", "enabled": True}
+        entry = {"cmd": ["journal", "heartbeat"], "every": "daily", "enabled": True}
         now = datetime(2026, 3, 19, 10, 0, 0)
         last_run_ts = datetime(2026, 3, 19, 1, 0, 0).timestamp()
         state_entry = {"last_run": last_run_ts}

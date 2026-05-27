@@ -144,7 +144,7 @@ def test_setup_jsonl_suppresses_all_human_prints(
     )
 
     assert rc == 0
-    assert "sol setup:" not in out
+    assert "journal setup:" not in out
     assert "setup plan:" not in out
     for line in out.splitlines():
         json.loads(line)
@@ -232,19 +232,19 @@ def test_setup_jsonl_existing_journal_emits_dead_end(
     expected = "\n".join(
         [
             (
-                "sol setup: cannot proceed in non-interactive mode - "
+                "journal setup: cannot proceed in non-interactive mode - "
                 f"{journal} already contains journal data."
             ),
             "Setup will not auto-claim an existing journal.",
             "",
             "Retry with one of:",
-            "  sol setup --accept-existing-journal",
-            "  sol setup --journal /path/to/new-journal --accept-existing-journal",
+            "  journal setup --accept-existing-journal",
+            "  journal setup --journal /path/to/new-journal --accept-existing-journal",
             "",
             "Interactive escape:",
-            "  sol setup",
+            "  journal setup",
             "",
-            "Run 'sol setup --explain' for full step list.",
+            "Run 'journal setup --explain' for full step list.",
         ]
     )
     failed = [event for event in events if event["event"] == "step.failed"][-1]
@@ -489,20 +489,18 @@ def test_setup_jsonl_end_to_end_first_line_setup_started(tmp_path: Path) -> None
     home.mkdir()
     journal = tmp_path / "journal"
     env = {**os.environ, "HOME": str(home)}
+    code = (
+        "from solstone.think.sol_cli import journal_main; "
+        "import sys; "
+        "sys.argv = ["
+        "'journal', 'setup', '--jsonl', '--yes', '--journal', "
+        f"{str(journal)!r}, "
+        "'--skip-models', '--skip-skills', '--skip-service'"
+        "]; "
+        "journal_main()"
+    )
     proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "solstone.think.sol_cli",
-            "setup",
-            "--jsonl",
-            "--yes",
-            "--journal",
-            str(journal),
-            "--skip-models",
-            "--skip-skills",
-            "--skip-service",
-        ],
+        [sys.executable, "-c", code],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

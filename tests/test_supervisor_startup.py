@@ -2,6 +2,7 @@
 # Copyright (c) 2026 sol pbc
 
 import importlib
+import itertools
 from types import SimpleNamespace
 from unittest import mock
 
@@ -51,7 +52,7 @@ def test_task_queue_set_ready_drains_in_submission_order(monkeypatch):
 
     queue.submit(["sol", "indexer", "--rescan"], ref="ref-1")
     queue.submit(["sol", "insight", "20260418"], ref="ref-2")
-    queue.submit(["sol", "heartbeat"], ref="ref-3")
+    queue.submit(["journal", "heartbeat"], ref="ref-3")
 
     queue.set_ready()
 
@@ -59,7 +60,7 @@ def test_task_queue_set_ready_drains_in_submission_order(monkeypatch):
     assert [args[1] for args in started] == [
         ["sol", "indexer", "--rescan"],
         ["sol", "insight", "20260418"],
-        ["sol", "heartbeat"],
+        ["journal", "heartbeat"],
     ]
     assert queue._pending == []
 
@@ -130,7 +131,7 @@ def test_wait_for_convey_ready_timeout(caplog):
     mod = importlib.import_module("solstone.think.supervisor")
     caplog.set_level("ERROR")
     convey_mp = SimpleNamespace(process=SimpleNamespace(poll=lambda: None))
-    ticks = iter([0.0, 0.0, 0.1, 0.2, 0.3, 0.35])
+    ticks = itertools.chain([0.0, 0.0, 0.1, 0.2, 0.3], itertools.repeat(0.35))
 
     with mock.patch("solstone.think.supervisor.is_solstone_up", return_value=False):
         with mock.patch(
@@ -190,7 +191,7 @@ def test_require_solstone_exit1_when_not_supervisor_spawned(monkeypatch, capsys)
     assert exc_info.value.code == 1
     assert (
         capsys.readouterr().err
-        == "sol: solstone isn't running. Start it with 'sol up' and retry.\n"
+        == "sol: solstone isn't running. Start it with 'journal up' and retry.\n"
     )
 
 

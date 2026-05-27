@@ -11,7 +11,9 @@ import json
 import logging
 import os
 import pprint
+import re
 import threading
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +21,12 @@ from typing import Any
 
 from flask import Blueprint, jsonify, request
 
+from solstone.apps.chat.copy import (
+    CHAT_CLOSER_DIFFERENT_ANGLE_SUFFIX,
+    CHAT_CLOSER_LOOP_EXHAUSTED_PREFIX,
+    CHAT_CLOSER_TALENT_ERRORED_FORMAT,
+    CHAT_CLOSER_TALENT_ERRORED_GENERIC,
+)
 from solstone.convey.chat_stream import (
     append_chat_event,
     find_unresponded_trigger,
@@ -27,6 +35,7 @@ from solstone.convey.chat_stream import (
 )
 from solstone.convey.reasons import (
     AGENT_UNAVAILABLE,
+    CHAT_QUEUE_FULL,
     MISSING_REQUIRED_FIELD,
     TALENT_NOT_FOUND,
 )
@@ -45,8 +54,8 @@ logger = logging.getLogger(__name__)
 chat_bp = Blueprint("chat", __name__, url_prefix="/api/chat")
 
 MAX_ACTIVE_TALENTS = 2
-MAX_LOOP_RETRIES = 3
-_CHAT_WATCHDOG_SECONDS = 180
+_WATCHDOG_TIMEOUTS = {"chat": 30, "talent": 180}
+_DEFAULT_WATCHDOG_SECONDS = 180
 _RESERVED_USE_ID_CAP = 256
 MAX_ACTIVE_REASON = "max active — waiting for one to finish"
 
@@ -54,9 +63,11 @@ _state_lock = threading.Lock()
 _runtime_lock = threading.Lock()
 _current_chat_use_id: str | None = None
 _current_chat_state: dict[str, Any] | None = None
-_queued_trigger: dict[str, Any] | None = None
+_queued_triggers: deque[dict[str, Any]] = deque()
 _active_talents: dict[str, dict[str, Any]] = {}
 _reserved_use_ids: dict[str, None] = {}
+_thinking_buffers: dict[str, list[str]] = {}
+_thinking_providers: dict[str, str] = {}
 _watchdog_timers: dict[str, threading.Timer] = {}
 _last_use_id = 0
 _runtime: "ChatRuntimeState | None" = None
@@ -122,11 +133,16 @@ def post_chat() -> Any:
     }
     if source is not None:
         event_fields["source"] = source
-    append_chat_event("owner_message", **event_fields)
     trigger = {
         "type": "owner_message",
         "message": message,
     }
+
+    with _state_lock:
+        if _current_chat_use_id is not None and len(_queued_triggers) >= 10:
+            return error_response(CHAT_QUEUE_FULL)
+
+    append_chat_event("owner_message", **event_fields)
 
     start_info: dict[str, Any] | None = None
     with _state_lock:
@@ -136,7 +152,7 @@ def post_chat() -> Any:
             queued = False
             response_use_id = logical_use_id
         else:
-            response_use_id = _queue_trigger_locked(trigger, location)
+            response_use_id = _enqueue_trigger_locked(trigger, location)
             queued = True
 
     if start_info is not None:
@@ -250,6 +266,8 @@ def stop_all_chat_runtime() -> None:
             timer.cancel()
         _watchdog_timers.clear()
         _reserved_use_ids.clear()
+        _thinking_buffers.clear()
+        _thinking_providers.clear()
 
     with _runtime_lock:
         runtime = _runtime
@@ -271,6 +289,16 @@ def _handle_callosum_message(message: dict[str, Any]) -> None:
         return
 
     event_type = message.get("event")
+    if event_type == "thinking":
+        with _state_lock:
+            _capture_thinking_locked(message)
+        _proxy_progress(message)
+        return
+    if event_type == "start":
+        with _state_lock:
+            _capture_thinking_provider_locked(message)
+        _proxy_progress(message)
+        return
     if event_type == "finish":
         _on_cortex_finish(message)
         return
@@ -282,6 +310,11 @@ def _handle_callosum_message(message: dict[str, Any]) -> None:
 
 
 def _proxy_progress(message: dict[str, Any]) -> None:
+    # Cortex listens on tract=cortex, event=request without checking chat_proxy
+    # (cortex.py:199-203). Re-emitting request would spawn a duplicate talent.
+    if message.get("event") == "request":
+        return
+
     logical_use_id: str | None = None
     use_id = str(message.get("use_id") or "")
     if not use_id:
@@ -334,7 +367,9 @@ def _on_cortex_finish(message: dict[str, Any]) -> None:
             logical_use_id = str(_current_chat_use_id)
             _cancel_watchdog_locked(use_id)
             try:
-                parsed = _parse_chat_result(message.get("result"))
+                parsed = _parse_chat_result(
+                    message.get("result"), use_id=logical_use_id
+                )
             except ValueError:
                 provider = str(message.get("provider") or "")
                 if int(_current_chat_state.get("retry_count", 0) or 0) < 1:
@@ -345,6 +380,7 @@ def _on_cortex_finish(message: dict[str, Any]) -> None:
                     )
                     next_info = _build_spawn_info_locked(logical_use_id)
                 else:
+                    _evict_thinking_locked(use_id)
                     append_chat_event(
                         "chat_error",
                         reason="provider_response_invalid",
@@ -369,13 +405,35 @@ def _on_cortex_finish(message: dict[str, Any]) -> None:
                     if parsed["talent_request"]
                     else None
                 )
+                trigger = _current_chat_state.get("trigger") or {}
+                trigger_type = trigger.get("type")
+                if trigger_type in {"talent_finished", "talent_errored"}:
+                    exit_mode = (
+                        "talent_errored"
+                        if trigger_type == "talent_errored"
+                        else "loop_exhausted"
+                    )
+                    message_text = _compose_terminal_closer(
+                        exit_mode,
+                        message_text,
+                        talent_errored_reason=trigger.get("reason"),
+                        talent_finished_summary=trigger.get("summary"),
+                    )
+                    requested_target = None
+                    requested_task = None
+                thinking = _drain_thinking_locked(use_id, message)
+                sol_message_fields: dict[str, Any] = {
+                    "use_id": logical_use_id,
+                    "text": message_text,
+                    "notes": parsed["notes"],
+                    "requested_target": requested_target,
+                    "requested_task": requested_task,
+                }
+                if thinking is not None:
+                    sol_message_fields["thinking"] = thinking
                 append_chat_event(
                     "sol_message",
-                    use_id=logical_use_id,
-                    text=message_text,
-                    notes=parsed["notes"],
-                    requested_target=requested_target,
-                    requested_task=requested_task,
+                    **sol_message_fields,
                 )
                 _current_chat_state["retry_count"] = 0
                 _set_current_raw_use_locked(logical_use_id, None)
@@ -389,20 +447,6 @@ def _on_cortex_finish(message: dict[str, Any]) -> None:
                         synthetic_use_id = _reserve_use_id_locked()
                         _set_current_raw_use_locked(logical_use_id, synthetic_use_id)
                         next_info = _build_spawn_info_locked(logical_use_id)
-                    elif _talent_loop_count_locked() >= MAX_LOOP_RETRIES:
-                        provider = str(message.get("provider") or "")
-                        append_chat_event(
-                            "chat_error",
-                            reason="provider_response_invalid",
-                            use_id=logical_use_id,
-                            provider=provider,
-                            detail="",
-                        )
-                        error_payload = {
-                            "use_id": logical_use_id,
-                            "reason": "provider_response_invalid",
-                        }
-                        next_info = _clear_current_locked()
                     else:
                         talent_use_id = _reserve_use_id_locked()
                         _active_talents[talent_use_id] = {
@@ -446,6 +490,8 @@ def _on_cortex_finish(message: dict[str, Any]) -> None:
                             "use_id": logical_use_id,
                             "message": message_text,
                         }
+                    if not message_text:
+                        _evict_thinking_locked(use_id)
                     next_info = _clear_current_locked()
 
         elif use_id in _active_talents:
@@ -455,6 +501,7 @@ def _on_cortex_finish(message: dict[str, Any]) -> None:
                 "talent_finished",
                 "summary",
                 summary,
+                terminal_message=message,
             )
         elif _is_superseded_raw_use_id_locked(use_id):
             logger.debug(
@@ -496,6 +543,7 @@ def _on_cortex_error(message: dict[str, Any]) -> None:
             provider = str(message.get("provider") or "")
             detail = _normalize_chat_error_detail(message.get("error"))
             _cancel_watchdog_locked(use_id)
+            _evict_thinking_locked(use_id)
             append_chat_event(
                 "chat_error",
                 reason=reason_code,
@@ -512,6 +560,7 @@ def _on_cortex_error(message: dict[str, Any]) -> None:
             next_info = _clear_current_locked()
         elif use_id in _active_talents:
             reason = str(message.get("error") or "unknown")
+            _evict_thinking_locked(use_id)
             next_info = _handle_talent_terminal_locked(
                 use_id,
                 "talent_errored",
@@ -549,6 +598,8 @@ def _handle_talent_terminal_locked(
     kind: str,
     result_field_name: str,
     result_value: str,
+    *,
+    terminal_message: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     _cancel_watchdog_locked(use_id)
     talent_state = _active_talents.pop(use_id)
@@ -561,12 +612,16 @@ def _handle_talent_terminal_locked(
         result_field_name,
         result_value,
     )
-    append_chat_event(
-        kind,
-        use_id=use_id,
-        name=talent_name,
-        **{result_field_name: result_value},
-    )
+    event_fields: dict[str, Any] = {
+        "use_id": use_id,
+        "name": talent_name,
+        result_field_name: result_value,
+    }
+    if kind == "talent_finished" and terminal_message is not None:
+        thinking = _drain_thinking_locked(use_id, terminal_message)
+        if thinking is not None:
+            event_fields["thinking"] = thinking
+    append_chat_event(kind, **event_fields)
     if _current_chat_use_id != logical_use_id or _current_chat_state is None:
         return None
 
@@ -715,6 +770,7 @@ def _handle_chat_failure(
         )
         if _current_chat_use_id == logical_use_id:
             if _current_chat_state is not None:
+                _evict_thinking_locked(str(_current_chat_state.get("raw_use_id") or ""))
                 _cancel_watchdog_locked(
                     str(_current_chat_state.get("raw_use_id") or "")
                 )
@@ -728,14 +784,17 @@ def _recover_active_talents_locked(day: str) -> None:
     latest_owner_message: dict[str, Any] | None = None
     latest_sol_message: dict[str, Any] | None = None
     spawned: dict[str, dict[str, Any]] = {}
+    latest_parent_kind: str | None = None
 
     for event in events:
         kind = event.get("kind")
         if kind == "owner_message":
             latest_owner_message = event
+            latest_parent_kind = "owner_message"
             continue
         if kind == "sol_message":
             latest_sol_message = event
+            latest_parent_kind = "sol_message"
             continue
         if kind == "talent_spawned":
             use_id = str(event.get("use_id") or "")
@@ -758,6 +817,7 @@ def _recover_active_talents_locked(day: str) -> None:
                 "chat_use_id": chat_use_id,
                 "target": str(event.get("name") or ""),
                 "task": str(event.get("task") or ""),
+                "trigger": latest_parent_kind or "sol_message",
                 "location": _normalize_location(
                     latest_owner_message.get("app"),
                     latest_owner_message.get("path"),
@@ -775,6 +835,10 @@ def _recover_active_talents_locked(day: str) -> None:
         if use_id in _active_talents:
             continue
         _active_talents[use_id] = state
+        logger.info(
+            "reactivated talent during recovery",
+            extra={"use_id": use_id, "day": day, "trigger": state["trigger"]},
+        )
         if use_id not in _watchdog_timers:
             _arm_watchdog_locked(use_id, "talent", state["chat_use_id"])
 
@@ -836,27 +900,33 @@ def _build_spawn_info_locked(logical_use_id: str) -> dict[str, Any]:
     }
 
 
-def _queue_trigger_locked(trigger: dict[str, Any], location: dict[str, str]) -> str:
-    global _queued_trigger
-    if _queued_trigger is None:
-        _queued_trigger = {
-            "use_id": _reserve_use_id_locked(),
-            "trigger": dict(trigger),
-            "location": dict(location),
-        }
-    return str(_queued_trigger["use_id"])
+def _enqueue_trigger_locked(trigger: dict[str, Any], location: dict[str, str]) -> str:
+    queued = {
+        "use_id": _reserve_use_id_locked(),
+        "trigger": dict(trigger),
+        "location": dict(location),
+    }
+    _queued_triggers.append(queued)
+    append_chat_event("chat_queue_depth", depth=len(_queued_triggers))
+    return str(queued["use_id"])
+
+
+def _pop_next_trigger_locked() -> dict[str, Any] | None:
+    if not _queued_triggers:
+        return None
+    return _queued_triggers.popleft()
 
 
 def _clear_current_locked() -> dict[str, Any] | None:
-    global _current_chat_use_id, _current_chat_state, _queued_trigger
+    global _current_chat_use_id, _current_chat_state
 
     _current_chat_use_id = None
     _current_chat_state = None
-    if _queued_trigger is None:
+    queued = _pop_next_trigger_locked()
+    if queued is None:
         return None
 
-    queued = _queued_trigger
-    _queued_trigger = None
+    append_chat_event("chat_queue_depth", depth=len(_queued_triggers))
     return _activate_current_locked(
         str(queued["use_id"]),
         dict(queued["trigger"]),
@@ -867,7 +937,7 @@ def _clear_current_locked() -> dict[str, Any] | None:
 def _arm_watchdog_locked(use_id: str, kind: str, logical_use_id: str) -> None:
     _cancel_watchdog_locked(use_id)
     timer = threading.Timer(
-        _CHAT_WATCHDOG_SECONDS,
+        _WATCHDOG_TIMEOUTS.get(kind, _DEFAULT_WATCHDOG_SECONDS),
         _on_watchdog_timeout,
         args=(use_id, kind, logical_use_id),
     )
@@ -892,7 +962,10 @@ def _refresh_watchdog_locked(use_id: str, kind: str, logical_use_id: str) -> Non
 
 def _set_current_raw_use_locked(logical_use_id: str, raw_use_id: str | None) -> None:
     assert _current_chat_state is not None
-    _cancel_watchdog_locked(str(_current_chat_state.get("raw_use_id") or ""))
+    old_raw_use_id = str(_current_chat_state.get("raw_use_id") or "")
+    _cancel_watchdog_locked(old_raw_use_id)
+    if old_raw_use_id and old_raw_use_id != str(raw_use_id or ""):
+        _evict_thinking_locked(old_raw_use_id)
     if raw_use_id is not None:
         _current_chat_state["raw_use_ids_seen"].add(str(raw_use_id))
     _current_chat_state["raw_use_id"] = raw_use_id
@@ -907,6 +980,71 @@ def _is_superseded_raw_use_id_locked(use_id: str) -> bool:
     if use_id == raw_chat_use_id:
         return False
     return use_id in _current_chat_state["raw_use_ids_seen"]
+
+
+def _capture_thinking_locked(message: dict[str, Any]) -> None:
+    use_id = str(message.get("use_id") or "")
+    summary = message.get("summary")
+    if not use_id or not isinstance(summary, str) or not summary.strip():
+        return
+    if not _is_routeable_cortex_use_id_locked(use_id):
+        reason = (
+            "raw rotated"
+            if _is_superseded_raw_use_id_locked(use_id)
+            else "no matching active chat-generate or talent"
+        )
+        logger.debug(
+            "dropping late thinking event use_id=%s reason=%s",
+            use_id,
+            reason,
+        )
+        return
+    _thinking_buffers.setdefault(use_id, []).append(summary)
+
+
+def _capture_thinking_provider_locked(message: dict[str, Any]) -> None:
+    use_id = str(message.get("use_id") or "")
+    provider = str(message.get("provider") or "")
+    if not use_id or not provider:
+        return
+    if not _is_routeable_cortex_use_id_locked(use_id):
+        return
+    _thinking_providers[use_id] = provider
+
+
+def _drain_thinking_locked(
+    use_id: str,
+    terminal_message: dict[str, Any],
+) -> dict[str, Any] | None:
+    parts = _thinking_buffers.pop(use_id, [])
+    provider = _thinking_providers.pop(use_id, "")
+    if not parts:
+        return None
+    usage = terminal_message.get("usage")
+    reasoning_tokens = (
+        int(usage.get("reasoning_tokens") or 0) if isinstance(usage, dict) else 0
+    )
+    return {
+        "content": "\n\n".join(parts),
+        "provider": provider or str(terminal_message.get("provider") or ""),
+        "model": str(terminal_message.get("model") or ""),
+        "tokens": reasoning_tokens or None,
+    }
+
+
+def _evict_thinking_locked(use_id: str | None) -> None:
+    if not use_id:
+        return
+    _thinking_buffers.pop(str(use_id), None)
+    _thinking_providers.pop(str(use_id), None)
+
+
+def _is_routeable_cortex_use_id_locked(use_id: str) -> bool:
+    if _current_chat_state is not None:
+        raw_chat_use_id = str(_current_chat_state.get("raw_use_id") or "")
+        if use_id == raw_chat_use_id:
+            return True
+    return use_id in _active_talents
 
 
 def _on_watchdog_timeout(use_id: str, kind: str, logical_use_id: str) -> None:
@@ -927,6 +1065,7 @@ def _on_watchdog_timeout(use_id: str, kind: str, logical_use_id: str) -> None:
                 kind,
                 logical_use_id,
             )
+            _evict_thinking_locked(use_id)
             append_chat_event(
                 "chat_error",
                 reason="chat_timeout",
@@ -949,6 +1088,7 @@ def _on_watchdog_timeout(use_id: str, kind: str, logical_use_id: str) -> None:
                 kind,
                 logical_use_id,
             )
+            _evict_thinking_locked(use_id)
             append_chat_event(
                 "talent_errored",
                 use_id=use_id,
@@ -982,37 +1122,66 @@ def _active_talent_count_for_today_locked() -> int:
     return len(reduce_chat_state(_today_day())["active_talents"])
 
 
-def _talent_loop_count_locked() -> int:
-    """Count trailing redispatch hops for the current owner turn.
+# LOCKED — see cpo/specs/in-flight/chat-schema-tolerance-audit.md
+# Spec amendment required to expand. No fuzzy matching, no LLM classification.
 
-    Each hop is a requested-target sol_message paired with the nearest earlier
-    talent_finished or talent_errored event. Bookkeeping events between them do
-    not break the chain or satisfy a pending hop.
-    """
-    events = read_chat_events(_today_day())
-    count = 0
-    pending_redispatch = False
+# target field — accepted aliases → canonical
+TARGET_ALIASES = {
+    "exec": "exec",
+    "execute": "exec",
+    "Exec": "exec",
+    "EXEC": "exec",
+    "reflection": "reflection",
+    "Reflection": "reflection",
+    "REFLECTION": "reflection",
+    "reflect": "reflection",
+}
+# Values outside this set still raise ValueError.
 
-    for event in reversed(events):
-        kind = event.get("kind")
-        if kind == "owner_message":
-            break
-        if kind == "sol_message":
-            if not event.get("requested_target"):
-                continue
-            if pending_redispatch:
-                break
-            pending_redispatch = True
-            continue
-        if kind in {"talent_finished", "talent_errored"}:
-            if pending_redispatch:
-                count += 1
-                pending_redispatch = False
-            continue
-    return count
+# LOCKED — see scope doc.
+# Spec amendment required to expand. No fuzzy matching, no LLM classification.
+
+# opener forms — sentence-start prefix removal; case-insensitive matching.
+# trailing forms — literal span removal; seed flash-bridge holding phrase.
+CLOSER_STRIP_PATTERNS = {
+    "openers": (
+        "Let me look up ",
+        "Let me check ",
+        "Let me find out ",
+        "Let me also ",
+        "I'll look up ",
+        "I'll check ",
+        "I'll find ",
+        "And one more thing — ",
+        "And let me ",
+    ),
+    "trailing": (" and I'll let you know",),
+}
+
+# task field — whitespace trim, then non-empty check
+#   coerce: leading/trailing whitespace stripped before non-empty check
+#   keep: empty-after-trim still raises
+
+# context field — fix shipped in parallel lode at d03aa3ad
+#   (prose → {"hint": str}); this lode ratifies, adds no new context behavior.
+
+# talent_request itself — keep "must be dict or null" strict;
+#   total structural violation is a real-bug-guard.
+# Chat parser classification record (audit: chat-schema-tolerance-audit, 2026-05-26).
+# Pre-change line refs in _parse_chat_result:
+#   1035 result non-str/non-dict     : keep      — structural, no recoverable envelope.
+#   1038 payload non-object          : keep      — schema requires object.
+#   1040 notes non-string            : keep      — field-type contract; notes-list deferred.
+#   1044 message non-string/non-null : keep      — field-type contract.
+#   1050 talent_request non-dict/null: keep      — spec call-out: keep strict.
+#   1053 target non-string           : keep      — aliases apply only after type check.
+#   1055 target unknown              : coerce    — TARGET_ALIASES, then raise if unresolved.
+#   1058 task non-empty              : coerce    — strip whitespace; empty-after-strip raises.
+#   1079 context odd shape           : ratified  — d03aa3ad shipped prose fallback; no new behavior.
+# Sibling sweep: chat_stream.py ValueErrors guard the state↔disk JSONL/path seam, out of scope.
 
 
-def _parse_chat_result(result: Any) -> dict[str, Any]:
+def _parse_chat_result(result: Any, use_id: str | None = None) -> dict[str, Any]:
     if isinstance(result, str):
         payload = json.loads(result)
     elif isinstance(result, dict):
@@ -1037,10 +1206,30 @@ def _parse_chat_result(result: Any) -> dict[str, Any]:
     target = talent_request.get("target")
     if not isinstance(target, str):
         raise ValueError("chat talent_request.target must be a string")
+    raw_target = target
+    target = TARGET_ALIASES.get(target, target)
+    if target != raw_target:
+        logger.debug(
+            "chat parser coerced target=%s -> %s (use_id=%s)",
+            raw_target,
+            target,
+            use_id,
+        )
     if target not in {"exec", "reflection"}:
         raise ValueError(f"unknown talent target: {target}")
     task = talent_request.get("task")
-    if not isinstance(task, str) or not task.strip():
+    if not isinstance(task, str):
+        raise ValueError("chat talent_request.task must be a non-empty string")
+    raw_task = task
+    task = task.strip()
+    if task != raw_task:
+        logger.debug(
+            "chat parser coerced task whitespace raw=%r -> %r (use_id=%s)",
+            raw_task,
+            task,
+            use_id,
+        )
+    if not task:
         raise ValueError("chat talent_request.task must be a non-empty string")
     raw_context = talent_request.get("context")
     if raw_context is None:
@@ -1050,18 +1239,14 @@ def _parse_chat_result(result: Any) -> dict[str, Any]:
         if not stripped:
             context = {}
         else:
-            # Wrap json.loads so invalid provider context propagates as a plain ValueError.
+            # Provider-shaped non-dict context used to raise; now absorbed so a single odd
+            # response doesn't fail the turn. Strictness rollback is deliberate.
             try:
                 decoded = json.loads(stripped)
-            except ValueError as exc:
-                raise ValueError(
-                    "chat talent_request.context must be a JSON object string"
-                ) from exc
-            if not isinstance(decoded, dict):
-                raise ValueError(
-                    "chat talent_request.context must be a JSON object string"
-                )
-            context = decoded
+            except ValueError:
+                context = {"_raw": stripped}
+            else:
+                context = decoded if isinstance(decoded, dict) else {"_raw": stripped}
     elif isinstance(raw_context, dict):
         # Scope-mandated defensive shim; no confirmed live replay/cache path sends dict context.
         context = raw_context
@@ -1072,10 +1257,123 @@ def _parse_chat_result(result: Any) -> dict[str, Any]:
         "notes": payload["notes"],
         "talent_request": {
             "target": target,
-            "task": task.strip(),
+            "task": task,
             "context": context,
         },
     }
+
+
+def _compose_terminal_closer(
+    exit_mode: str,
+    raw_message: str | None,
+    *,
+    talent_errored_reason: str | None = None,
+    talent_finished_summary: str | None = None,
+) -> str:
+    if exit_mode == "loop_exhausted":
+        raw_clean = _strip_closer_patterns(raw_message or "")
+        if len(raw_clean.split()) >= 15:
+            return raw_clean
+        if raw_clean:
+            return _frame_loop_exhausted_body(raw_clean)
+
+        summary_clean = _strip_closer_patterns(talent_finished_summary or "")
+        if summary_clean:
+            return _frame_loop_exhausted_body(summary_clean)
+        return (
+            f"{CHAT_CLOSER_LOOP_EXHAUSTED_PREFIX} {CHAT_CLOSER_DIFFERENT_ANGLE_SUFFIX}"
+        )
+
+    if exit_mode == "talent_errored":
+        reason = _clean_talent_errored_reason(talent_errored_reason)
+        if reason:
+            return CHAT_CLOSER_TALENT_ERRORED_FORMAT.format(reason=reason)
+        return CHAT_CLOSER_TALENT_ERRORED_GENERIC
+
+    raise ValueError(f"unknown exit_mode: {exit_mode!r}")
+
+
+def _frame_loop_exhausted_body(body: str) -> str:
+    return (
+        f"{CHAT_CLOSER_LOOP_EXHAUSTED_PREFIX} "
+        f"{body.strip()} "
+        f"{CHAT_CLOSER_DIFFERENT_ANGLE_SUFFIX}"
+    ).strip()
+
+
+def _strip_closer_patterns(text: str) -> str:
+    source = str(text or "")
+    parts = re.split(r"([.!?])", source)
+    survivors: list[str] = []
+    opener_matches: list[str] = []
+
+    for index in range(0, len(parts), 2):
+        sentence = parts[index]
+        if sentence == "":
+            continue
+        if index + 1 < len(parts):
+            sentence += parts[index + 1]
+
+        stripped_sentence = sentence.lstrip()
+        opener = _matching_closer_opener(stripped_sentence)
+        if opener is not None:
+            opener_matches.append(opener)
+            continue
+        survivors.append(sentence)
+
+    stripped = "".join(survivors)
+    for opener in opener_matches:
+        logger.debug(
+            "chat closer stripped opener pattern=%r stripped_output=%r",
+            opener,
+            _normalize_stripped_closer_output(stripped),
+        )
+
+    for pattern in CLOSER_STRIP_PATTERNS["trailing"]:
+        regex = re.compile(re.escape(pattern), flags=re.IGNORECASE)
+        matches = list(regex.finditer(stripped))
+        if not matches:
+            continue
+        stripped_after = regex.sub("", stripped)
+        for _match in matches:
+            logger.debug(
+                "chat closer stripped trailing pattern=%r stripped_output=%r",
+                pattern,
+                _normalize_stripped_closer_output(stripped_after),
+            )
+        stripped = stripped_after
+
+    return _normalize_stripped_closer_output(stripped)
+
+
+def _normalize_stripped_closer_output(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _matching_closer_opener(sentence: str) -> str | None:
+    lowered = sentence.lower()
+    for opener in CLOSER_STRIP_PATTERNS["openers"]:
+        if lowered.startswith(opener.lower()):
+            return opener
+    return None
+
+
+_TRACEBACK_SENTINEL = "Traceback (most recent call last)"
+_PYTHON_PATH_RE = re.compile(r"/[A-Za-z0-9_./-]+\.py")
+
+
+def _clean_talent_errored_reason(reason: str | None) -> str | None:
+    reason_clean = re.sub(r"\s+", " ", str(reason or "")).strip()
+    if not reason_clean:
+        return None
+    if len(reason_clean) > 160:
+        return None
+    if _TRACEBACK_SENTINEL in reason_clean:
+        return None
+    if _PYTHON_PATH_RE.search(reason_clean):
+        return None
+    reason_clean = reason_clean.rstrip(".!?")
+    return reason_clean or None
 
 
 def _build_talent_prompt(

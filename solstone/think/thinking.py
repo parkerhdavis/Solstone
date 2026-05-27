@@ -147,7 +147,7 @@ def _emit_periodic_status() -> None:
 def run_command(cmd: list[str], day: str) -> bool:
     """Run a shell command synchronously."""
     logging.info("==> %s", " ".join(cmd))
-    cmd_name = cmd[1] if cmd[0] == "sol" else cmd[0]
+    cmd_name = cmd[1] if cmd[0] in ("sol", "journal") and len(cmd) > 1 else cmd[0]
     cmd_name = cmd_name.replace("-", "_")
 
     try:
@@ -169,7 +169,7 @@ def run_queued_command(cmd: list[str], day: str, timeout: int = 600) -> bool:
     """Run a command through supervisor's task queue and wait for completion."""
     import uuid
 
-    cmd_name = cmd[1] if cmd[0] == "sol" else cmd[0]
+    cmd_name = cmd[1] if cmd[0] in ("sol", "journal") and len(cmd) > 1 else cmd[0]
     cmd_name_log = cmd_name.replace("-", "_")
     ref = f"think-{uuid.uuid4().hex[:8]}"
 
@@ -2617,7 +2617,7 @@ def dry_run(
     print(header + "\n")
 
     if not segment:
-        print("Pre-phase:  sol sense --day " + day)
+        print("Pre-phase:  journal sense --day " + day)
 
     if not all_prompts:
         print(f"No prompts for schedule: {target_schedule}")
@@ -3168,7 +3168,7 @@ def main() -> None:
         # PRE-PHASE: Run sense repair (daily only)
         if not args.segment:
             logging.info("Running pre-phase: sense repair")
-            cmd = ["sol", "sense", "--day", day]
+            cmd = ["journal", "sense", "--day", day]
             if args.verbose:
                 cmd.append("-v")
             day_log(day, f"starting: {' '.join(cmd)}")

@@ -146,6 +146,10 @@ def projector_path(model_id: str) -> Path | None:
     return model_dir(spec.model_id) / spec.mmproj_filename
 
 
+def install_hint() -> str:
+    return "sol call settings providers install local"
+
+
 def _read_local_status() -> InstallStatus:
     return read_install_status(scope="bundled", name=LOCAL_PROVIDER_NAME)
 
@@ -447,6 +451,7 @@ __all__ = [
     "install_llama_server",
     "install_model",
     "install_local",
+    "install_hint",
     "inspect_readiness",
     "ensure_artifacts_installed",
 ]

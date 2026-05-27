@@ -31,6 +31,8 @@ _CHAT_STREAM = "chat"
 _SEGMENT_WINDOW_MS = 300_000
 _APPENDED_CHAT_PATHS: dict[int, Path] = {}
 # owner_message may carry optional `source`; extras flow through unchanged.
+# sol_message and talent_finished may carry optional `thinking`; extras flow
+# through unchanged and are not part of the required-field tuples below.
 _VALID_KINDS = {
     "owner_message": ("text", "app", "path", "facet"),
     "sol_message": (
@@ -44,6 +46,7 @@ _VALID_KINDS = {
     "talent_finished": ("use_id", "name", "summary"),
     "talent_errored": ("use_id", "name", "reason"),
     "reflection_ready": ("day", "url"),
+    "chat_queue_depth": ("depth",),
     # chat_error also accepts optional `provider` (provider slug or "") and `detail`
     # (normalized raw provider error text, "" when absent); neither is validated.
     "chat_error": ("reason", "use_id"),
@@ -210,9 +213,14 @@ def reduce_chat_state(day: str) -> dict[str, Any]:
     latest_sol_message: dict[str, Any] | None = None
     active_talents: dict[str, dict[str, Any]] = {}
     completed_talents: list[dict[str, Any]] = []
+    queue_depth = 0
 
     for event in read_chat_events(day):
         kind = event.get("kind")
+        if kind == "chat_queue_depth":
+            queue_depth = int(event["depth"])
+            continue
+
         if kind == "sol_message":
             latest_sol_message = {
                 "ts": event["ts"],
@@ -263,6 +271,7 @@ def reduce_chat_state(day: str) -> dict[str, Any]:
             ),
         ),
         "completed_talents": completed_talents,
+        "queue_depth": queue_depth,
     }
 
 
@@ -286,6 +295,9 @@ def _validate_event(kind: str, event: dict[str, Any]) -> None:
     if missing:
         required = ", ".join(missing)
         raise ValueError(f"{kind} requires fields: {required}")
+
+    if kind == "chat_queue_depth" and not isinstance(event["depth"], int):
+        raise ValueError("chat_queue_depth depth must be an int")
 
 
 def _broadcast_chat_event(stored_event: dict[str, Any]) -> None:
