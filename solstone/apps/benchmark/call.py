@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2026 sol pbc
 
-"""Benchmark CLI — local-model speed heuristics for the Ollama provider.
+"""Benchmark CLI — local-model speed heuristics for the bundled local (llama.cpp) provider.
 
 Verbs:
 
@@ -259,7 +259,9 @@ def _format_seconds(seconds: float) -> str:
 
 @app.command("estimate")
 def estimate(
-    model_id: str = typer.Argument(..., help="Model ID, e.g. ollama-local/qwen3.5:9b"),
+    model_id: str = typer.Argument(
+        ..., help="Model ID, e.g. local/nemotron-3-nano-omni"
+    ),
     task: str | None = typer.Option(
         None,
         "--task",

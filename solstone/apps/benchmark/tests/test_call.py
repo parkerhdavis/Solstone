@@ -75,7 +75,7 @@ class TestListModels:
         with patch.object(subprocess, "run", side_effect=FileNotFoundError):
             runner.invoke(call_app, ["benchmark", "profile"])
 
-        fake_installed = {"ollama-local/qwen3.5:9b"}
+        fake_installed = {"local/qwen3.5:9b"}
         with patch.object(
             benchmark_call, "_list_installed_models", return_value=fake_installed
         ):
@@ -83,15 +83,13 @@ class TestListModels:
         assert result.exit_code == 0, result.output
         payload = json.loads(result.output)
         by_id = {row["model_id"]: row for row in payload["models"]}
-        assert by_id["ollama-local/qwen3.5:9b"]["installed"] is True
-        assert by_id["ollama-local/qwen3.5:2b"]["installed"] is False
+        assert by_id["local/qwen3.5:9b"]["installed"] is True
+        assert by_id["local/qwen3.5:2b"]["installed"] is False
 
 
 class TestEstimate:
     def test_requires_probed_hardware(self, journal_override):
-        result = runner.invoke(
-            call_app, ["benchmark", "estimate", "ollama-local/qwen3.5:9b"]
-        )
+        result = runner.invoke(call_app, ["benchmark", "estimate", "local/qwen3.5:9b"])
         assert result.exit_code == 1
         assert (
             "probe" in result.output.lower() or "probe" in (result.stderr or "").lower()
@@ -101,7 +99,7 @@ class TestEstimate:
         with patch.object(subprocess, "run", side_effect=FileNotFoundError):
             runner.invoke(call_app, ["benchmark", "profile"])
         result = runner.invoke(
-            call_app, ["benchmark", "estimate", "ollama-local/not-a-real-model:1b"]
+            call_app, ["benchmark", "estimate", "local/not-a-real-model:1b"]
         )
         assert result.exit_code == 1
 
@@ -111,11 +109,11 @@ class TestEstimate:
             runner.invoke(call_app, ["benchmark", "profile"])
         result = runner.invoke(
             call_app,
-            ["benchmark", "estimate", "ollama-local/qwen3.5:9b", "--json"],
+            ["benchmark", "estimate", "local/qwen3.5:9b", "--json"],
         )
         assert result.exit_code == 0, result.output
         payload = json.loads(result.output)
-        assert payload["model_id"] == "ollama-local/qwen3.5:9b"
+        assert payload["model_id"] == "local/qwen3.5:9b"
         assert payload["hardware_class"] == "rtx-4090"
         # Without seed measurements, confidence is unknown for now.
         assert payload["confidence"] in ("unknown", "measured", "interpolated")
@@ -129,7 +127,7 @@ class TestEstimate:
             [
                 "benchmark",
                 "estimate",
-                "ollama-local/qwen3.5:9b",
+                "local/qwen3.5:9b",
                 "--task",
                 "chat_reply",
                 "--json",
@@ -152,7 +150,7 @@ class TestEstimate:
             [
                 "benchmark",
                 "estimate",
-                "ollama-local/qwen3.5:9b",
+                "local/qwen3.5:9b",
                 "--task",
                 "definitely_not_a_task",
             ],

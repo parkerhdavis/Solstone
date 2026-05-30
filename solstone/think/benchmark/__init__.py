@@ -4,7 +4,7 @@
 """Local-model benchmark heuristic.
 
 Given a probed host (see ``solstone.think.hardware``), estimates the expected
-output tok/s for each pre-vetted Ollama model without requiring the
+output tok/s for each pre-vetted local model without requiring the
 model to be pulled. Uses a reference table of measured tok/s per
 canonical hardware class, interpolating by FP16 throughput × memory
 bandwidth when the user's exact hardware isn't in the table.
