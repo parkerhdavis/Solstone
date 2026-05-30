@@ -6,7 +6,7 @@
 Maintainer-only. Run by hand to seed ``models.json`` /
 ``transcribers.json`` with real measurements; not invoked by the live
 pipeline. Connect-only: the bundled llama-server must already be running
-under the supervisor (``sol supervisor``) before running an LLM benchmark —
+under the supervisor (``journal supervisor``) before running an LLM benchmark —
 the harness attaches to that daemon and does not spawn its own server.
 
 Three modes:

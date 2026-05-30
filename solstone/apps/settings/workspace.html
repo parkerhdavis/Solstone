@@ -3638,19 +3638,6 @@ let solVoiceThrottledTimer = null;
 const escapeHtml = (value) => window.AppServices.escapeHtml(value);
 }
 
-const conveyUiText = {
-  networkModeOff: {{ convey_copy.SETTINGS_NETWORK_MODE_OFF | tojson }},
-  networkModeOn: {{ convey_copy.SETTINGS_NETWORK_MODE_ON | tojson }},
-  networkDescOff: {{ convey_copy.SETTINGS_NETWORK_DESC_OFF | tojson }},
-  networkDescOn: {{ convey_copy.SETTINGS_NETWORK_DESC_ON | tojson }},
-  networkButtonEnable: {{ convey_copy.SETTINGS_NETWORK_BUTTON_ENABLE | tojson }},
-  networkButtonDisable: {{ convey_copy.SETTINGS_NETWORK_BUTTON_DISABLE | tojson }},
-  networkDisclosureMismatch: {{ convey_copy.SETTINGS_NETWORK_DISCLOSURE_MISMATCH | tojson }},
-  networkDisclosureTooShort: {{ convey_copy.SETTINGS_NETWORK_DISCLOSURE_TOO_SHORT | tojson }},
-  networkRestarting: {{ convey_copy.SETTINGS_NETWORK_RESTARTING | tojson }},
-  passwordHint: {{ convey_copy.SETTINGS_PASSWORD_HINT | tojson }},
-  restartTimeout: {{ settings_copy.CONVEY_RESTART_TIMEOUT | tojson }},
-};
 const solVoiceCopy = {
   autoMutedFormat: {{ sol_voice_copy.SOL_VOICE_SETTINGS_CATEGORY_CAP_AUTO_MUTED_FORMAT | tojson }},
   clearButton: {{ sol_voice_copy.SOL_VOICE_SETTINGS_CATEGORY_CAP_CLEAR_BUTTON | tojson }},
