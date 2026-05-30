@@ -3,19 +3,16 @@
 
 from __future__ import annotations
 
-import contextlib
+import base64
 import importlib
 import sys
 import types
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from solstone.think.models import (
-    LOCAL_FLASH,
-    LOCAL_LITE,
-    LOCAL_PRO,
+    LOCAL_MODEL,
     PROVIDER_DEFAULTS,
     TIER_FLASH,
     TIER_LITE,
@@ -29,46 +26,35 @@ def _provider():
 
 
 def test_local_model_prefix_maps_to_provider():
-    assert get_model_provider(LOCAL_LITE) == "local"
-    assert get_model_provider(LOCAL_FLASH) == "local"
-    assert get_model_provider(LOCAL_PRO) == "local"
+    assert get_model_provider(LOCAL_MODEL) == "local"
 
 
 def test_local_model_specs():
     provider = _provider()
 
-    assert set(provider.LOCAL_MODEL_SPECS) == {
-        LOCAL_FLASH,
-        LOCAL_PRO,
-        provider.LOCAL_OMNI,
-    }
-    lite = provider.LOCAL_MODEL_SPECS[LOCAL_FLASH]
-    pro = provider.LOCAL_MODEL_SPECS[LOCAL_PRO]
-    assert lite.repo == "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF"
+    assert set(provider.LOCAL_MODEL_SPECS) == {LOCAL_MODEL}
+    spec = provider.LOCAL_MODEL_SPECS[LOCAL_MODEL]
+    # Fork: the single bundled model is vision-capable Nemotron Omni (mmproj),
+    # not upstream's text-only qwen2.5-coder. See docs/FORK.md "Local vision".
+    assert spec.repo == "ggml-org/NVIDIA-Nemotron-3-Nano-Omni"
     assert (
-        lite.sha256
-        == "509287f78cb4d4cf6b3843734733b914b2c158e43e22a7f4bf5e963800894d3c"
+        spec.sha256
+        == "98e5cbdb3cb9bd172ddfeb164edb3fea049364750eea2fc20d1011e640748571"
     )
-    assert lite.min_ram_bytes == 12 * 1024**3
-    assert lite.supports_vision is False
-    assert pro.repo == "giladgd/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M-GGUF"
+    assert spec.min_ram_bytes == 48 * 1024**3
+    assert spec.mmproj_filename == "mmproj-nemotron-3-nano-omni-ga_v1.0.gguf"
     assert (
-        pro.sha256 == "ab4fc2b27b2043483a9e346c802809dfbe9b775efbeea7ca74dc2fd1aa4a0f71"
+        spec.mmproj_sha256
+        == "797d096c07c80a5d49ec3793b6d96889fa394a1207e0aa558effebde6928c2a9"
     )
-    assert pro.min_ram_bytes == 32 * 1024**3
-    # The fork-only Nemotron omni spec carries a vision mmproj projector.
-    omni = provider.LOCAL_MODEL_SPECS[provider.LOCAL_OMNI]
-    assert omni.repo == "ggml-org/NVIDIA-Nemotron-3-Nano-Omni"
-    assert omni.mmproj_filename == "mmproj-nemotron-3-nano-omni-ga_v1.0.gguf"
-    assert omni.supports_vision is True
 
 
 def test_local_provider_defaults_and_registry():
     from solstone.think.providers import PROVIDER_METADATA, PROVIDER_REGISTRY
 
-    assert PROVIDER_DEFAULTS["local"][TIER_PRO] == LOCAL_PRO
-    assert PROVIDER_DEFAULTS["local"][TIER_FLASH] == LOCAL_FLASH
-    assert PROVIDER_DEFAULTS["local"][TIER_LITE] == LOCAL_LITE
+    assert PROVIDER_DEFAULTS["local"][TIER_PRO] == LOCAL_MODEL
+    assert PROVIDER_DEFAULTS["local"][TIER_FLASH] == LOCAL_MODEL
+    assert PROVIDER_DEFAULTS["local"][TIER_LITE] == LOCAL_MODEL
     assert "ollama" not in PROVIDER_DEFAULTS
     assert PROVIDER_REGISTRY["local"] == "solstone.think.providers.local"
     assert "ollama" not in PROVIDER_REGISTRY
@@ -81,12 +67,8 @@ def test_local_provider_defaults_and_registry():
 def test_list_models_returns_specs():
     models = _provider().list_models("local")
 
-    assert [model["model"] for model in models] == [
-        LOCAL_FLASH,
-        LOCAL_PRO,
-        _provider().LOCAL_OMNI,
-    ]
-    assert models[0]["min_ram_bytes"] == 12 * 1024**3
+    assert [model["model"] for model in models] == [LOCAL_MODEL]
+    assert models[0]["min_ram_bytes"] == 48 * 1024**3
 
 
 def test_validate_key_uses_tiny_generate(monkeypatch):
@@ -101,15 +83,15 @@ def test_validate_key_uses_tiny_generate(monkeypatch):
 
     assert provider.validate_key("local", "") == {"valid": True}
     assert calls[0][0] == ("Say OK",)
-    assert calls[0][1]["model"] == LOCAL_FLASH
+    assert calls[0][1]["model"] == LOCAL_MODEL
     assert calls[0][1]["max_output_tokens"] == 8
 
 
 def test_run_generate_posts_to_loopback(monkeypatch):
     provider = _provider()
     monkeypatch.setattr(
-        "solstone.think.providers.local_server.ensure_running",
-        lambda model_id: SimpleNamespace(port=4321, base_url="http://127.0.0.1:4321"),
+        "solstone.think.providers.local_server.connect",
+        lambda: SimpleNamespace(port=4321, base_url="http://127.0.0.1:4321"),
     )
     captured = {}
 
@@ -119,7 +101,7 @@ def test_run_generate_posts_to_loopback(monkeypatch):
 
         def json(self):
             return {
-                "model": LOCAL_FLASH,
+                "model": LOCAL_MODEL,
                 "choices": [
                     {
                         "message": {"content": "hello"},
@@ -141,10 +123,10 @@ def test_run_generate_posts_to_loopback(monkeypatch):
 
     monkeypatch.setattr(httpx, "post", fake_post)
 
-    result = provider.run_generate("hello", model=LOCAL_FLASH, max_output_tokens=16)
+    result = provider.run_generate("hello", model=LOCAL_MODEL, max_output_tokens=16)
 
     assert captured["url"] == "http://127.0.0.1:4321/v1/chat/completions"
-    assert captured["json"]["model"] == LOCAL_FLASH
+    assert captured["json"]["model"] == LOCAL_MODEL
     assert captured["json"]["messages"] == [{"role": "user", "content": "hello"}]
     assert captured["json"]["max_tokens"] == 16
     assert result["text"] == "hello"
@@ -155,49 +137,55 @@ def test_run_generate_posts_to_loopback(monkeypatch):
     }
 
 
-def test_run_generate_rejects_image_on_text_only_model():
+def test_run_generate_emits_chat_completions_image_url(monkeypatch):
     provider = _provider()
+    monkeypatch.setattr(
+        "solstone.think.providers.local_server.connect",
+        lambda: SimpleNamespace(port=4321, base_url="http://127.0.0.1:4321"),
+    )
+    png = b"\x89PNG\r\n\x1a\npayload"
+    captured = {}
 
-    with pytest.raises(provider.LocalProviderError) as exc:
-        provider.run_generate(
-            [{"type": "image", "data": "aGVsbG8=", "mime": "image/png"}],
-            model=LOCAL_FLASH,
-        )
+    class Response:
+        def raise_for_status(self):
+            return None
 
-    assert exc.value.reason_code == "unsupported_capability"
+        def json(self):
+            return {
+                "model": LOCAL_MODEL,
+                "choices": [
+                    {
+                        "message": {"content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
 
+    def fake_post(url, json, timeout):
+        captured.update({"url": url, "json": json, "timeout": timeout})
+        return Response()
 
-def test_translate_content_blocks_image_gated_on_vision():
-    provider = _provider()
-    blocks = [
-        {"type": "text", "text": "describe"},
-        {"type": "image", "data": "aGVsbG8=", "mime": "image/png"},
+    import httpx
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    provider.run_generate(["look", png], model=LOCAL_MODEL)
+
+    assert captured["json"]["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "look"},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:image/png;base64,"
+                        + base64.b64encode(png).decode("ascii")
+                    },
+                },
+            ],
+        }
     ]
-
-    # Vision-capable model: image becomes an OpenAI image_url data URI.
-    out = provider._translate_content_blocks(blocks, supports_vision=True)
-    assert out[0] == {"type": "text", "text": "describe"}
-    assert out[1]["type"] == "image_url"
-    assert out[1]["image_url"]["url"] == "data:image/png;base64,aGVsbG8="
-
-    # Text-only model: image is rejected.
-    with pytest.raises(provider.LocalProviderError) as exc:
-        provider._translate_content_blocks(
-            [{"type": "image", "data": "aGVsbG8="}], supports_vision=False
-        )
-    assert exc.value.reason_code == "unsupported_capability"
-
-
-def test_translate_content_blocks_audio_always_unsupported():
-    provider = _provider()
-
-    with pytest.raises(provider.LocalProviderError) as exc:
-        provider._translate_content_blocks(
-            [{"type": "audio", "data": "aGVsbG8=", "format": "wav"}],
-            supports_vision=True,
-        )
-
-    assert exc.value.reason_code == "unsupported_capability"
 
 
 def test_openhands_local_llm_kwargs(monkeypatch):
@@ -213,22 +201,22 @@ def test_openhands_local_llm_kwargs(monkeypatch):
     sdk_module.LLM = FakeLLM
     monkeypatch.setitem(sys.modules, "openhands.sdk", sdk_module)
     monkeypatch.setattr(
-        "solstone.think.providers.local_server.ensure_running",
-        lambda model_id: SimpleNamespace(port=9876),
+        "solstone.think.providers.local_server.connect",
+        lambda: SimpleNamespace(port=9876),
     )
 
-    llm = openhands._build_llm("local", LOCAL_FLASH)
+    llm = openhands._build_llm("local", LOCAL_MODEL)
 
     assert isinstance(llm, FakeLLM)
     assert captured == {
-        "model": f"openai/{LOCAL_FLASH}",
+        "model": f"openai/{LOCAL_MODEL}",
         "base_url": "http://127.0.0.1:9876/v1",
         "api_key": "EMPTY",
         "native_tool_calling": False,
         "input_cost_per_token": 0,
         "chat_template_kwargs": {"enable_thinking": False},
     }
-    assert openhands._prefixed_model("local", LOCAL_FLASH) == f"openai/{LOCAL_FLASH}"
+    assert openhands._prefixed_model("local", LOCAL_MODEL) == f"openai/{LOCAL_MODEL}"
 
 
 def test_llama_server_pins_are_real_b9291_digests():
@@ -250,9 +238,51 @@ def test_llama_server_pins_are_real_b9291_digests():
     )
 
 
+def _select_local_provider(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "solstone.think.models.get_config",
+        lambda: {"providers": {"generate": {"provider": "local"}}},
+    )
+
+
+def test_build_provider_status_local_not_selected_is_inert(monkeypatch):
+    from solstone.think.providers import build_provider_status
+
+    health_calls = []
+    monkeypatch.setattr(
+        "solstone.think.models.get_config",
+        lambda: {"providers": {"generate": {"provider": "google"}}},
+    )
+    monkeypatch.setattr(
+        "solstone.think.providers.local_install.inspect_readiness",
+        lambda: {
+            "binary_installed": True,
+            "model_installed": True,
+            "ram_sufficient": True,
+            "binary_path": "/fake/llama-server",
+        },
+    )
+    monkeypatch.setattr(
+        "solstone.think.providers.local_server.is_healthy",
+        lambda: health_calls.append("health") or True,
+    )
+
+    status = build_provider_status(
+        [{"name": "local", "label": "Local (on-device)", "env_key": ""}]
+    )["local"]
+
+    assert status["selected"] is False
+    assert status["configured"] is True
+    assert status["generate_ready"] is False
+    assert status["cogitate_ready"] is False
+    assert status["issues"] == []
+    assert health_calls == []
+
+
 def test_build_provider_status_local_readiness(monkeypatch):
     from solstone.think.providers import build_provider_status
 
+    _select_local_provider(monkeypatch)
     monkeypatch.setattr(
         "solstone.think.providers.local_install.inspect_readiness",
         lambda: {
@@ -276,9 +306,109 @@ def test_build_provider_status_local_readiness(monkeypatch):
     assert status["issues"] == []
 
 
+def test_build_provider_status_local_launch_failure_adds_probe_detail_and_hint(
+    monkeypatch,
+):
+    from solstone.think.providers import build_provider_status
+
+    _select_local_provider(monkeypatch)
+    detail = "dyld: Library not loaded: @rpath/libllama.dylib"
+    monkeypatch.setattr(
+        "solstone.think.providers.local_install.inspect_readiness",
+        lambda: {
+            "binary_installed": True,
+            "model_installed": True,
+            "ram_sufficient": True,
+            "binary_path": "/fake/llama-server",
+        },
+    )
+    monkeypatch.setattr(
+        "solstone.think.providers.local_server.is_healthy", lambda: False
+    )
+    monkeypatch.setattr(
+        "solstone.think.providers.local_install.probe_binary_runnable",
+        lambda _path: (False, detail),
+    )
+
+    status = build_provider_status(
+        [{"name": "local", "label": "Local (on-device)", "env_key": ""}]
+    )["local"]
+
+    assert status["issues"] == [
+        f"failed to launch: {detail}",
+        "run `sol call settings providers install local`",
+    ]
+    assert "server_unhealthy" not in status["issues"]
+
+
+def test_build_provider_status_local_server_unhealthy_when_probe_runnable(
+    monkeypatch,
+):
+    from solstone.think.providers import build_provider_status
+
+    _select_local_provider(monkeypatch)
+    monkeypatch.setattr(
+        "solstone.think.providers.local_install.inspect_readiness",
+        lambda: {
+            "binary_installed": True,
+            "model_installed": True,
+            "ram_sufficient": True,
+            "binary_path": "/fake/llama-server",
+        },
+    )
+    monkeypatch.setattr(
+        "solstone.think.providers.local_server.is_healthy", lambda: False
+    )
+    monkeypatch.setattr(
+        "solstone.think.providers.local_install.probe_binary_runnable",
+        lambda _path: (True, None),
+    )
+
+    status = build_provider_status(
+        [{"name": "local", "label": "Local (on-device)", "env_key": ""}]
+    )["local"]
+
+    assert status["issues"] == ["server_unhealthy"]
+
+
+def test_build_provider_status_local_healthy_skips_probe(monkeypatch):
+    from solstone.think.providers import build_provider_status
+
+    _select_local_provider(monkeypatch)
+    calls: list[str] = []
+
+    def probe(_path):
+        calls.append(_path)
+        return False, "should not run"
+
+    monkeypatch.setattr(
+        "solstone.think.providers.local_install.inspect_readiness",
+        lambda: {
+            "binary_installed": True,
+            "model_installed": True,
+            "ram_sufficient": True,
+            "binary_path": "/fake/llama-server",
+        },
+    )
+    monkeypatch.setattr(
+        "solstone.think.providers.local_server.is_healthy", lambda: True
+    )
+    monkeypatch.setattr(
+        "solstone.think.providers.local_install.probe_binary_runnable", probe
+    )
+
+    status = build_provider_status(
+        [{"name": "local", "label": "Local (on-device)", "env_key": ""}]
+    )["local"]
+
+    assert status["issues"] == []
+    assert calls == []
+
+
 def test_local_provider_status_carries_install_hint_substring(monkeypatch):
     from solstone.think.providers import build_provider_status
 
+    _select_local_provider(monkeypatch)
     monkeypatch.setattr(
         "solstone.think.providers.local_install.inspect_readiness",
         lambda: {
@@ -312,86 +442,42 @@ def test_local_provider_status_carries_install_hint_substring(monkeypatch):
     )
 
 
-def test_local_server_spawn_binds_loopback(monkeypatch):
+def test_local_server_connect_returns_healthy_service(monkeypatch):
     from solstone.think.providers import local_server
 
-    captured = {}
-
-    class FakeProcess:
-        returncode = None
-
-        def poll(self):
-            return None
-
-    def fake_spawn(cmd, **kwargs):
-        captured["cmd"] = cmd
-        captured["kwargs"] = kwargs
-        return FakeProcess()
-
-    monkeypatch.setattr(local_server, "_PROCESS", None)
-    monkeypatch.setattr(local_server, "_PROCESS_MODEL_ID", None)
-    monkeypatch.setattr(local_server, "_PROCESS_PORT", None)
-    monkeypatch.setattr(
-        local_server, "_server_file_lock", lambda: contextlib.nullcontext()
-    )
-    monkeypatch.setattr(
-        "solstone.think.providers.local_install.ensure_artifacts_installed",
-        lambda model_id: (Path("/tmp/llama-server"), Path("/tmp/model.gguf")),
-    )
-    monkeypatch.setattr(local_server, "find_available_port", lambda host: 2468)
-    monkeypatch.setattr(local_server, "write_service_port", lambda service, port: None)
-    monkeypatch.setattr(local_server, "read_service_port", lambda service: None)
+    monkeypatch.setattr(local_server, "read_service_port", lambda service: 2468)
     monkeypatch.setattr(local_server, "_probe_health", lambda port: ("ready", None))
-    monkeypatch.setattr(local_server.RunnerManagedProcess, "spawn", fake_spawn)
 
-    info = local_server.ensure_running(LOCAL_FLASH)
+    info = local_server.connect()
 
+    assert info.model_id == LOCAL_MODEL
     assert info.base_url == "http://127.0.0.1:2468"
-    assert "--host" in captured["cmd"]
-    assert captured["cmd"][captured["cmd"].index("--host") + 1] == "127.0.0.1"
-    assert "0.0.0.0" not in captured["cmd"]
-    assert captured["cmd"] == [
-        "/tmp/llama-server",
-        "-m",
-        "/tmp/model.gguf",
-        "--alias",
-        LOCAL_FLASH,
-        "--host",
-        "127.0.0.1",
-        "--port",
-        "2468",
-    ]
+    assert info.state == local_server.STATE_READY
 
 
-def test_reattach_rejects_server_serving_a_different_model(monkeypatch):
-    """A healthy server on the service port that serves a different model must
-    NOT be reattached — otherwise an in-process model switch silently keeps
-    serving the previously-loaded model."""
+def test_local_server_connect_missing_port_raises_named_copy(monkeypatch):
+    from solstone.think.providers import local_server
+
+    monkeypatch.setattr(local_server, "read_service_port", lambda service: None)
+
+    with pytest.raises(local_server.LocalProviderError) as exc:
+        local_server.connect()
+
+    assert exc.value.reason_code == "local_model_not_ready"
+    assert str(exc.value) == local_server.LOCAL_MODEL_NOT_READY_COPY
+
+
+def test_local_server_connect_failed_health_raises_named_copy(monkeypatch):
     from solstone.think.providers import local_server
 
     monkeypatch.setattr(local_server, "read_service_port", lambda service: 2468)
-    monkeypatch.setattr(local_server, "_probe_health", lambda port: ("ready", None))
-    # The live server serves a different model than the one requested.
-    monkeypatch.setattr(
-        local_server,
-        "_serves_model",
-        lambda port, model_id: model_id == "local/other-model",
-    )
+    monkeypatch.setattr(local_server, "_probe_health", lambda port: ("starting", None))
 
-    assert local_server._reattach_if_ready("local/qwen2.5-coder-7b") is None
+    with pytest.raises(local_server.LocalProviderError) as exc:
+        local_server.connect()
 
-
-def test_reattach_accepts_server_serving_the_requested_model(monkeypatch):
-    from solstone.think.providers import local_server
-
-    monkeypatch.setattr(local_server, "read_service_port", lambda service: 2468)
-    monkeypatch.setattr(local_server, "_probe_health", lambda port: ("ready", None))
-    monkeypatch.setattr(local_server, "_serves_model", lambda port, model_id: True)
-
-    info = local_server._reattach_if_ready("local/qwen2.5-coder-7b")
-    assert info is not None
-    assert info.port == 2468
-    assert info.model_id == "local/qwen2.5-coder-7b"
+    assert exc.value.reason_code == "local_model_not_ready"
+    assert str(exc.value) == local_server.LOCAL_MODEL_NOT_READY_COPY
 
 
 def test_migrate_ollama_to_local_idempotent():
@@ -435,15 +521,15 @@ def test_migrate_ollama_to_local_idempotent():
     providers = migrated["providers"]
     assert providers["generate"]["provider"] == "local"
     assert providers["generate"]["backup"] == "local"
-    assert providers["generate"]["model"] == LOCAL_FLASH
+    assert providers["generate"]["model"] == LOCAL_MODEL
     assert providers["cogitate"]["provider"] == "local"
     assert providers["cogitate"]["backup"] == "anthropic"
-    assert providers["cogitate"]["model"] == LOCAL_PRO
+    assert providers["cogitate"]["model"] == LOCAL_MODEL
     assert "ollama" not in providers["models"]
     assert providers["models"]["local"] == {
-        "1": LOCAL_LITE,
-        "2": LOCAL_FLASH,
-        "3": LOCAL_PRO,
+        "1": LOCAL_MODEL,
+        "2": LOCAL_MODEL,
+        "3": LOCAL_MODEL,
         "custom": "local/custom-model",
     }
     assert providers["auth"] == {"local": "platform"}
@@ -451,7 +537,7 @@ def test_migrate_ollama_to_local_idempotent():
     assert providers["api_keys"] == {"ollama": True}
     assert providers["contexts"]["test.ollama"] == {
         "provider": "local",
-        "model": LOCAL_LITE,
+        "model": LOCAL_MODEL,
     }
     assert any(
         change.get("warning") == "unsupported_model" for change in report["changes"]

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from solstone.think import supervisor
+from solstone.think.supervisor import _MANAGED_SERVICE_PROCTITLES
 
 TEST_JOURNAL = Path("/journal/test")
 
@@ -16,7 +17,7 @@ class _FakeProcess:
         self,
         *,
         pid: int,
-        name: str = "sol:sense",
+        name: str = "journal:sense",
         ppid: int = 1,
         username: str = "jer",
         name_error: Exception | None = None,
@@ -59,19 +60,33 @@ class TestOrphanSweep:
         )
         return kills
 
-    def test_matching_targets_are_sigtermed(self, monkeypatch):
-        procs = [_FakeProcess(pid=111), _FakeProcess(pid=222, name="sol:convey")]
+    @pytest.mark.parametrize("proctitle", sorted(_MANAGED_SERVICE_PROCTITLES))
+    def test_managed_service_proctitles_are_sigtermed(self, monkeypatch, proctitle):
+        procs = [_FakeProcess(pid=111, name=proctitle)]
         kills = self._patch_common(monkeypatch, procs)
         monkeypatch.setattr(supervisor.psutil, "pid_exists", lambda _pid: False)
 
-        assert supervisor._sweep_orphaned_sol_processes(journal=TEST_JOURNAL) == 2
-        assert kills == [(111, signal.SIGTERM), (222, signal.SIGTERM)]
+        assert supervisor._sweep_orphaned_sol_processes(journal=TEST_JOURNAL) == 1
+        assert kills == [(111, signal.SIGTERM)]
+
+    @pytest.mark.parametrize(
+        "proctitle",
+        ["journal:think", "journal:heartbeat", "sol:call"],
+    )
+    def test_non_managed_orphan_proctitles_are_ignored(self, monkeypatch, proctitle):
+        procs = [_FakeProcess(pid=111, name=proctitle)]
+        kills = self._patch_common(monkeypatch, procs)
+
+        assert supervisor._sweep_orphaned_sol_processes(journal=TEST_JOURNAL) == 0
+        assert kills == []
 
     def test_non_matching_processes_are_ignored(self, monkeypatch):
         monkeypatch.setattr(supervisor.os, "getpid", lambda: 555)
         procs = [
             _FakeProcess(pid=111, username="other"),
+            _FakeProcess(pid=112, name="llama-server", username="other"),
             _FakeProcess(pid=222, ppid=2),
+            _FakeProcess(pid=223, name="llama-server", ppid=2),
             _FakeProcess(pid=333, name="python"),
             _FakeProcess(pid=444, name="solstone:convey"),
             _FakeProcess(pid=555),
@@ -126,7 +141,7 @@ class TestOrphanSweep:
         assert kills == [(111, signal.SIGTERM)]
 
     def test_candidate_in_different_journal_is_skipped(self, monkeypatch):
-        procs = [_FakeProcess(pid=111)]
+        procs = [_FakeProcess(pid=111), _FakeProcess(pid=222, name="llama-server")]
         kills = self._patch_common(monkeypatch, procs)
         monkeypatch.setattr(
             supervisor,

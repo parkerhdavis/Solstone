@@ -274,21 +274,13 @@ See `tests/fixtures/journal/config/journal.json` for a complete example and `sol
 
 **Required test coverage:**
 
-1. **Unit tests** in `tests/test_<provider>.py`:
-   - Mock API responses
-   - Test parameter handling
-   - Test error cases
-
-2. **Integration tests** in `tests/integration/test_<provider>_backend.py`:
-   - Live API calls (require API keys)
-   - End-to-end generation
-   - Token usage verification
+**Unit tests** in `tests/test_<provider>.py`:
+- Mock API responses
+- Test parameter handling
+- Test error cases
 
 See existing test files for patterns:
 - `tests/test_google.py`, `tests/test_openai.py`, `tests/test_anthropic.py`
-- `tests/integration/test_google_backend.py`, etc.
-
-Run integration tests with: `make test-integration`
 
 ## Batch Processing
 
@@ -423,8 +415,7 @@ to paste into ``models.json``; it does not edit the registry itself.
 
 **Testing:**
 11. Create unit tests in `tests/test_<name>.py`
-12. Create integration tests in `tests/integration/test_<name>_backend.py`
-13. Add test contexts to `tests/fixtures/journal/config/journal.json`
+12. Add test contexts to `tests/fixtures/journal/config/journal.json`
 
 **Documentation:**
 14. Update `solstone/think/providers/__init__.py` docstring

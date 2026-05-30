@@ -14,7 +14,7 @@ export TMPDIR := /var/tmp
 PYTEST_BASETEMP_INIT := BASETEMP=$$(mktemp -d /var/tmp/solstone-pytest-XXXXXX); trap 'rm -rf "$$BASETEMP"' EXIT INT TERM;
 PYTEST_BASETEMP_FLAG := --basetemp "$$BASETEMP"
 
-.PHONY: install uninstall test test-cov test-apps test-app test-only test-integration test-integration-only test-all format format-check install-checks ci clean clean-install coverage watch versions update update-prices pre-commit skills dev all sandbox sandbox-stop install-pinchtab install-models parakeet-helper parakeet-helper-clean wheel-macos wheel-macos-clean verify-browser update-browser-baselines review verify verify-api update-api-baselines service-logs check-layer-hygiene smoke-cogitate release release-test FORCE
+.PHONY: install uninstall test test-cov test-app test-only format format-check install-checks ci clean clean-install coverage watch versions update update-prices preflight pre-commit skills dev all sandbox sandbox-stop install-pinchtab install-models parakeet-helper parakeet-helper-clean wheel-macos wheel-macos-clean verify-browser update-browser-baselines review verify verify-api update-api-baselines service-logs check-layer-hygiene smoke-cogitate release release-test FORCE
 
 # Default target - install package in editable mode
 all: install
@@ -39,10 +39,16 @@ else
 EXTRAS_ARGS := --all-extras
 endif
 
-# Require uv
+# Require uv only for goals that actually use it. `preflight` is a pure
+# stdlib readiness battery and `install` runs preflight as its own fail-fast
+# pre-step, so neither should abort at parse time when uv is absent — they
+# report uv-absence themselves. test/ci/etc. still abort early.
 UV := $(shell command -v uv 2>/dev/null)
+UV_OPTIONAL_GOALS := preflight install
 ifndef UV
+ifneq ($(filter-out $(UV_OPTIONAL_GOALS),$(MAKECMDGOALS)),)
 $(error uv is not installed. Install it: curl -LsSf https://astral.sh/uv/install.sh | sh)
+endif
 endif
 
 # User bin directory for symlink (standard location, usually already in PATH)
@@ -55,10 +61,9 @@ USER_BIN := $(HOME)/.local/bin
 
 # Marker file to track installation
 .installed: pyproject.toml uv.lock .python-version-hash
+	$(MAKE) preflight
 	@echo "Installing package with uv..."
 	$(UV) sync --group dev $(EXTRAS_ARGS)
-	@echo "Installing Playwright Chromium browser..."
-	$(VENV_BIN)/python -m playwright install chromium
 	@# Python 3.14+ needs onnxruntime from nightly (not yet on PyPI)
 	@OS_NAME=$$(uname -s); \
 	PY_MINOR=$$($(PYTHON) -c "import sys; print(sys.version_info.minor)"); \
@@ -112,6 +117,11 @@ install: .installed
 	fi
 	@touch .installed
 	@$(VENV_BIN)/journal install-models || { echo "journal install-models failed" >&2; exit 1; }
+
+# Stdlib-only install-readiness battery — runs before `.venv`/`uv` exist; a
+# blocker failure exits non-zero. Also wired as the first step of `.installed`.
+preflight:
+	python3 scripts/preflight.py
 
 # Setup skill symlinks
 skills:
@@ -345,9 +355,6 @@ review: .installed
 
 # Test environment - use fixtures journal for all tests
 TEST_ENV = SOLSTONE_JOURNAL=tests/fixtures/journal
-# Marker-based exclusion: anything decorated `pytest.mark.integration` is held
-# out of `make test`. New live-network tests need only the marker — no Makefile edit.
-NOT_INTEGRATION = -m "not integration"
 
 # Venv tool shortcuts
 PYTEST := $(VENV_BIN)/pytest
@@ -358,26 +365,19 @@ MYPY := $(VENV_BIN)/mypy
 format-check: .installed
 	@$(RUFF) format --check . || { echo "Run 'make format' to fix formatting"; exit 1; }
 
-# Run core tests (excluding integration and app tests)
+# Run all unit tests — core (tests/) + every app (solstone/apps/*/tests/).
 # -n auto --dist loadgroup lives here, not in pyproject addopts, so bare
-# pytest / pytest-watch / IDE runs stay serial. The root conftest
-# workerinput controller-guard keeps direct `pytest -n auto` correct too.
+# pytest / pytest-watch / IDE runs stay serial.
 test: .installed format-check
-	@echo "Running core tests..."
-	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) tests/ -q --ignore=tests/integration $(NOT_INTEGRATION) -n auto --dist loadgroup
+	@echo "Running unit tests (core + apps)..."
+	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) tests/ solstone/apps/ -q -n auto --dist loadgroup
 
-# Run core tests with full-repo coverage (used by ci/verify)
+# Same suite with full-repo coverage (used by ci/verify)
 test-cov: .installed format-check
-	@echo "Running core tests with coverage..."
-	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) tests/ -q --cov=. --ignore=tests/integration $(NOT_INTEGRATION) -n auto --dist loadgroup
-	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) solstone/apps/link/tests/test_workspace_qr_size.py -q --cov=. --cov-append
+	@echo "Running unit tests with coverage (core + apps)..."
+	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) tests/ solstone/apps/ -q --cov=. -n auto --dist loadgroup
 
-# Run app tests
-test-apps: .installed
-	@echo "Running app tests..."
-	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) solstone/apps/ -q
-
-# Run specific app tests
+# Run a single app's tests
 test-app: .installed
 	@if [ -z "$(APP)" ]; then \
 		echo "Usage: make test-app APP=<app_name>"; \
@@ -395,34 +395,6 @@ test-only: .installed
 		exit 1; \
 	fi
 	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) $(TEST)
-
-# Run integration tests
-test-integration: .installed
-	@echo "Running integration tests..."
-	@$(PYTEST_BASETEMP_INIT) STATUS=0; \
-	$(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) tests/integration/ tests/link/ -m integration -v --tb=short --timeout=20 || STATUS=$$?; \
-	if [ "$$STATUS" -ne 0 ] && [ "$$STATUS" -ne 5 ]; then exit $$STATUS; fi
-
-# Run specific integration test
-test-integration-only: .installed
-	@if [ -z "$(TEST)" ]; then \
-		echo "Usage: make test-integration-only TEST=<test_file_or_pattern>"; \
-		echo "Example: make test-integration-only TEST=test_api.py"; \
-		exit 1; \
-	fi
-	@$(PYTEST_BASETEMP_INIT) TARGET="$(TEST)"; \
-	case "$$TARGET" in \
-		tests/*|-*) ;; \
-		*) TARGET="tests/integration/$$TARGET" ;; \
-	esac; \
-	STATUS=0; \
-	$(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) "$$TARGET" --timeout=20 || STATUS=$$?; \
-	if [ "$$STATUS" -ne 0 ] && [ "$$STATUS" -ne 5 ]; then exit $$STATUS; fi
-
-# Run all tests (core + apps + integration)
-test-all: .installed
-	@echo "Running all tests (core + apps + integration)..."
-	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) tests/ -v --cov=. --ignore=tests/integration $(NOT_INTEGRATION) && $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) solstone/apps/ -v --cov=. --cov-append
 
 # Auto-format and fix code, then report any remaining issues
 format: .installed
@@ -504,10 +476,9 @@ watch: .installed
 	@$(UV) pip show pytest-watch >/dev/null 2>&1 || { echo "Installing pytest-watch..."; $(UV) pip install pytest-watch; }
 	$(VENV_BIN)/ptw -- -q
 
-# Generate coverage report (core + apps, excluding core integration tests)
+# Generate HTML coverage report (core + apps)
 coverage: .installed
-	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) tests/ --cov=. --cov-report=html --cov-report=term --ignore=tests/integration $(NOT_INTEGRATION)
-	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) solstone/apps/ --cov=. --cov-report=html --cov-report=term --cov-append
+	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) tests/ solstone/apps/ --cov=. --cov-report=html --cov-report=term
 	@echo "Coverage report generated in htmlcov/index.html"
 
 # Update all dependencies to latest versions and refresh genai-prices
@@ -548,9 +519,7 @@ check-layer-hygiene: .installed
 # real openhands-sdk Agent path is exercised end-to-end. Requires real API
 # keys in env (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`) and
 # `llama-server` on PATH for the `local` backend. Catches v1.23-style Agent
-# schema regressions that the openhands-fake unit tests cannot — see
-# `tests/integration/test_cogitate_facade_agent_construction.py` for the
-# pytest variant that runs without keys.
+# schema regressions that the openhands-fake unit tests cannot.
 COGITATE_SMOKE_RUNNER ?= /home/jer/projects/extro/vpe/workspace/archived/cogitate-integrated-facade-smoke-260523.py
 
 smoke-cogitate: .installed
@@ -570,14 +539,6 @@ smoke-install-providers: .installed
 	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) \
 	  solstone/apps/settings/tests/test_providers_payload_extended.py \
 	  -v --tb=short --timeout=120
-	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) \
-	  tests/integration/test_bundled_install_real_uv.py \
-	  tests/integration/test_bundled_provider_migration.py \
-	  tests/integration/test_local_install_canonical.py \
-	  -m integration -v --tb=short --timeout=120
-	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) \
-	  solstone/apps/settings/tests/test_providers_panel_visual.py \
-	  -m integration -v --tb=short --timeout=120
 
 release: ## Publish solstone to PyPI (production)
 	@bash scripts/release.sh

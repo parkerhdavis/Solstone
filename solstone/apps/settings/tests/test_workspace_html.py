@@ -11,10 +11,6 @@ MLX_SCOPE_COPY = (
     "vision and text on your device. "
     "tool-calling agents continue to use your configured cogitate provider."
 )
-MLX_COGITATE_UNSUPPORTED_TITLE = (
-    "MLX provider does not support cogitate in v1 — it is vision/generate-only. "
-    "Configure a cloud provider for cogitate agents."
-)
 MLX_UNAVAILABLE_REASONS = [
     "not running on macOS",
     "not running on Apple Silicon",
@@ -52,11 +48,12 @@ def test_workspace_has_diagnostic_reports_toggle():
     assert "diagnostic reports" in text
 
 
-def test_workspace_mlx_option_present_in_generate_backup_and_cogitate_lists():
+def test_workspace_mlx_excluded_from_cogitate_but_present_for_generate():
     text = _workspace_text()
 
     assert "for (const type of ['generate', 'cogitate'])" in text
     assert "for (const suffix of ['provider', 'backup'])" in text
+    assert "if (type === 'cogitate' && p.name === 'mlx') continue;" in text
     assert "opt.value = p.name" in text
     assert "provider.name !== 'mlx'" in text
 
@@ -187,11 +184,66 @@ def test_workspace_mlx_bootstrap_handlers_do_not_write_generate_provider():
         )
 
 
-def test_workspace_mlx_cogitate_option_disabled_with_runtime_message():
+def test_workspace_mlx_cogitate_unsupported_branch_removed():
     text = _workspace_text()
 
-    assert MLX_COGITATE_UNSUPPORTED_TITLE in text
-    assert "if (type === 'cogitate') return MLX_COGITATE_UNSUPPORTED_TITLE" in text
+    assert "MLX_COGITATE_UNSUPPORTED_TITLE" not in text
+    assert "if (type === 'cogitate') return MLX_COGITATE_UNSUPPORTED_TITLE" not in text
+
+
+def test_workspace_cogitate_key_guidance_strings_present():
+    text = _workspace_text()
+
+    assert (
+        "This provider needs an API key to run agents. Get one at "
+        "aistudio.google.com, then add it in API keys below."
+    ) in text
+    assert (
+        "This provider needs an API key to run agents. Get one at "
+        "console.anthropic.com, then add it in API keys below."
+    ) in text
+    assert (
+        "This provider needs an API key to run agents. Get one at "
+        "platform.openai.com, then add it in API keys below."
+    ) in text
+
+
+def test_workspace_cogitate_auth_control_removed():
+    text = _workspace_text()
+
+    assert 'id="field-cogitate-auth"' not in text
+    assert "platform account" not in text
+    assert "document.getElementById('field-cogitate-auth')" not in text
+
+
+def test_workspace_security_network_mode_ui_removed_and_link_hint_present():
+    text = _workspace_text()
+    for removed in (
+        'id="conveyNetworkButton"',
+        'id="conveyNetworkMode"',
+        'id="conveyNetworkDesc"',
+        'id="conveyNetworkStatus"',
+        'id="conveyPasswordDisclosure"',
+        'id="conveyDisclosurePassword"',
+        'id="conveyDisclosureConfirm"',
+        'id="conveyDisclosureSubmit"',
+        'id="conveyDisclosureError"',
+        "conveyUiText",
+        "renderConveyNetworkState",
+        "setConveyNetworkStatus",
+        "toggleConveyNetworkAccess",
+        "showConveyPasswordDisclosure",
+        "submitConveyPasswordDisclosure",
+    ):
+        assert removed not in text, removed
+
+    assert 'id="conveyLanUrlDisplay"' not in text
+    assert 'id="field-host-url"' not in text
+    assert "function renderConveyHostFields(" in text
+    assert 'id="field-password"' in text
+    assert 'id="field-trust-localhost"' in text
+    assert 'href="/app/link"' in text
+    assert "{{ convey_copy.SETTINGS_SECURITY_REACH_HINT }}" in text
 
 
 def test_workspace_local_cogitate_status_block_and_unified_panel():

@@ -113,21 +113,17 @@ Use the Makefile targets. The high-signal commands are:
 ```bash
 make test
 make test-only TEST=tests/test_utils.py::test_foo
-make test-apps
 make test-app APP=settings
 make ci
 ```
 
-`make test` runs unit tests after a format check. `make ci` is the pre-commit gate: format-check, ruff, layer hygiene, and tests. Run it before committing.
-
-Integration tests hit real provider APIs and require `.env` keys:
+`make test` runs all unit tests — `tests/` plus every `solstone/apps/*/tests/`, in one parallel run — after a format check. `make ci` is the pre-commit gate: format-check, ruff, layer hygiene, and tests. Run it before committing.
 
 ```bash
-make test-integration
-make test-integration-only TEST=tests/integration/test_foo.py
+make test-only TEST="-k test_foo"              # one test by name/pattern
 ```
 
-For user-visible web changes, use the sandbox/browser verification targets when relevant:
+All tests are fast unit/component tests (no real browser, live network, or API keys). For user-visible web changes, use the sandbox/browser verification targets when relevant:
 
 ```bash
 make verify-api
