@@ -20,8 +20,10 @@ Public API:
 
 from solstone.think.benchmark.estimate import (
     Estimate,
+    GroupFit,
     SegmentEstimate,
     TaskEstimate,
+    estimate_group_fit,
     estimate_output_tok_s,
     estimate_segment_time_s,
     estimate_task_time_s,
@@ -32,12 +34,15 @@ from solstone.think.benchmark.estimate import (
     load_tasks,
     load_transcribers,
     resolve_hardware_class,
+    resolve_memory_budget_gb,
 )
 
 __all__ = [
     "Estimate",
+    "GroupFit",
     "SegmentEstimate",
     "TaskEstimate",
+    "estimate_group_fit",
     "estimate_output_tok_s",
     "estimate_segment_time_s",
     "estimate_task_time_s",
@@ -48,4 +53,5 @@ __all__ = [
     "load_tasks",
     "load_transcribers",
     "resolve_hardware_class",
+    "resolve_memory_budget_gb",
 ]

@@ -67,13 +67,11 @@ class TestSegmentRoute:
         assert "per_talent" in body
         assert "confidence" in body
         assert "tier_models" in body
-        # The bundled local registry is text-only (v1), so default tier-model
-        # fill populates generate/cogitate from local models. There is no
-        # vision-capable model until the provider gains image support
-        # (Phase C), so the vision role is legitimately absent.
-        for tier in ("generate", "cogitate"):
+        # The registry now carries vision-capable local models (the served
+        # Nemotron Omni plus the qwen candidates), so the default tier-model
+        # fill populates all three roles from local models.
+        for tier in ("generate", "cogitate", "vision"):
             assert tier in body["tier_models"]
-        assert "vision" not in body["tier_models"]
         assert body["scenario"] == "solo_active"
 
     def test_specified_scenario_passes_through(self, journal_copy):
@@ -98,11 +96,11 @@ class TestSegmentRoute:
         resp = client.get(
             "/app/settings/api/benchmark/segment"
             "?scenario=solo_active"
-            "&generate=ollama-local/qwen3.5:35b-a3b-bf16"
+            "&generate=local/qwen3.6-35b-a3b"
         )
         assert resp.status_code == 200
         body = resp.get_json()
-        assert body["tier_models"]["generate"] == "ollama-local/qwen3.5:35b-a3b-bf16"
+        assert body["tier_models"]["generate"] == "local/qwen3.6-35b-a3b"
 
     def test_transcriber_query_param_carries_through(self, journal_copy):
         client = _settings_client(journal_copy)
@@ -113,6 +111,44 @@ class TestSegmentRoute:
         assert resp.status_code == 200
         body = resp.get_json()
         assert body["transcriber"] == "whisper"
+
+    def test_carries_budget_and_group_fit(self, journal_copy):
+        client = _settings_client(journal_copy)
+        resp = client.get("/app/settings/api/benchmark/segment")
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert "budget_gb" in body
+        assert "group_fit" in body
+        for key in ("budget_gb", "footprint_gb", "fits", "per_model_gb", "notes"):
+            assert key in body["group_fit"]
+
+    def test_rejects_invalid_budget(self, journal_copy):
+        client = _settings_client(journal_copy)
+        resp = client.get("/app/settings/api/benchmark/segment?budget=not-a-number")
+        assert resp.status_code == 400
+        assert "error" in resp.get_json()
+
+
+# ---------------------------------------------------------------------------
+# /api/benchmark/models
+# ---------------------------------------------------------------------------
+
+
+class TestModelsRoute:
+    def test_rows_carry_served_flag(self, journal_copy):
+        # The providers-tab benchmark card uses `served` to show the single
+        # served model and keep candidate rows non-switchable, so the row must
+        # carry it and exactly the pinned LOCAL_MODEL must be flagged.
+        from solstone.think.models import LOCAL_MODEL
+
+        client = _settings_client(journal_copy)
+        resp = client.get("/app/settings/api/benchmark/models")
+        assert resp.status_code == 200
+        body = resp.get_json()
+        by_id = {m["model_id"]: m for m in body["models"]}
+        assert by_id[LOCAL_MODEL]["served"] is True
+        served = [m["model_id"] for m in body["models"] if m.get("served")]
+        assert served == [LOCAL_MODEL]
 
 
 # ---------------------------------------------------------------------------

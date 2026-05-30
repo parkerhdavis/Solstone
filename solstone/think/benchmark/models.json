@@ -1,215 +1,47 @@
 {
-  "_comment": "Pre-vetted local models for Solstone, served by the bundled llama.cpp local provider (local/ \u2014 llama-server on 127.0.0.1, the production local backend). Rows mirror think/providers/local.py LOCAL_MODEL_SPECS. Benchmarks are measured tok/s per canonical hardware class (see reference.json) and are populated via solstone.think.benchmark.harness on real hardware (the harness prints a paste-ready snippet; it never writes this file). An empty benchmarks dict means no measurement is available yet \u2014 the estimator falls back to confidence=unknown. The model rows for two now-retired local backends were dropped during the llama.cpp local-bundle migration (neither is a provider anymore; see docs/design for the named history). Multimodal: the local provider serves image (Nemotron Omni mmproj); audio is unsupported through llama-server and stays on the Whisper STT pipeline.",
+  "_comment": "Multi-candidate evaluation registry for Solstone's local-model benchmark / preset framework. This is NOT a list of interchangeable served models: exactly one model is SERVED at a time -- the one pinned in think/models.py LOCAL_MODEL (currently local/nemotron-3-nano-omni, which providers/local.py normalize_model_id() coerces every request to). The other rows are CANDIDATES being measured head-to-head to inform whether the served model should change; that switch is a separate, owner-approved follow-up (see the Local Inference & Benchmarking Plan, Decision #7). The settings UI labels candidates as such and must never imply you can switch to one. Benchmarks are measured tok/s + per-task wall-clock per canonical hardware class (see reference.json), populated via solstone.think.benchmark.harness on real hardware (it prints a paste-ready snippet; it never writes this file). An empty benchmarks dict means no measurement yet -- the estimator returns confidence=unknown. Pre-migration dgx-spark numbers for the retired qwen-coder rows were dropped as wrong-provenance: normalize_model_id() coerced those harness runs to the served model, so they did not measure the labeled model. The served + candidate models are re-measured from scratch (Plan phase B3). Provider-neutral by design (Decision #8): rows are keyed by a provider-prefixed model_id (local/ today; a future google//openai//anthropic/ cloud row fits the same shape). Local-only fields (size_gb, vram_required_gb, the hardware-class benchmark axis) are optional and simply omitted for cloud rows, whose latency/cost gets measured on a parallel axis added when cloud benchmarking lands. The (hardware x budget) preset dimension and whole-model-group footprint fit (Decision #9) are layered on by the estimator (Plan phase B6) and do not change this row schema. Capabilities use the tasks.json tier_role vocabulary (generate / cogitate / vision / audio); a model lists every role it can serve. Audio is unsupported on the bundle (llama-server rejects it; audio runs through the Whisper STT pipeline), so no local row lists 'audio'.",
   "models": {
-    "local/qwen3-coder-30b-a3b-q4_k_m": {
-      "label": "Qwen3 Coder 30B-A3B (Q4_K_M) \u2014 MoE",
+    "local/nemotron-3-nano-omni": {
+      "label": "NVIDIA Nemotron 3 Nano Omni (Q8_0)",
+      "served": true,
       "tier_hint": 1,
-      "size_gb": 18.6,
+      "size_gb": 35.1,
       "capabilities": [
         "generate",
-        "cogitate"
+        "cogitate",
+        "vision"
       ],
-      "vram_required_gb": 32,
-      "notes": "Upstream bundled local PRO-tier model (think/models.py LOCAL_PRO). MoE, ~3B active; Q4_K_M GGUF. Served by the bundled llama-server with full GPU offload on the Spark.",
-      "benchmarks": {
-        "dgx-spark": {
-          "output_tok_s": 95.1,
-          "prompt_tok_s": 972.3,
-          "measured_at": "2026-05-25",
-          "mode": "text_only",
-          "tasks": {
-            "chat_reply": {
-              "seconds": 1.25,
-              "prompt_tokens": 253,
-              "output_tokens": 102,
-              "measured_at": "2026-05-25"
-            },
-            "voice_brain_turn": {
-              "seconds": 0.8,
-              "prompt_tokens": 176,
-              "output_tokens": 63,
-              "measured_at": "2026-05-25"
-            },
-            "search_query": {
-              "seconds": 0.83,
-              "prompt_tokens": 133,
-              "output_tokens": 65,
-              "measured_at": "2026-05-25"
-            },
-            "agent_turn": {
-              "seconds": 4.73,
-              "prompt_tokens": 691,
-              "output_tokens": 400,
-              "measured_at": "2026-05-25"
-            },
-            "entity_extraction": {
-              "seconds": 5.0,
-              "prompt_tokens": 759,
-              "output_tokens": 419,
-              "measured_at": "2026-05-25"
-            },
-            "todo_extraction": {
-              "seconds": 3.89,
-              "prompt_tokens": 789,
-              "output_tokens": 320,
-              "measured_at": "2026-05-25"
-            },
-            "meeting_summary": {
-              "seconds": 3.75,
-              "prompt_tokens": 1178,
-              "output_tokens": 288,
-              "measured_at": "2026-05-25"
-            },
-            "activity_clustering": {
-              "seconds": 8.84,
-              "prompt_tokens": 869,
-              "output_tokens": 750,
-              "measured_at": "2026-05-25"
-            },
-            "daily_insight": {
-              "seconds": 4.12,
-              "prompt_tokens": 1064,
-              "output_tokens": 325,
-              "measured_at": "2026-05-25"
-            },
-            "segment_sense": {
-              "seconds": 5.12,
-              "prompt_tokens": 1274,
-              "output_tokens": 400,
-              "measured_at": "2026-05-25"
-            },
-            "speaker_attribution_llm": {
-              "seconds": 4.28,
-              "prompt_tokens": 856,
-              "output_tokens": 350,
-              "measured_at": "2026-05-25"
-            },
-            "screen_record": {
-              "seconds": 13.91,
-              "prompt_tokens": 1264,
-              "output_tokens": 1157,
-              "measured_at": "2026-05-25"
-            },
-            "awareness_tender": {
-              "seconds": 3.74,
-              "prompt_tokens": 650,
-              "output_tokens": 314,
-              "measured_at": "2026-05-25"
-            },
-            "pulse": {
-              "seconds": 3.86,
-              "prompt_tokens": 868,
-              "output_tokens": 316,
-              "measured_at": "2026-05-25"
-            }
-          }
-        }
-      }
+      "vram_required_gb": 48,
+      "notes": "SERVED model (think/models.py LOCAL_MODEL; serves all tiers via normalize_model_id). ~32B omni MoE, Q8_0 GGUF (~33.6 GB) plus its mmproj vision projector (~1.5 GB); min-RAM ~48 GiB, comfortable on the 128 GB Spark. Serves text/agentic cogitate and single-image vision (screen_frame). The omni audio/video modalities are unused on the bundle. Footprint is a spec estimate pending B3 measurement.",
+      "benchmarks": {}
     },
-    "local/qwen2.5-coder-7b": {
-      "label": "Qwen2.5 Coder 7B (Q4_K_M)",
-      "tier_hint": 2,
-      "size_gb": 4.7,
+    "local/qwen3.5-4b": {
+      "label": "Qwen3.5-4B (VLM)",
+      "served": false,
+      "tier_hint": 3,
+      "size_gb": 2.74,
       "capabilities": [
         "generate",
-        "cogitate"
+        "cogitate",
+        "vision"
       ],
-      "vram_required_gb": 12,
-      "notes": "Upstream bundled local FLASH/LITE-tier model (think/models.py LOCAL_FLASH / LOCAL_LITE). Q4_K_M GGUF; ~11.9 GB GPU-resident on the Spark (weights + KV cache + CUDA buffers).",
-      "benchmarks": {
-        "dgx-spark": {
-          "output_tok_s": 95.0,
-          "prompt_tok_s": 966.8,
-          "measured_at": "2026-05-25",
-          "mode": "text_only",
-          "tasks": {
-            "chat_reply": {
-              "seconds": 1.07,
-              "prompt_tokens": 253,
-              "output_tokens": 84,
-              "measured_at": "2026-05-25"
-            },
-            "voice_brain_turn": {
-              "seconds": 0.8,
-              "prompt_tokens": 176,
-              "output_tokens": 63,
-              "measured_at": "2026-05-25"
-            },
-            "search_query": {
-              "seconds": 0.82,
-              "prompt_tokens": 133,
-              "output_tokens": 65,
-              "measured_at": "2026-05-25"
-            },
-            "agent_turn": {
-              "seconds": 4.74,
-              "prompt_tokens": 691,
-              "output_tokens": 400,
-              "measured_at": "2026-05-25"
-            },
-            "entity_extraction": {
-              "seconds": 5.01,
-              "prompt_tokens": 759,
-              "output_tokens": 419,
-              "measured_at": "2026-05-25"
-            },
-            "todo_extraction": {
-              "seconds": 3.91,
-              "prompt_tokens": 789,
-              "output_tokens": 320,
-              "measured_at": "2026-05-25"
-            },
-            "meeting_summary": {
-              "seconds": 4.01,
-              "prompt_tokens": 1178,
-              "output_tokens": 301,
-              "measured_at": "2026-05-25"
-            },
-            "activity_clustering": {
-              "seconds": 8.85,
-              "prompt_tokens": 869,
-              "output_tokens": 750,
-              "measured_at": "2026-05-25"
-            },
-            "daily_insight": {
-              "seconds": 3.76,
-              "prompt_tokens": 1064,
-              "output_tokens": 293,
-              "measured_at": "2026-05-25"
-            },
-            "segment_sense": {
-              "seconds": 5.13,
-              "prompt_tokens": 1274,
-              "output_tokens": 400,
-              "measured_at": "2026-05-25"
-            },
-            "speaker_attribution_llm": {
-              "seconds": 4.27,
-              "prompt_tokens": 856,
-              "output_tokens": 350,
-              "measured_at": "2026-05-25"
-            },
-            "screen_record": {
-              "seconds": 13.45,
-              "prompt_tokens": 1264,
-              "output_tokens": 1117,
-              "measured_at": "2026-05-25"
-            },
-            "awareness_tender": {
-              "seconds": 3.67,
-              "prompt_tokens": 650,
-              "output_tokens": 308,
-              "measured_at": "2026-05-25"
-            },
-            "pulse": {
-              "seconds": 4.03,
-              "prompt_tokens": 868,
-              "output_tokens": 331,
-              "measured_at": "2026-05-25"
-            }
-          }
-        }
-      }
+      "vram_required_gb": 8,
+      "notes": "CANDIDATE (not served) -- upstream's bundled default local model. 4B vision VLM with mmproj-F16.gguf; the small-footprint baseline for the head-to-head. size_gb is upstream's published Q4_K_M figure; B3 re-measures at Q8 per the served-quant convention (Decision #13), which will revise it.",
+      "benchmarks": {}
+    },
+    "local/qwen3.6-35b-a3b": {
+      "label": "Qwen3.6-35B-A3B (Q8_0)",
+      "served": false,
+      "tier_hint": 1,
+      "size_gb": 37.8,
+      "capabilities": [
+        "generate",
+        "cogitate",
+        "vision"
+      ],
+      "vram_required_gb": 48,
+      "notes": "CANDIDATE (not served) -- gated in after confirming the unsloth GGUF ships a vision projector (mmproj-BF16/F16/F32.gguf). 35B MoE, ~3B active; Q8_0 GGUF (~36.9 GB) plus mmproj (~0.9 GB BF16). Built for Solstone's workload (agentic text + single-image vision); same family as the qwen baseline, so its chat template / tool-calling / enable_thinking are aligned. B3 must FIRST confirm the pinned llama.cpp b9291 build loads this Qwen2.5-VL-style ViT projector; if it cannot, this row competes text-only until the aarch64/sm_121 binary is rebuilt at a newer tag. Footprint is a spec estimate pending B3.",
+      "benchmarks": {}
     }
   }
 }

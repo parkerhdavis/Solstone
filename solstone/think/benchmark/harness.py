@@ -5,7 +5,9 @@
 
 Maintainer-only. Run by hand to seed ``models.json`` /
 ``transcribers.json`` with real measurements; not invoked by the live
-pipeline.
+pipeline. Connect-only: the bundled llama-server must already be running
+under the supervisor (``sol supervisor``) before running an LLM benchmark —
+the harness attaches to that daemon and does not spawn its own server.
 
 Three modes:
 
@@ -31,12 +33,13 @@ Three modes:
 Usage::
 
     # Synthetic tok/s benchmark (bundled llama-server; --pull to fetch the GGUF)
-    python -m solstone.think.benchmark.harness --model local/qwen2.5-coder-7b \\
+    python -m solstone.think.benchmark.harness --model local/nemotron-3-nano-omni \\
         --class dgx-spark --pull
 
-    # Task-time benchmark (vision flag auto-applied when task.mode=vision)
-    python -m solstone.think.benchmark.harness --model local/qwen2.5-coder-7b \\
-        --class dgx-spark --task chat_reply
+    # Task-time benchmark (vision flag auto-applied when task.mode=vision, so
+    # this measures the mmproj image-encoder cost via the production image path)
+    python -m solstone.think.benchmark.harness --model local/nemotron-3-nano-omni \\
+        --class dgx-spark --task screen_frame
 
     # Transcriber RTF (point at any mono 16kHz audio file)
     python -m solstone.think.benchmark.harness --transcriber whisper \\
