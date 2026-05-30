@@ -67,13 +67,11 @@ class TestSegmentRoute:
         assert "per_talent" in body
         assert "confidence" in body
         assert "tier_models" in body
-        # The bundled local registry is text-only (v1), so default tier-model
-        # fill populates generate/cogitate from local models. There is no
-        # vision-capable model until the provider gains image support
-        # (Phase C), so the vision role is legitimately absent.
-        for tier in ("generate", "cogitate"):
+        # The registry now carries vision-capable local models (the served
+        # Nemotron Omni plus the qwen candidates), so the default tier-model
+        # fill populates all three roles from local models.
+        for tier in ("generate", "cogitate", "vision"):
             assert tier in body["tier_models"]
-        assert "vision" not in body["tier_models"]
         assert body["scenario"] == "solo_active"
 
     def test_specified_scenario_passes_through(self, journal_copy):
@@ -98,11 +96,11 @@ class TestSegmentRoute:
         resp = client.get(
             "/app/settings/api/benchmark/segment"
             "?scenario=solo_active"
-            "&generate=ollama-local/qwen3.5:35b-a3b-bf16"
+            "&generate=local/qwen3.6-35b-a3b"
         )
         assert resp.status_code == 200
         body = resp.get_json()
-        assert body["tier_models"]["generate"] == "ollama-local/qwen3.5:35b-a3b-bf16"
+        assert body["tier_models"]["generate"] == "local/qwen3.6-35b-a3b"
 
     def test_transcriber_query_param_carries_through(self, journal_copy):
         client = _settings_client(journal_copy)

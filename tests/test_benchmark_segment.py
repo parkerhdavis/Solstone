@@ -32,7 +32,7 @@ FAKE_REFERENCE = {
 # Three measured models so every tier has a known per-call cost on rtx-3090.
 FAKE_REGISTRY = {
     "models": {
-        "ollama-local/vision-fast:7b": {
+        "local/vision-fast:7b": {
             "label": "Vision Fast",
             "tier_hint": 3,
             "size_gb": 4.0,
@@ -42,7 +42,7 @@ FAKE_REGISTRY = {
                 "rtx-3090": {"output_tok_s": 100.0, "prompt_tok_s": 1000.0},
             },
         },
-        "ollama-local/generate-fast:9b": {
+        "local/generate-fast:9b": {
             "label": "Generate Fast",
             "tier_hint": 2,
             "size_gb": 5.5,
@@ -52,7 +52,7 @@ FAKE_REGISTRY = {
                 "rtx-3090": {"output_tok_s": 50.0, "prompt_tok_s": 1000.0},
             },
         },
-        "ollama-local/cogitate-lite:3b": {
+        "local/cogitate-lite:3b": {
             "label": "Cogitate Lite",
             "tier_hint": 3,
             "size_gb": 2.0,
@@ -62,7 +62,7 @@ FAKE_REGISTRY = {
                 "rtx-3090": {"output_tok_s": 80.0, "prompt_tok_s": 1500.0},
             },
         },
-        "ollama-local/unmeasured:9b": {
+        "local/unmeasured:9b": {
             "label": "Unmeasured",
             "tier_hint": 2,
             "size_gb": 5.5,
@@ -215,9 +215,9 @@ def patch_loaders(monkeypatch):
 
 
 TIER_MODELS = {
-    "vision": "ollama-local/vision-fast:7b",
-    "generate": "ollama-local/generate-fast:9b",
-    "cogitate": "ollama-local/cogitate-lite:3b",
+    "vision": "local/vision-fast:7b",
+    "generate": "local/generate-fast:9b",
+    "cogitate": "local/cogitate-lite:3b",
 }
 
 
@@ -328,8 +328,8 @@ class TestSegmentEstimate:
     def test_missing_tier_model_marks_lane_unknown(self):
         # No vision model provided => video lane unknown, total unknown.
         partial = {
-            "generate": "ollama-local/generate-fast:9b",
-            "cogitate": "ollama-local/cogitate-lite:3b",
+            "generate": "local/generate-fast:9b",
+            "cogitate": "local/cogitate-lite:3b",
         }
         est = estimate_segment_time_s(partial, "rtx-3090", "solo_active")
         assert est.video_seconds is None
@@ -341,8 +341,8 @@ class TestSegmentEstimate:
 
     def test_missing_generate_model_marks_each_dependent_talent_unknown(self):
         partial = {
-            "vision": "ollama-local/vision-fast:7b",
-            "cogitate": "ollama-local/cogitate-lite:3b",
+            "vision": "local/vision-fast:7b",
+            "cogitate": "local/cogitate-lite:3b",
         }
         est = estimate_segment_time_s(partial, "rtx-3090", "solo_active")
         # Generate-tier talents skipped; cogitate-tier talents still present.
@@ -365,7 +365,7 @@ class TestSegmentEstimate:
     def test_unmeasured_model_for_a_tier_marks_lane_unknown(self):
         # Substitute the generate-tier model with one that has no benchmarks.
         models = dict(TIER_MODELS)
-        models["generate"] = "ollama-local/unmeasured:9b"
+        models["generate"] = "local/unmeasured:9b"
         est = estimate_segment_time_s(models, "rtx-3090", "solo_active")
         # All generate-tier talents fail to estimate.
         assert "segment_sense" not in est.per_talent

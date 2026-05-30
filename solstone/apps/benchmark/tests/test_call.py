@@ -12,6 +12,7 @@ from unittest.mock import patch
 from typer.testing import CliRunner
 
 from solstone.apps.benchmark import call as benchmark_call
+from solstone.think.benchmark import estimate as est_mod
 from solstone.think.call import call_app
 
 runner = CliRunner()
@@ -75,7 +76,7 @@ class TestListModels:
         with patch.object(subprocess, "run", side_effect=FileNotFoundError):
             runner.invoke(call_app, ["benchmark", "profile"])
 
-        fake_installed = {"local/qwen3.5:9b"}
+        fake_installed = {"local/qwen3.5-4b"}
         with patch.object(
             benchmark_call, "_list_installed_models", return_value=fake_installed
         ):
@@ -83,13 +84,15 @@ class TestListModels:
         assert result.exit_code == 0, result.output
         payload = json.loads(result.output)
         by_id = {row["model_id"]: row for row in payload["models"]}
-        assert by_id["local/qwen3.5:9b"]["installed"] is True
-        assert by_id["local/qwen3.5:2b"]["installed"] is False
+        assert by_id["local/qwen3.5-4b"]["installed"] is True
+        assert by_id["local/qwen3.6-35b-a3b"]["installed"] is False
 
 
 class TestEstimate:
     def test_requires_probed_hardware(self, journal_override):
-        result = runner.invoke(call_app, ["benchmark", "estimate", "local/qwen3.5:9b"])
+        result = runner.invoke(
+            call_app, ["benchmark", "estimate", "local/nemotron-3-nano-omni"]
+        )
         assert result.exit_code == 1
         assert (
             "probe" in result.output.lower() or "probe" in (result.stderr or "").lower()
@@ -99,7 +102,7 @@ class TestEstimate:
         with patch.object(subprocess, "run", side_effect=FileNotFoundError):
             runner.invoke(call_app, ["benchmark", "profile"])
         result = runner.invoke(
-            call_app, ["benchmark", "estimate", "local/not-a-real-model:1b"]
+            call_app, ["benchmark", "estimate", "local/not-a-real-model"]
         )
         assert result.exit_code == 1
 
@@ -109,16 +112,45 @@ class TestEstimate:
             runner.invoke(call_app, ["benchmark", "profile"])
         result = runner.invoke(
             call_app,
-            ["benchmark", "estimate", "local/qwen3.5:9b", "--json"],
+            ["benchmark", "estimate", "local/nemotron-3-nano-omni", "--json"],
         )
         assert result.exit_code == 0, result.output
         payload = json.loads(result.output)
-        assert payload["model_id"] == "local/qwen3.5:9b"
+        assert payload["model_id"] == "local/nemotron-3-nano-omni"
         assert payload["hardware_class"] == "rtx-4090"
-        # Without seed measurements, confidence is unknown for now.
+        # Served/candidate rows ship with empty benchmarks until the Spark
+        # head-to-head (Plan phase B3), so confidence is unknown for now;
+        # the assertion accepts the full set so it stays valid post-B3.
         assert payload["confidence"] in ("unknown", "measured", "interpolated")
 
-    def test_task_time_estimate(self, journal_override):
+    def test_task_time_estimate(self, journal_override, monkeypatch):
+        # Seed a dgx-spark chat_reply measurement so the direct-measurement
+        # path (a measured wall-clock wins over the formula -> confidence
+        # "measured") is exercised deterministically, independent of what the
+        # live registry has been measured for. The served/candidate rows ship
+        # with empty benchmarks until the Spark head-to-head (Plan phase B3).
+        fake_registry = {
+            "models": {
+                "local/nemotron-3-nano-omni": {
+                    "label": "Nemotron",
+                    "served": True,
+                    "tier_hint": 1,
+                    "size_gb": 35.1,
+                    "capabilities": ["generate", "cogitate", "vision"],
+                    "vram_required_gb": 48,
+                    "benchmarks": {
+                        "dgx-spark": {
+                            "output_tok_s": 90.0,
+                            "prompt_tok_s": 900.0,
+                            "tasks": {"chat_reply": {"seconds": 1.2}},
+                        }
+                    },
+                }
+            }
+        }
+        monkeypatch.setattr(benchmark_call, "load_registry", lambda: fake_registry)
+        monkeypatch.setattr(est_mod, "load_registry", lambda: fake_registry)
+
         stdout = "NVIDIA DGX Spark, 0, 580.142\n"
         with patch.object(subprocess, "run", return_value=_fake_smi_result(stdout)):
             runner.invoke(call_app, ["benchmark", "profile"])
@@ -127,7 +159,7 @@ class TestEstimate:
             [
                 "benchmark",
                 "estimate",
-                "local/qwen3.5:9b",
+                "local/nemotron-3-nano-omni",
                 "--task",
                 "chat_reply",
                 "--json",
@@ -137,9 +169,8 @@ class TestEstimate:
         payload = json.loads(result.output)
         assert payload["task_id"] == "chat_reply"
         assert payload["seconds"] is not None
-        # dgx-spark has direct task measurements seeded in models.json
-        # so this should resolve to "measured" (ground truth). If that
-        # ever regresses to a formula path, confidence would drop.
+        # A direct task measurement exists for this hardware class, so it
+        # wins over the tok/s formula -> "measured" (ground truth).
         assert payload["confidence"] == "measured"
 
     def test_task_time_rejects_unknown_task(self, journal_override):
@@ -150,7 +181,7 @@ class TestEstimate:
             [
                 "benchmark",
                 "estimate",
-                "local/qwen3.5:9b",
+                "local/nemotron-3-nano-omni",
                 "--task",
                 "definitely_not_a_task",
             ],

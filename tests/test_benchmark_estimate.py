@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from solstone.think.benchmark import estimate as est_mod
@@ -14,6 +16,7 @@ from solstone.think.benchmark.estimate import (
     list_prevetted_models,
     resolve_hardware_class,
 )
+from solstone.think.models import LOCAL_MODEL
 
 FAKE_REFERENCE = {
     "classes": {
@@ -52,7 +55,7 @@ FAKE_REFERENCE = {
 
 FAKE_REGISTRY = {
     "models": {
-        "ollama-local/measured-model:1b": {
+        "local/measured-model:1b": {
             "label": "Measured",
             "tier_hint": 3,
             "size_gb": 1.0,
@@ -62,7 +65,7 @@ FAKE_REGISTRY = {
                 "rtx-3090": {"output_tok_s": 50.0, "prompt_tok_s": 1000.0},
             },
         },
-        "ollama-local/unmeasured:9b": {
+        "local/unmeasured:9b": {
             "label": "Unmeasured",
             "tier_hint": 2,
             "size_gb": 5.5,
@@ -70,7 +73,7 @@ FAKE_REGISTRY = {
             "vram_required_gb": 8,
             "benchmarks": {},
         },
-        "ollama-local/huge-vision:72b": {
+        "local/huge-vision:72b": {
             "label": "Huge vision",
             "tier_hint": 1,
             "size_gb": 40.0,
@@ -134,7 +137,7 @@ class TestResolveHardwareClass:
 
 class TestEstimate:
     def test_measured_exact_match(self):
-        est = estimate_output_tok_s("ollama-local/measured-model:1b", "rtx-3090")
+        est = estimate_output_tok_s("local/measured-model:1b", "rtx-3090")
         assert est.confidence == "measured"
         assert est.tok_s == 50.0
         assert est.source_class == "rtx-3090"
@@ -144,25 +147,25 @@ class TestEstimate:
         # rtx-3090 source: 70 * 900 = 63000
         # scale factor: 165000 / 63000 ≈ 2.619
         # expected: 50 * 2.619 ≈ 131.0
-        est = estimate_output_tok_s("ollama-local/measured-model:1b", "rtx-4090")
+        est = estimate_output_tok_s("local/measured-model:1b", "rtx-4090")
         assert est.confidence == "interpolated"
         assert est.source_class == "rtx-3090"
         assert est.tok_s is not None
         assert 125 < est.tok_s < 135
 
     def test_unknown_when_model_has_no_benchmarks(self):
-        est = estimate_output_tok_s("ollama-local/unmeasured:9b", "rtx-4090")
+        est = estimate_output_tok_s("local/unmeasured:9b", "rtx-4090")
         assert est.confidence == "unknown"
         assert est.tok_s is None
         assert est.source_class is None
 
     def test_unknown_when_cpu_only(self):
-        est = estimate_output_tok_s("ollama-local/measured-model:1b", "cpu-only")
+        est = estimate_output_tok_s("local/measured-model:1b", "cpu-only")
         assert est.confidence == "unknown"
         assert est.tok_s is None
 
     def test_unknown_for_missing_model(self):
-        est = estimate_output_tok_s("ollama-local/not-in-registry:1b", "rtx-4090")
+        est = estimate_output_tok_s("local/not-in-registry:1b", "rtx-4090")
         assert est.confidence == "unknown"
         assert est.tok_s is None
 
@@ -173,9 +176,9 @@ class TestListPrevettedModels:
         rows = list_prevetted_models(hardware)
         by_id = {row["model_id"]: row for row in rows}
         # 24 GB VRAM fits the small/medium models but not the 44 GB vision model.
-        assert by_id["ollama-local/measured-model:1b"]["fits_in_vram"] is True
-        assert by_id["ollama-local/unmeasured:9b"]["fits_in_vram"] is True
-        assert by_id["ollama-local/huge-vision:72b"]["fits_in_vram"] is False
+        assert by_id["local/measured-model:1b"]["fits_in_vram"] is True
+        assert by_id["local/unmeasured:9b"]["fits_in_vram"] is True
+        assert by_id["local/huge-vision:72b"]["fits_in_vram"] is False
 
     def test_returns_all_models_with_estimates(self):
         hardware = {"gpus": [{"name": "NVIDIA DGX Spark", "vram_gb": 128}]}
@@ -244,20 +247,20 @@ class TestListPrevettedModels:
         # The smallest generate model in FAKE_REGISTRY is measured-model:1b
         # (1 GB) — it should be the comparison baseline for vision-only rows.
         # The smallest vision model is huge-vision:72b (only one, 40 GB).
-        vision_row = by_id["ollama-local/huge-vision:72b"]
+        vision_row = by_id["local/huge-vision:72b"]
         seg = vision_row["segment_estimate"]
         # This row attributes itself to the vision tier; generate/cogitate
         # come from the smallest applicable registry models.
         assert seg["self_attributed_tiers"] == ["vision"]
-        assert seg["tier_models"]["vision"] == "ollama-local/huge-vision:72b"
-        assert seg["tier_models"]["generate"] == "ollama-local/measured-model:1b"
+        assert seg["tier_models"]["vision"] == "local/huge-vision:72b"
+        assert seg["tier_models"]["generate"] == "local/measured-model:1b"
 
         # A generate-capable row attributes itself to generate (no
         # cogitate capability in this fixture, so cogitate doesn't appear).
-        gen_row = by_id["ollama-local/measured-model:1b"]
+        gen_row = by_id["local/measured-model:1b"]
         gen_seg = gen_row["segment_estimate"]
         assert "generate" in gen_seg["self_attributed_tiers"]
-        assert gen_seg["tier_models"]["generate"] == "ollama-local/measured-model:1b"
+        assert gen_seg["tier_models"]["generate"] == "local/measured-model:1b"
 
     def test_segment_total_unknown_when_audio_lane_unmeasured(self, monkeypatch):
         # transcriber=None (default) leaves the audio lane unknown, which
@@ -287,13 +290,13 @@ class TestListPrevettedModels:
         by_id = {row["model_id"]: row for row in rows}
 
         # Text-capable model: gets chat_reply but not screen_frame (vision-only)
-        measured = by_id["ollama-local/measured-model:1b"]
+        measured = by_id["local/measured-model:1b"]
         assert "chat_reply" in measured["tasks"]
         assert "screen_frame" not in measured["tasks"]
         assert measured["tasks"]["chat_reply"]["seconds"] is not None
 
         # Vision-only model: gets screen_frame but not chat_reply (text task)
-        vision = by_id["ollama-local/huge-vision:72b"]
+        vision = by_id["local/huge-vision:72b"]
         assert "chat_reply" not in vision["tasks"]
         assert "screen_frame" in vision["tasks"]
 
@@ -304,9 +307,7 @@ class TestEstimateTaskTime:
         # task measurement. Formula-derived time => "interpolated".
         # chat_reply: 500 prompt / 200 output
         # seconds = 500/1000 + 200/50 = 0.5 + 4.0 = 4.5
-        est = estimate_task_time_s(
-            "ollama-local/measured-model:1b", "rtx-3090", "chat_reply"
-        )
+        est = estimate_task_time_s("local/measured-model:1b", "rtx-3090", "chat_reply")
         assert est.confidence == "interpolated"
         assert est.seconds is not None
         assert abs(est.seconds - 4.5) < 0.01
@@ -315,8 +316,8 @@ class TestEstimateTaskTime:
         # Stub a direct task measurement on measured-model:1b for rtx-3090.
         registry = {
             "models": {
-                "ollama-local/measured-model:1b": {
-                    **FAKE_REGISTRY["models"]["ollama-local/measured-model:1b"],
+                "local/measured-model:1b": {
+                    **FAKE_REGISTRY["models"]["local/measured-model:1b"],
                     "benchmarks": {
                         "rtx-3090": {
                             "output_tok_s": 50.0,
@@ -334,7 +335,7 @@ class TestEstimateTaskTime:
         est_mod.load_registry = lambda: registry
         try:
             est = estimate_task_time_s(
-                "ollama-local/measured-model:1b", "rtx-3090", "chat_reply"
+                "local/measured-model:1b", "rtx-3090", "chat_reply"
             )
         finally:
             est_mod.load_registry = original
@@ -345,32 +346,26 @@ class TestEstimateTaskTime:
     def test_interpolated_task_time_cross_hardware(self):
         # rtx-4090 has no direct measurement — falls back to formula with
         # interpolated tok/s, which is also "interpolated" confidence.
-        est = estimate_task_time_s(
-            "ollama-local/measured-model:1b", "rtx-4090", "chat_reply"
-        )
+        est = estimate_task_time_s("local/measured-model:1b", "rtx-4090", "chat_reply")
         assert est.confidence == "interpolated"
         assert est.seconds is not None
         assert est.seconds > 0
         assert est.seconds < 4.5  # rtx-4090 is faster than rtx-3090
 
     def test_unknown_when_model_has_no_benchmarks(self):
-        est = estimate_task_time_s(
-            "ollama-local/unmeasured:9b", "rtx-4090", "chat_reply"
-        )
+        est = estimate_task_time_s("local/unmeasured:9b", "rtx-4090", "chat_reply")
         assert est.confidence == "unknown"
         assert est.seconds is None
 
     def test_unknown_for_missing_task(self):
         est = estimate_task_time_s(
-            "ollama-local/measured-model:1b", "rtx-3090", "no_such_task"
+            "local/measured-model:1b", "rtx-3090", "no_such_task"
         )
         assert est.confidence == "unknown"
         assert est.seconds is None
 
     def test_unknown_for_missing_model(self):
-        est = estimate_task_time_s(
-            "ollama-local/not-in-registry:1b", "rtx-3090", "chat_reply"
-        )
+        est = estimate_task_time_s("local/not-in-registry:1b", "rtx-3090", "chat_reply")
         assert est.confidence == "unknown"
         assert est.seconds is None
 
@@ -379,9 +374,37 @@ class TestEstimateTaskTime:
         # screen_frame: 200 prompt / 400 output
         # seconds = 200/200 + 400/30 = 1 + 13.33 = 14.33
         # Formula-derived => "interpolated" even with measured tok/s.
-        est = estimate_task_time_s(
-            "ollama-local/huge-vision:72b", "dgx-spark", "screen_frame"
-        )
+        est = estimate_task_time_s("local/huge-vision:72b", "dgx-spark", "screen_frame")
         assert est.confidence == "interpolated"
         assert est.seconds is not None
         assert 13 < est.seconds < 16
+
+
+class TestRegistryIntegrity:
+    """Invariants on the real shipped models.json (read from disk, so the
+    autouse fake-loader fixture doesn't apply)."""
+
+    def _real_registry(self) -> dict:
+        return json.loads(est_mod._REGISTRY_FILE.read_text())
+
+    def test_served_flag_matches_local_model(self):
+        # Drift guard: exactly one registry row carries served=true and it is
+        # the model pinned in think/models.py LOCAL_MODEL. The served flag is
+        # documentation/UI data; this keeps it from silently disagreeing with
+        # the single source of truth for what the provider actually serves.
+        models = self._real_registry()["models"]
+        served = [mid for mid, spec in models.items() if spec.get("served")]
+        assert served == [LOCAL_MODEL], (
+            f"served-flagged rows {served} must be exactly [{LOCAL_MODEL}]"
+        )
+
+    def test_candidates_are_capability_supersets_of_nothing_unexpected(self):
+        # Every local row uses the tasks.json tier_role vocabulary and never
+        # claims audio (unsupported on the bundle — runs through Whisper STT).
+        models = self._real_registry()["models"]
+        allowed = {"generate", "cogitate", "vision"}
+        for mid, spec in models.items():
+            caps = set(spec.get("capabilities") or [])
+            assert caps <= allowed, (
+                f"{mid} has unexpected capabilities {caps - allowed}"
+            )
