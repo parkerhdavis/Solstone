@@ -148,7 +148,9 @@ CLAUDE_HAIKU_4 = "claude-haiku-4-5"
 
 # Fork: the bundled local model is vision-capable Nemotron 3 Nano Omni (see
 # solstone/think/providers/local.py LOCAL_MODEL_SPECS and docs/FORK.md). Upstream
-# ships text-only local/qwen2.5-coder-7b here.
+# now ships its own vision VLM here (local/qwen3.5-4b) — a small runs-anywhere
+# 4B; the fork keeps the heavier Spark-targeted omni model. The vision/--jinja/
+# enable_thinking wiring is shared (upstream's, model-agnostic).
 LOCAL_MODEL = "local/nemotron-3-nano-omni"
 
 QWEN_35_9B = "qwen3.5:9b"
