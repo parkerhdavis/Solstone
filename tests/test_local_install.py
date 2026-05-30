@@ -409,17 +409,13 @@ class TestSparkAarch64Pin:
     def test_returns_linux_aarch64_key(self, monkeypatch):
         monkeypatch.setattr(local_install.platform, "machine", lambda: "aarch64")
         monkeypatch.setattr(local_install.sys, "platform", "linux")
-        assert (
-            local_install.llama_server_artifact_key() == "aarch64-unknown-linux-gnu"
-        )
+        assert local_install.llama_server_artifact_key() == "aarch64-unknown-linux-gnu"
 
     def test_returns_linux_aarch64_for_arm64_alias(self, monkeypatch):
         # arm64 -> aarch64 on Linux too (defensive: some distros report arm64)
         monkeypatch.setattr(local_install.platform, "machine", lambda: "arm64")
         monkeypatch.setattr(local_install.sys, "platform", "linux")
-        assert (
-            local_install.llama_server_artifact_key() == "aarch64-unknown-linux-gnu"
-        )
+        assert local_install.llama_server_artifact_key() == "aarch64-unknown-linux-gnu"
 
     def test_spark_cuda_pin_present_and_shaped(self, monkeypatch):
         pin = local_install.LLAMA_SERVER_PINS["aarch64-unknown-linux-gnu"]

@@ -19,6 +19,7 @@ from typing import Any
 from solstone.think.models import LOCAL_MODEL
 from solstone.think.providers._image import encode_image_part, is_image_part
 from solstone.think.providers.shared import (
+    BenchmarkResult,
     GenerateResult,
     classify_provider_error,
     safe_raw,

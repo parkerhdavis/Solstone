@@ -2237,8 +2237,8 @@ button:focus:not(:focus-visible) {
   }
 }
 
-/* Ollama benchmark details */
-.ollama-details {
+/* Benchmark details */
+.bench-details {
   margin: 0.5em 0 1em;
   padding: 0.6em 0.8em;
   background: var(--settings-card-bg, #f7f7f7);
@@ -2246,106 +2246,78 @@ button:focus:not(:focus-visible) {
   border-radius: 6px;
   font-size: 0.88em;
 }
-.ollama-details-summary {
+.bench-details-summary {
   display: flex;
   align-items: center;
   gap: 1em;
   cursor: pointer;
   user-select: none;
 }
-.ollama-summary-left {
+.bench-summary-left {
   flex: 1;
   min-width: 0;
 }
-.ollama-summary-right {
+.bench-summary-right {
   display: flex;
   align-items: center;
   gap: 0.75em;
   flex-shrink: 0;
 }
-.ollama-summary-speedgroup,
-.ollama-summary-togglegroup {
+.bench-summary-speedgroup,
+.bench-summary-togglegroup {
   display: inline-flex;
   align-items: center;
   gap: 0.4em;
   padding-left: 0.8em;
   border-left: 1px solid var(--settings-card-border, #d0d0d0);
 }
-.ollama-summary-prefix {
+.bench-summary-prefix {
   font-size: 0.82em;
   color: var(--settings-muted, #888);
   margin-right: 0.35em;
 }
-.ollama-details-summary .ollama-speed {
+.bench-details-summary .bench-speed {
   color: var(--settings-muted, #666);
   font-variant-numeric: tabular-nums;
 }
-.ollama-details-summary .ollama-confidence {
+.bench-details-summary .bench-confidence {
   font-size: 0.8em;
   padding: 1px 6px;
   border-radius: 3px;
   text-transform: lowercase;
 }
-.ollama-confidence.measured { background: #d6f5d6; color: #276b27; }
-.ollama-confidence.interpolated { background: #fff0c4; color: #7a5a00; }
-.ollama-confidence.unknown { background: #eee; color: #666; }
-.ollama-details-content {
+.bench-confidence.measured { background: #d6f5d6; color: #276b27; }
+.bench-confidence.interpolated { background: #fff0c4; color: #7a5a00; }
+.bench-confidence.unknown { background: #eee; color: #666; }
+.bench-details-content {
   display: none;
   margin-top: 0.6em;
   padding-top: 0.6em;
   border-top: 1px dashed #ccc;
 }
-.ollama-details.open .ollama-details-content { display: block; }
-.ollama-details.open .ollama-details-toggle::after { content: " ▴"; }
-.ollama-details:not(.open) .ollama-details-toggle::after { content: " ▾"; }
-.ollama-toggle-label {
+.bench-details.open .bench-details-content { display: block; }
+.bench-details.open .bench-details-toggle::after { content: " ▴"; }
+.bench-details:not(.open) .bench-details-toggle::after { content: " ▾"; }
+.bench-toggle-label {
   font-size: 0.82em;
   color: var(--settings-muted, #888);
   margin-right: 0.25em;
 }
-.ollama-task-group-title {
+.bench-task-group-title {
   font-size: 0.82em;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--settings-muted, #666);
   margin: 0.5em 0 0.2em;
 }
-.ollama-task-row {
+.bench-task-row {
   display: flex;
   justify-content: space-between;
   padding: 2px 0;
   font-variant-numeric: tabular-nums;
 }
-.ollama-task-row .ollama-task-label { color: var(--settings-fg, inherit); }
-.ollama-task-row .ollama-task-time { color: var(--settings-muted, #555); }
-.ollama-recommended-list {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 0.5em;
-}
-.ollama-recommended-item {
-  padding: 0.6em 0.8em;
-  background: var(--settings-card-bg, #f7f7f7);
-  border: 1px solid var(--settings-card-border, #ddd);
-  border-radius: 6px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 1em;
-}
-.ollama-recommended-item .ollama-rec-main {
-  flex: 1;
-  min-width: 0;
-}
-.ollama-recommended-item .ollama-rec-label {
-  font-weight: 600;
-  font-size: 0.95em;
-}
-.ollama-recommended-item .ollama-rec-meta {
-  font-size: 0.82em;
-  color: var(--settings-muted, #666);
-  margin-top: 2px;
-}
+.bench-task-row .bench-task-label { color: var(--settings-fg, inherit); }
+.bench-task-row .bench-task-time { color: var(--settings-muted, #555); }
 .segment-benchmark-section {
   margin-top: 1em;
 }
@@ -2376,7 +2348,7 @@ button:focus:not(:focus-visible) {
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
-.segment-headline .ollama-confidence {
+.segment-headline .bench-confidence {
   font-size: 0.8em;
   padding: 1px 6px;
   border-radius: 3px;
@@ -2393,7 +2365,7 @@ button:focus:not(:focus-visible) {
   cursor: pointer;
   list-style: revert;
 }
-.segment-talent-details summary.ollama-task-group-title {
+.segment-talent-details summary.bench-task-group-title {
   display: list-item;
 }
 .segment-notes {
@@ -2405,15 +2377,6 @@ button:focus:not(:focus-visible) {
 }
 .segment-notes .segment-note {
   margin: 2px 0;
-}
-.ollama-recommended-item .ollama-pull-cmd {
-  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 0.82em;
-  color: var(--settings-fg, inherit);
-  background: rgba(0,0,0,0.04);
-  padding: 2px 6px;
-  border-radius: 3px;
-  white-space: nowrap;
 }
 </style>
 
@@ -2665,7 +2628,7 @@ button:focus:not(:focus-visible) {
         <span>API key not configured for generate provider.</span>
         <a href="#" id="generateProviderKeyLink">configure in API keys</a>
       </div>
-      <div class="ollama-details" id="generateOllamaDetails" data-type="generate" style="display:none"></div>
+      <div class="bench-details" id="generateBenchDetails" data-type="generate" style="display:none"></div>
 
       <h3 class="settings-subsection-title">cogitate</h3>
       <p class="settings-subsection-desc">tool-calling agents for interactive chat, daily briefings, and complex reasoning.</p>
@@ -2694,12 +2657,7 @@ button:focus:not(:focus-visible) {
           <small></small>
         </div>
       </div>
-      <div class="ollama-details" id="cogitateOllamaDetails" data-type="cogitate" style="display:none"></div>
-      <div id="ollamaRecommendedSection" style="display:none">
-        <h3 class="settings-subsection-title">recommended ollama models</h3>
-        <p class="settings-subsection-desc">Pre-vetted local models you don't have installed yet. Speed estimates use your hardware profile when it fits the reference table.</p>
-        <div id="ollamaRecommendedList" class="ollama-recommended-list"></div>
-      </div>
+      <div class="bench-details" id="cogitateBenchDetails" data-type="cogitate" style="display:none"></div>
 
       <div id="segmentBenchmarkSection" class="segment-benchmark-section" style="display:none">
         <h3 class="settings-subsection-title">background processing</h3>
@@ -5356,14 +5314,14 @@ function populateProviders(data) {
   updateEnvStatus('field-env-openai', env.OPENAI_API_KEY, sysEnv.OPENAI_API_KEY);
   updateEnvStatus('field-env-anthropic', env.ANTHROPIC_API_KEY, sysEnv.ANTHROPIC_API_KEY);
 
-  // Refresh Ollama tier annotations / recommended list. Deferred via
+  // Refresh benchmark tier annotations. Deferred via
   // setTimeout so it runs after the current synchronous call stack
   // unwinds — makes us robust to any later-running code that might
   // re-render the tier options. Also runs BEFORE renderContextGroups
   // because renderContextGroups sometimes throws on certain API
   // shapes, and we don't want that to block our UI.
-  if (typeof refreshOllamaAnnotations === 'function') {
-    setTimeout(refreshOllamaAnnotations, 0);
+  if (typeof refreshBenchAnnotations === 'function') {
+    setTimeout(refreshBenchAnnotations, 0);
   }
 
   // Populate context overrides
@@ -8489,7 +8447,7 @@ if (document.readyState === 'loading') {
 }
 
 // ----------------------------------------------------------------------
-// Ollama benchmark annotations
+// Benchmark annotations
 // ----------------------------------------------------------------------
 
 let benchmarkData = null;
@@ -8536,17 +8494,15 @@ function primaryTaskForTier(model, role) {
   return candidates[0] ? { id: candidates[0][0], ...candidates[0][1] } : null;
 }
 
-// CSS/DOM names retain the legacy "ollama" prefix for cherry-pick simplicity.
-// (The ollama recommendations UI below is vestigial — ollama was removed
-// upstream in PR #44 — but left intact here; it's gated on an 'ollama'
-// provider that no longer exists, so it simply never renders.) Model rows are
-// filtered by model_id prefix to match the type's currently-selected provider.
-const LOCAL_PROVIDER_PREFIXES = {
-  ollama: 'ollama-local/',
-};
+// Model rows are filtered by model_id prefix to match the type's
+// currently-selected provider. The benchmark cards' provider→prefix wiring
+// for the served `local` model is rebuilt in the registry revamp; until then
+// this map is empty, so the per-model detail cards no-op rather than render
+// stale rows (the segment "background processing" card is unaffected).
+const LOCAL_PROVIDER_PREFIXES = {};
 
-function renderOllamaDetailsFor(type) {
-  const container = document.getElementById(type + 'OllamaDetails');
+function renderBenchDetailsFor(type) {
+  const container = document.getElementById(type + 'BenchDetails');
   const tierSelect = document.getElementById('field-' + type + '-tier');
   if (!container || !tierSelect) return;
 
@@ -8596,7 +8552,7 @@ function renderOllamaDetailsFor(type) {
 
 function renderDetailsPanel(model, requiredCap, tasksCatalog) {
   if (!model) {
-    return '<em>No pre-vetted ollama model is available for this tier.</em>';
+    return '<em>No pre-vetted local model is available for this tier.</em>';
   }
   const est = model.estimate || {};
   const tokS = est.tok_s !== null && est.tok_s !== undefined
@@ -8604,9 +8560,9 @@ function renderDetailsPanel(model, requiredCap, tasksCatalog) {
     : 'tok/s unknown';
   const confClass = est.confidence || 'unknown';
   const notInstalled = model.installed ? '' :
-    ` <span class="ollama-confidence unknown">not installed</span>`;
+    ` <span class="bench-confidence unknown">not installed</span>`;
   const notFits = model.fits_in_vram ? '' :
-    ` <span class="ollama-confidence unknown">won't fit in VRAM</span>`;
+    ` <span class="bench-confidence unknown">won't fit in VRAM</span>`;
 
   // Split applicable tasks into foreground / background using the catalog's
   // presence field.
@@ -8628,32 +8584,32 @@ function renderDetailsPanel(model, requiredCap, tasksCatalog) {
       const secs = info.seconds !== null && info.seconds !== undefined
         ? formatSeconds(info.seconds)
         : '?';
-      return `<div class="ollama-task-row"><span class="ollama-task-label">${escapeHtml(label)}</span><span class="ollama-task-time">${escapeHtml(secs)}</span></div>`;
+      return `<div class="bench-task-row"><span class="bench-task-label">${escapeHtml(label)}</span><span class="bench-task-time">${escapeHtml(secs)}</span></div>`;
     }).join('');
-    return `<div class="ollama-task-group-title">${escapeHtml(title)}</div>${rows}`;
+    return `<div class="bench-task-group-title">${escapeHtml(title)}</div>${rows}`;
   };
 
-  const notes = model.notes ? `<div class="ollama-task-group-title">Notes</div><div style="font-size:0.85em;color:#555">${escapeHtml(model.notes)}</div>` : '';
+  const notes = model.notes ? `<div class="bench-task-group-title">Notes</div><div style="font-size:0.85em;color:#555">${escapeHtml(model.notes)}</div>` : '';
 
   return `
-    <div class="ollama-details-summary" onclick="this.parentElement.classList.toggle('open')">
-      <span class="ollama-summary-left">
-        <span class="ollama-summary-prefix">Benchmark:</span>
+    <div class="bench-details-summary" onclick="this.parentElement.classList.toggle('open')">
+      <span class="bench-summary-left">
+        <span class="bench-summary-prefix">Benchmark:</span>
         <strong>${escapeHtml(model.label || model.model_id)}</strong>
         ${notInstalled}${notFits}
       </span>
-      <span class="ollama-summary-right">
-        <span class="ollama-summary-speedgroup">
-          <span class="ollama-speed">${escapeHtml(tokS)}</span>
-          <span class="ollama-confidence ${confClass}">${escapeHtml(est.confidence || 'unknown')}</span>
+      <span class="bench-summary-right">
+        <span class="bench-summary-speedgroup">
+          <span class="bench-speed">${escapeHtml(tokS)}</span>
+          <span class="bench-confidence ${confClass}">${escapeHtml(est.confidence || 'unknown')}</span>
         </span>
-        <span class="ollama-summary-togglegroup">
-          <span class="ollama-toggle-label">Toggle for Details</span>
-          <span class="ollama-details-toggle"></span>
+        <span class="bench-summary-togglegroup">
+          <span class="bench-toggle-label">Toggle for Details</span>
+          <span class="bench-details-toggle"></span>
         </span>
       </span>
     </div>
-    <div class="ollama-details-content">
+    <div class="bench-details-content">
       ${renderGroup('Foreground (user waiting)', fgTasks)}
       ${renderGroup('Background (autonomous)', bgTasks)}
       ${notes}
@@ -8661,62 +8617,10 @@ function renderDetailsPanel(model, requiredCap, tasksCatalog) {
   `;
 }
 
-function renderRecommendedSection() {
-  const section = document.getElementById('ollamaRecommendedSection');
-  const list = document.getElementById('ollamaRecommendedList');
-  if (!section || !list || !benchmarkData) return;
-
-  // Only show recommendations when ollama is selected anywhere (vestigial —
-  // ollama no longer exists as a provider, so this never renders).
-  const providers = [
-    document.getElementById('field-generate-provider')?.value,
-    document.getElementById('field-cogitate-provider')?.value,
-  ];
-  if (!providers.includes('ollama')) {
-    section.style.display = 'none';
-    return;
-  }
-
-  // Filter to ollama-local rows only — the install command below is hardcoded
-  // to `ollama pull <name>`.
-  const ollamaPrefix = LOCAL_PROVIDER_PREFIXES.ollama;
-  const notInstalled = (benchmarkData.models || []).filter(
-    m => !m.installed && m.model_id.startsWith(ollamaPrefix)
-  );
-  if (!notInstalled.length) {
-    section.style.display = 'none';
-    return;
-  }
-
-  section.style.display = '';
-  list.innerHTML = notInstalled.map(model => {
-    const est = model.estimate || {};
-    const tokS = est.tok_s !== null && est.tok_s !== undefined
-      ? est.tok_s.toFixed(0) + ' tok/s'
-      : 'speed unknown';
-    const sizeBit = model.size_gb ? ` · ${model.size_gb} GB download` : '';
-    const vramBit = model.fits_in_vram ? '' : ` · <strong style="color:#a00">may not fit</strong>`;
-    const capBit = (model.capabilities || []).join('/');
-    const bareName = model.model_id.replace(/^ollama-local\//, '');
-    return `
-      <div class="ollama-recommended-item">
-        <div class="ollama-rec-main">
-          <div class="ollama-rec-label">${escapeHtml(model.label || bareName)}</div>
-          <div class="ollama-rec-meta">
-            ${escapeHtml(capBit)} · tier ${model.tier_hint} · ${escapeHtml(tokS)} (${escapeHtml(est.confidence || 'unknown')})${sizeBit}${vramBit}
-          </div>
-        </div>
-        <code class="ollama-pull-cmd" title="Run this in your terminal to install">ollama pull ${escapeHtml(bareName)}</code>
-      </div>
-    `;
-  }).join('');
-}
-
-async function refreshOllamaAnnotations() {
+async function refreshBenchAnnotations() {
   await loadBenchmarkModels();
-  renderOllamaDetailsFor('generate');
-  renderOllamaDetailsFor('cogitate');
-  renderRecommendedSection();
+  renderBenchDetailsFor('generate');
+  renderBenchDetailsFor('cogitate');
   await renderSegmentCard();
 }
 
@@ -8807,7 +8711,7 @@ async function refreshSegmentEstimate() {
   const perTalent = est.per_talent || {};
   const perTalentRows = Object.entries(perTalent)
     .map(([id, secs]) =>
-      `<div class="ollama-task-row"><span class="ollama-task-label">${escapeHtml(id)}</span><span class="ollama-task-time">${escapeHtml(formatSeconds(secs))}</span></div>`,
+      `<div class="bench-task-row"><span class="bench-task-label">${escapeHtml(id)}</span><span class="bench-task-time">${escapeHtml(formatSeconds(secs))}</span></div>`,
     )
     .join('');
 
@@ -8817,22 +8721,22 @@ async function refreshSegmentEstimate() {
     : '';
 
   const transcriberLine = est.transcriber
-    ? `<div class="ollama-rec-meta">transcriber: ${escapeHtml(est.transcriber)} · hardware class: ${escapeHtml(est.hardware_class || 'unknown')}</div>`
-    : `<div class="ollama-rec-meta">hardware class: ${escapeHtml(est.hardware_class || 'unknown')}</div>`;
+    ? `<div class="bench-rec-meta">transcriber: ${escapeHtml(est.transcriber)} · hardware class: ${escapeHtml(est.hardware_class || 'unknown')}</div>`
+    : `<div class="bench-rec-meta">hardware class: ${escapeHtml(est.hardware_class || 'unknown')}</div>`;
 
   card.innerHTML = `
     <div class="segment-headline">
       <span class="segment-total">${escapeHtml(total)}</span>
-      <span class="ollama-confidence ${escapeHtml(conf)}">${escapeHtml(conf)}</span>
+      <span class="bench-confidence ${escapeHtml(conf)}">${escapeHtml(conf)}</span>
     </div>
     ${transcriberLine}
     <div class="segment-lanes">
-      <div class="ollama-task-row"><span class="ollama-task-label">Audio (5 min)</span><span class="ollama-task-time">${escapeHtml(audio)}</span></div>
-      <div class="ollama-task-row"><span class="ollama-task-label">Video frames</span><span class="ollama-task-time">${escapeHtml(video)}</span></div>
-      <div class="ollama-task-row"><span class="ollama-task-label">Talents</span><span class="ollama-task-time">${escapeHtml(talents)}</span></div>
-      <div class="ollama-task-row"><span class="ollama-task-label">Overhead</span><span class="ollama-task-time">${escapeHtml(overhead)}</span></div>
+      <div class="bench-task-row"><span class="bench-task-label">Audio (5 min)</span><span class="bench-task-time">${escapeHtml(audio)}</span></div>
+      <div class="bench-task-row"><span class="bench-task-label">Video frames</span><span class="bench-task-time">${escapeHtml(video)}</span></div>
+      <div class="bench-task-row"><span class="bench-task-label">Talents</span><span class="bench-task-time">${escapeHtml(talents)}</span></div>
+      <div class="bench-task-row"><span class="bench-task-label">Overhead</span><span class="bench-task-time">${escapeHtml(overhead)}</span></div>
     </div>
-    ${perTalentRows ? `<details class="segment-talent-details"><summary class="ollama-task-group-title">per talent</summary>${perTalentRows}</details>` : ''}
+    ${perTalentRows ? `<details class="segment-talent-details"><summary class="bench-task-group-title">per talent</summary>${perTalentRows}</details>` : ''}
     ${notesHtml}
   `;
 }
@@ -8841,10 +8745,10 @@ async function refreshSegmentEstimate() {
 for (const type of ['generate', 'cogitate']) {
   for (const field of ['provider', 'tier']) {
     document.getElementById('field-' + type + '-' + field)
-      ?.addEventListener('change', refreshOllamaAnnotations);
+      ?.addEventListener('change', refreshBenchAnnotations);
   }
 }
 
 // Run once on load (after populateProviders has set initial values)
-window.addEventListener('load', refreshOllamaAnnotations);
+window.addEventListener('load', refreshBenchAnnotations);
 </script>
