@@ -13,6 +13,7 @@ import pytest
 
 from solstone.think.pipeline_health import (
     pipeline_status_message,
+    read_completed_units,
     summarize_pipeline_day,
 )
 
@@ -24,12 +25,211 @@ def _write_jsonl(path: Path, events: list[dict]) -> None:
             handle.write(json.dumps(event) + "\n")
 
 
+def _segment_event(
+    event: str,
+    segment: str,
+    name: str | None = None,
+    ts: int = 1,
+    **extra,
+) -> dict:
+    record = {"event": event, "ts": ts, "mode": "segment", "segment": segment}
+    if name is not None:
+        record["name"] = name
+    record.update(extra)
+    return record
+
+
+def _dispatch(segment: str, name: str, ts: int = 1) -> dict:
+    return _segment_event("talent.dispatch", segment, name, ts)
+
+
+def _complete(segment: str, name: str, ts: int = 1) -> dict:
+    return _segment_event("talent.complete", segment, name, ts, state="finish")
+
+
+def _sense_complete(segment: str, density: str = "active", ts: int = 1) -> dict:
+    return _segment_event("sense.complete", segment, ts=ts, density=density)
+
+
+def _complete_segment_events(segment: str, density: str = "active") -> list[dict]:
+    events = [
+        _dispatch(segment, "sense", 10),
+        _complete(segment, "sense", 11),
+        _sense_complete(segment, density, 12),
+    ]
+    if density != "idle":
+        events.extend(
+            [
+                _dispatch(segment, "entities", 13),
+                _complete(segment, "entities", 14),
+                _dispatch(segment, "documents", 15),
+                _complete(segment, "documents", 16),
+            ]
+        )
+    return events
+
+
+def _seed_screen_segment(
+    journal: Path,
+    day: str,
+    segment: str,
+) -> Path:
+    segment_dir = journal / "chronicle" / day / "default" / segment
+    segment_dir.mkdir(parents=True, exist_ok=True)
+    (segment_dir / "screen.webm").write_bytes(b"raw")
+    (segment_dir / "screen.jsonl").write_text(
+        json.dumps({"raw": "screen.webm", "type": "screencast"})
+        + "\n"
+        + json.dumps({"timestamp": 0, "content": {}})
+        + "\n",
+        encoding="utf-8",
+    )
+    return segment_dir
+
+
 @pytest.fixture
 def pipeline_journal(tmp_path, monkeypatch):
     journal = tmp_path / "journal"
     journal.mkdir()
     monkeypatch.setenv("SOLSTONE_JOURNAL", str(journal))
     return journal
+
+
+def test_read_completed_units_missing_health_dir(pipeline_journal):
+    (pipeline_journal / "chronicle" / "20990201").mkdir(parents=True)
+
+    assert read_completed_units("20990201") == set()
+
+
+def test_read_completed_units_terminal_presence(pipeline_journal):
+    day = "20990202"
+    base = pipeline_journal / "chronicle" / day / "health"
+    _write_jsonl(
+        base / "001_daily.jsonl",
+        [
+            {"event": "talent.complete", "ts": 1, "mode": "daily", "name": "done"},
+            {"event": "talent.fail", "ts": 1, "mode": "daily", "name": "failed"},
+            {"event": "talent.dispatch", "ts": 1, "mode": "daily", "name": "sent"},
+            {"event": "talent.skip", "ts": 1, "mode": "daily", "name": "skipped"},
+        ],
+    )
+
+    assert read_completed_units(day) == {("daily", "done", None)}
+
+
+def test_read_completed_units_latest_terminal_wins(pipeline_journal):
+    day = "20990203"
+    base = pipeline_journal / "chronicle" / day / "health"
+    _write_jsonl(
+        base / "001_daily.jsonl",
+        [{"event": "talent.complete", "ts": 1, "mode": "daily", "name": "alpha"}],
+    )
+    _write_jsonl(
+        base / "002_daily.jsonl",
+        [{"event": "talent.fail", "ts": 2, "mode": "daily", "name": "alpha"}],
+    )
+    _write_jsonl(
+        base / "003_daily.jsonl",
+        [{"event": "talent.fail", "ts": 1, "mode": "daily", "name": "beta"}],
+    )
+    _write_jsonl(
+        base / "004_daily.jsonl",
+        [{"event": "talent.complete", "ts": 2, "mode": "daily", "name": "beta"}],
+    )
+
+    assert read_completed_units(day) == {("daily", "beta", None)}
+
+
+def test_read_completed_units_skip_is_non_terminal(pipeline_journal):
+    day = "20990204"
+    base = pipeline_journal / "chronicle" / day / "health"
+    _write_jsonl(
+        base / "001_daily.jsonl",
+        [{"event": "talent.complete", "ts": 1, "mode": "daily", "name": "alpha"}],
+    )
+    _write_jsonl(
+        base / "002_daily.jsonl",
+        [{"event": "talent.skip", "ts": 2, "mode": "daily", "name": "alpha"}],
+    )
+
+    assert read_completed_units(day) == {("daily", "alpha", None)}
+
+
+def test_read_completed_units_equal_ts_later_record_wins(pipeline_journal):
+    day = "20990205"
+    base = pipeline_journal / "chronicle" / day / "health"
+    _write_jsonl(
+        base / "001_daily.jsonl",
+        [{"event": "talent.complete", "ts": 1, "mode": "daily", "name": "alpha"}],
+    )
+    _write_jsonl(
+        base / "002_daily.jsonl",
+        [{"event": "talent.fail", "ts": 1, "mode": "daily", "name": "alpha"}],
+    )
+
+    assert read_completed_units(day) == set()
+
+
+def test_read_completed_units_keys_include_facet(pipeline_journal):
+    day = "20990206"
+    base = pipeline_journal / "chronicle" / day / "health"
+    _write_jsonl(
+        base / "001_daily.jsonl",
+        [
+            {
+                "event": "talent.complete",
+                "ts": 1,
+                "mode": "daily",
+                "name": "facet_newsletter",
+                "facet": "work",
+            },
+            {
+                "event": "talent.fail",
+                "ts": 1,
+                "mode": "daily",
+                "name": "facet_newsletter",
+                "facet": "personal",
+            },
+        ],
+    )
+
+    assert read_completed_units(day) == {("daily", "facet_newsletter", "work")}
+
+
+def test_read_completed_units_skips_malformed_records(pipeline_journal):
+    day = "20990207"
+    path = pipeline_journal / "chronicle" / day / "health" / "001_daily.jsonl"
+    path.parent.mkdir(parents=True)
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write("{bad json\n")
+        handle.write(json.dumps({"event": "talent.complete", "ts": 1, "name": "alpha"}))
+        handle.write("\n")
+        handle.write(json.dumps({"event": "talent.complete", "ts": 1, "mode": "daily"}))
+        handle.write("\n")
+        handle.write(
+            json.dumps(
+                {
+                    "event": "talent.complete",
+                    "ts": "not-int",
+                    "mode": "daily",
+                    "name": "beta",
+                }
+            )
+        )
+        handle.write("\n")
+        handle.write(
+            json.dumps(
+                {
+                    "event": "talent.complete",
+                    "ts": 2,
+                    "mode": "daily",
+                    "name": "gamma",
+                }
+            )
+        )
+        handle.write("\n")
+
+    assert read_completed_units(day) == {("daily", "gamma", None)}
 
 
 def test_empty_day_is_healthy(pipeline_journal):
@@ -140,6 +340,51 @@ def test_agent_failure_promotes_warning(pipeline_journal):
     ]
 
 
+def test_no_output_failure_is_incomplete_and_summarized(pipeline_journal):
+    day = "20990107"
+    _write_jsonl(
+        pipeline_journal / "chronicle" / day / "health" / "1_daily.jsonl",
+        [
+            {
+                "event": "talent.fail",
+                "mode": "daily",
+                "name": "alpha",
+                "use_id": "a-1",
+                "state": "error",
+                "reason_code": "no_output",
+                "ts": 1,
+            },
+            {
+                "event": "talent.complete",
+                "mode": "daily",
+                "name": "beta",
+                "use_id": "b-1",
+                "state": "finish",
+                "ts": 1,
+            },
+        ],
+    )
+
+    assert read_completed_units(day) == {("daily", "beta", None)}
+
+    summary = summarize_pipeline_day(day)
+    assert summary["status"] == "warning"
+    assert summary["talents"]["completed"] == 1
+    assert summary["talents"]["failed"] == 1
+    assert summary["talents"]["failed_list"] == [
+        {"mode": "daily", "name": "alpha", "use_id": "a-1", "state": "error"}
+    ]
+    assert summary["anomalies"] == [
+        {
+            "kind": "talent_failure",
+            "mode": "daily",
+            "name": "alpha",
+            "use_id": "a-1",
+            "state": "error",
+        }
+    ]
+
+
 def test_failed_list_truncates_at_20(pipeline_journal):
     day = "20990103"
     events = [
@@ -219,18 +464,76 @@ def test_today_after_23h_no_daily_run_is_stale(pipeline_journal, monkeypatch):
     assert {"kind": "daily_agents_missing"} in summary["anomalies"]
 
 
-def test_segment_runs_missing_is_soft(pipeline_journal, monkeypatch):
+def test_segment_runs_missing_elevates(pipeline_journal):
     day = "20990105"
-    (pipeline_journal / "chronicle" / day / "health").mkdir(parents=True)
-    monkeypatch.setattr(
-        "solstone.think.pipeline_health.iter_segments",
-        lambda value: [("default", "120000_300", Path("/tmp/fake"))],
+    segment = "120000_300"
+    _seed_screen_segment(pipeline_journal, day, segment)
+    _write_jsonl(
+        pipeline_journal / "chronicle" / day / "health" / "001_segment.jsonl",
+        [_sense_complete(segment, "active", 1)],
+    )
+
+    summary = summarize_pipeline_day(day)
+
+    assert summary["status"] == "stale"
+    assert {
+        "kind": "segment_runs_missing",
+        "not_thought": 1,
+        "not_sensed": 0,
+        "total": 1,
+    } in summary["anomalies"]
+    assert pipeline_status_message(summary) == {
+        "status": "stale",
+        "message": "1 segment awaiting thinking",
+    }
+
+
+def test_segment_runs_missing_ignores_idle_and_fully_thought_segments(
+    pipeline_journal,
+):
+    day = "20990106"
+    idle_segment = "120000_300"
+    complete_segment = "121000_300"
+    _seed_screen_segment(pipeline_journal, day, idle_segment)
+    _seed_screen_segment(pipeline_journal, day, complete_segment)
+    _write_jsonl(
+        pipeline_journal / "chronicle" / day / "health" / "001_segment.jsonl",
+        _complete_segment_events(idle_segment, density="idle")
+        + _complete_segment_events(complete_segment),
     )
 
     summary = summarize_pipeline_day(day)
 
     assert summary["status"] == "healthy"
-    assert {"kind": "segment_runs_missing"} in summary["anomalies"]
+    assert not any(
+        anomaly["kind"] == "segment_runs_missing" for anomaly in summary["anomalies"]
+    )
+
+
+def test_segment_completion_fold_failure_elevates_status(
+    pipeline_journal,
+    monkeypatch,
+):
+    from solstone.think import pipeline_health
+
+    day = "20990107"
+    (pipeline_journal / "chronicle" / day / "health").mkdir(parents=True)
+
+    def fail_classify(*_args, **_kwargs):
+        raise RuntimeError("fold exploded")
+
+    monkeypatch.setattr(pipeline_health, "classify_segment_completion", fail_classify)
+
+    summary = summarize_pipeline_day(day)
+
+    assert summary["status"] == "stale"
+    assert {"kind": "segment_runs_missing", "error": "fold_failed"} in summary[
+        "anomalies"
+    ]
+    assert pipeline_status_message(summary) == {
+        "status": "stale",
+        "message": "Segment thinking status unavailable",
+    }
 
 
 def test_invalid_day_returns_healthy_empty(pipeline_journal):
@@ -329,12 +632,31 @@ def test_malformed_json_lines_skipped(pipeline_journal):
         ),
         (
             {
-                "status": "healthy",
-                "anomalies": [{"kind": "segment_runs_missing"}],
+                "status": "stale",
+                "anomalies": [
+                    {
+                        "kind": "segment_runs_missing",
+                        "not_thought": 2,
+                        "not_sensed": 0,
+                        "total": 5,
+                    }
+                ],
                 "talents": {"failed": 0},
                 "day": "20260101",
             },
-            None,
+            {"status": "stale", "message": "2 segments awaiting thinking"},
+        ),
+        (
+            {
+                "status": "stale",
+                "anomalies": [{"kind": "segment_runs_missing", "error": "fold_failed"}],
+                "talents": {"failed": 0},
+                "day": "20260101",
+            },
+            {
+                "status": "stale",
+                "message": "Segment thinking status unavailable",
+            },
         ),
     ],
 )

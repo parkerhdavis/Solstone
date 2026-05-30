@@ -11,14 +11,12 @@ import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
 
 import typer
 
 from solstone.apps.settings.copy import (
     CONVEY_HOST_URL_CLEARED,
     CONVEY_HOST_URL_FLAG_CONFLICT,
-    CONVEY_HOST_URL_INVALID,
     CONVEY_HOST_URL_SET_DONE,
     CONVEY_NETWORK_DISABLE_DONE,
     CONVEY_NETWORK_DISABLE_PROGRESS,
@@ -31,7 +29,17 @@ from solstone.apps.settings.copy import (
     CONVEY_TRUST_ENABLE_DONE,
     format_convey_status,
 )
-from solstone.think.pairing.config import get_host_url
+from solstone.convey.network_access import (
+    NetworkAccessPasswordRequired,
+    set_network_access,
+)
+from solstone.think.pairing.config import (
+    InvalidHostUrl,
+    clear_host_url,
+    get_host_url,
+    set_host_url,
+    validate_host_url,
+)
 from solstone.think.service import DEFAULT_SERVICE_PORT
 from solstone.think.utils import get_project_root, require_solstone
 
@@ -113,22 +121,11 @@ def _host_url_status_value(config: dict) -> str:
 
 
 def _validate_host_url_or_exit(url: str) -> str:
-    cleaned = url.strip()
-    parsed = urlparse(cleaned)
-    if not cleaned or not parsed.scheme or not parsed.netloc:
-        typer.echo(CONVEY_HOST_URL_INVALID, err=True)
+    try:
+        return validate_host_url(url)
+    except InvalidHostUrl as exc:
+        typer.echo(str(exc), err=True)
         raise typer.Exit(1)
-    return cleaned
-
-
-def _restart_convey_or_exit() -> None:
-    from solstone.convey.restart import wait_for_convey_restart
-
-    restart_ok, _ = wait_for_convey_restart(timeout=15.0)
-    if restart_ok:
-        return
-    typer.echo(CONVEY_RESTART_TIMEOUT, err=True)
-    raise typer.Exit(1)
 
 
 def _provider_for_env_var(env_var: str) -> str | None:
@@ -147,26 +144,31 @@ def _provider_for_env_var(env_var: str) -> str | None:
 def convey_network_access_enable() -> None:
     """Enable non-loopback access to Convey and restart it."""
 
-    config = _get_config()
-    if not _convey_password_is_set(config):
+    try:
+        result = set_network_access(
+            enable=True,
+            on_restart=lambda: typer.echo(CONVEY_NETWORK_ENABLE_PROGRESS),
+        )
+    except NetworkAccessPasswordRequired:
         typer.echo(CONVEY_REFUSE_NO_PASSWORD_NETWORK, err=True)
         raise typer.Exit(1)
-    config.setdefault("convey", {})["allow_network_access"] = True
-    _write_config(config)
-    typer.echo(CONVEY_NETWORK_ENABLE_PROGRESS)
-    _restart_convey_or_exit()
-    typer.echo(CONVEY_NETWORK_ENABLE_DONE.format(host_url=get_host_url()))
+    if result["restart_timeout"]:
+        typer.echo(CONVEY_RESTART_TIMEOUT, err=True)
+        raise typer.Exit(1)
+    typer.echo(CONVEY_NETWORK_ENABLE_DONE.format(host_url=result["effective_host_url"]))
 
 
 @network_access_app.command("disable")
 def convey_network_access_disable() -> None:
     """Restrict Convey to localhost and restart it."""
 
-    config = _get_config()
-    config.setdefault("convey", {})["allow_network_access"] = False
-    _write_config(config)
-    typer.echo(CONVEY_NETWORK_DISABLE_PROGRESS)
-    _restart_convey_or_exit()
+    result = set_network_access(
+        enable=False,
+        on_restart=lambda: typer.echo(CONVEY_NETWORK_DISABLE_PROGRESS),
+    )
+    if result["restart_timeout"]:
+        typer.echo(CONVEY_RESTART_TIMEOUT, err=True)
+        raise typer.Exit(1)
     typer.echo(CONVEY_NETWORK_DISABLE_DONE.format(port=_convey_port()))
 
 
@@ -211,17 +213,13 @@ def convey_host_url(
     if show:
         typer.echo(get_host_url())
         return
-    config = _get_config()
-    config.setdefault("pairing", {})
     if auto:
-        config["pairing"]["host_url"] = None
-        _write_config(config)
+        clear_host_url()
         typer.echo(CONVEY_HOST_URL_CLEARED)
         return
     assert url is not None
     cleaned = _validate_host_url_or_exit(url)
-    config["pairing"]["host_url"] = cleaned
-    _write_config(config)
+    set_host_url(cleaned)
     typer.echo(CONVEY_HOST_URL_SET_DONE.format(url=cleaned))
 
 
@@ -324,7 +322,6 @@ def show() -> None:
             "generate": type_settings["generate"],
             "cogitate": type_settings["cogitate"],
             "google_backend": providers_config.get("google_backend", "auto"),
-            "auth": providers_config.get("auth", {}),
             "key_validation": providers_config.get("key_validation", {}),
         },
         "transcribe": config.get("transcribe", {}),
@@ -363,8 +360,6 @@ def keys_set(
     provider = _provider_for_env_var(env_var)
     if provider:
         config.setdefault("providers", {})
-        config["providers"].setdefault("auth", {})
-        config["providers"]["auth"][provider] = "api_key"
         validation = validate_key(provider, value)
         validation["timestamp"] = datetime.now(timezone.utc).isoformat()
         config["providers"].setdefault("key_validation", {})
@@ -393,8 +388,6 @@ def keys_clear(
     provider = _provider_for_env_var(env_var)
     if provider:
         config.setdefault("providers", {})
-        config["providers"].setdefault("auth", {})
-        config["providers"]["auth"][provider] = "platform"
         config["providers"].setdefault("key_validation", {})
         config["providers"]["key_validation"].pop(provider, None)
 
@@ -469,11 +462,6 @@ def providers_show(
         env_key = provider.get("env_key", "")
         api_keys[provider["name"]] = bool(os.getenv(env_key)) if env_key else False
 
-    auth_config = providers_config.get("auth", {})
-    auth = {
-        provider["name"]: auth_config.get(provider["name"], "platform")
-        for provider in providers_list
-    }
     vertex_creds_path = providers_config.get("vertex_credentials")
     vertex_creds_configured = bool(
         vertex_creds_path and Path(vertex_creds_path).exists()
@@ -485,7 +473,6 @@ def providers_show(
         "generate": type_settings["generate"],
         "cogitate": type_settings["cogitate"],
         "api_keys": api_keys,
-        "auth": auth,
         "key_validation": providers_config.get("key_validation", {}),
     }
     if human:
@@ -570,32 +557,6 @@ def providers_set_cogitate(
     typer.echo(
         json.dumps(_set_provider_type("cogitate", provider, tier, backup), indent=2)
     )
-
-
-@providers_app.command("set-auth")
-def providers_set_auth(
-    provider: str = typer.Argument(..., help="Provider name."),
-    mode: str = typer.Argument(..., help="Auth mode."),
-) -> None:
-    """Set provider auth mode."""
-    from solstone.think.providers import PROVIDER_REGISTRY
-
-    if provider not in PROVIDER_REGISTRY:
-        typer.echo(f"Invalid provider in auth: {provider}", err=True)
-        raise typer.Exit(1)
-    if mode not in ("platform", "api_key"):
-        typer.echo(
-            f"Invalid auth mode: {mode}. Must be 'platform' or 'api_key'.",
-            err=True,
-        )
-        raise typer.Exit(1)
-
-    config = _get_config()
-    config.setdefault("providers", {})
-    config["providers"].setdefault("auth", {})
-    config["providers"]["auth"][provider] = mode
-    _write_config(config)
-    typer.echo(json.dumps({provider: mode}, indent=2))
 
 
 @google_backend_app.command("show")

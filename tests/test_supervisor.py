@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2026 sol pbc
 
+import asyncio
 import importlib
 import io
 import json
@@ -65,8 +66,8 @@ def test_start_sense(tmp_path, mock_callosum, monkeypatch):
         text=False,
         bufsize=-1,
         process_group=None,
-        preexec_fn=None,
         env=None,
+        **_kwargs,
     ):
         proc = DummyProc()
         started.append((cmd, stdout, stderr))
@@ -357,6 +358,121 @@ def _capture_thread_starts(monkeypatch, mod):
 
     monkeypatch.setattr(mod.threading.Thread, "start", fake_thread_start)
     return spawned
+
+
+class _CaptureTaskQueue:
+    def __init__(self):
+        self.submissions = []
+
+    def submit(self, cmd, day=None):
+        self.submissions.append({"cmd": cmd, "day": day})
+
+
+def test_handle_segment_observed_live_command_marks_live(monkeypatch):
+    mod = importlib.import_module("solstone.think.supervisor")
+    capture = _CaptureTaskQueue()
+    monkeypatch.setattr(mod, "_task_queue", capture)
+
+    mod._handle_segment_observed(
+        {
+            "tract": "observe",
+            "event": "observed",
+            "day": "20260527",
+            "segment": "120000_300",
+        }
+    )
+
+    assert len(capture.submissions) == 1
+    assert capture.submissions[0]["day"] == "20260527"
+    assert "--live" in capture.submissions[0]["cmd"]
+
+
+def test_handle_segment_observed_batch_submits_nothing(monkeypatch):
+    mod = importlib.import_module("solstone.think.supervisor")
+    capture = _CaptureTaskQueue()
+    monkeypatch.setattr(mod, "_task_queue", capture)
+
+    mod._handle_segment_observed(
+        {
+            "tract": "observe",
+            "event": "observed",
+            "day": "20260527",
+            "segment": "120000_300",
+            "batch": True,
+        }
+    )
+
+    assert len(capture.submissions) == 0
+
+
+def test_handle_segment_observed_batch_leaves_flush_state_untouched(monkeypatch):
+    mod = importlib.import_module("solstone.think.supervisor")
+    capture = _CaptureTaskQueue()
+    monkeypatch.setattr(mod, "_task_queue", capture)
+
+    mod._flush_state["last_segment_ts"] = 0.0
+    mod._flush_state["day"] = None
+    mod._flush_state["segment"] = None
+    mod._flush_state["flushed"] = True
+
+    mod._handle_segment_observed(
+        {
+            "tract": "observe",
+            "event": "observed",
+            "day": "20260527",
+            "segment": "120000_300",
+        }
+    )
+
+    assert len(capture.submissions) == 1
+    live_state = {
+        "day": mod._flush_state["day"],
+        "segment": mod._flush_state["segment"],
+        "flushed": mod._flush_state["flushed"],
+        "last_segment_ts": mod._flush_state["last_segment_ts"],
+    }
+    assert live_state["day"] == "20260527"
+    assert live_state["segment"] == "120000_300"
+    assert live_state["flushed"] is False
+    assert live_state["last_segment_ts"] > 0
+
+    mod._handle_segment_observed(
+        {
+            "tract": "observe",
+            "event": "observed",
+            "day": "20260101",
+            "segment": "090000_300",
+            "batch": True,
+        }
+    )
+
+    assert len(capture.submissions) == 1
+    assert mod._flush_state["day"] == live_state["day"]
+    assert mod._flush_state["segment"] == live_state["segment"]
+    assert mod._flush_state["flushed"] == live_state["flushed"]
+    assert mod._flush_state["last_segment_ts"] == live_state["last_segment_ts"]
+
+
+def test_handle_segment_observed_live_stream_command(monkeypatch):
+    mod = importlib.import_module("solstone.think.supervisor")
+    capture = _CaptureTaskQueue()
+    monkeypatch.setattr(mod, "_task_queue", capture)
+
+    mod._handle_segment_observed(
+        {
+            "tract": "observe",
+            "event": "observed",
+            "day": "20260527",
+            "segment": "120000_300",
+            "stream": "archon",
+        }
+    )
+
+    assert len(capture.submissions) == 1
+    cmd = capture.submissions[0]["cmd"]
+    assert "--live" in cmd
+    stream_index = cmd.index("--stream")
+    assert cmd[stream_index + 1] == "archon"
 
 
 def test_task_queue_daily_and_segment_run_independently(monkeypatch):
@@ -1510,6 +1626,119 @@ def test_stop_process_uses_service_shutdown_timeout():
 
     managed.terminate.assert_called_once_with(timeout=9)
     managed.cleanup.assert_called_once_with()
+
+
+def test_start_local_server_launches_llama_server_key_and_cmd(
+    tmp_path, monkeypatch, capsys
+):
+    mod = importlib.import_module("solstone.think.supervisor")
+    from solstone.think.providers import local_install, local_server
+
+    mod._SERVICE_STATE.clear()
+    binary = tmp_path / "llama-server"
+    gguf = tmp_path / "model.gguf"
+    mmproj = tmp_path / "mmproj.gguf"
+    written_ports = []
+    spawned = []
+    managed = _TaskManagedStub(cmd=[])
+    managed.name = "llama-server"
+    managed.process.returncode = None
+
+    monkeypatch.setattr(
+        local_install,
+        "ensure_artifacts_installed",
+        lambda model_id: (binary, gguf, mmproj),
+    )
+    monkeypatch.setattr(mod, "find_available_port", lambda: 2468)
+    monkeypatch.setattr(
+        mod,
+        "write_service_port",
+        lambda service, port: written_ports.append((service, port)),
+    )
+    monkeypatch.setattr(local_server, "_probe_health", lambda port: ("ready", None))
+
+    def fake_spawn(cmd, *, ref=None, callosum=None, day=None):
+        spawned.append(cmd)
+        managed.cmd = cmd
+        managed.ref = ref
+        return managed
+
+    monkeypatch.setattr(mod.RunnerManagedProcess, "spawn", fake_spawn)
+
+    result = mod.start_local_server()
+
+    assert result is managed
+    assert written_ports == [("local", 2468)]
+    assert spawned == [
+        [
+            str(binary),
+            "-m",
+            str(gguf),
+            "--alias",
+            mod.LOCAL_MODEL,
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "2468",
+            "--mmproj",
+            str(mmproj),
+        ]
+    ]
+    assert "0.0.0.0" not in spawned[0]
+    assert mod._SERVICE_STATE["llama-server"]["restart"] is True
+    assert mod.LOCAL_MODEL_WARMING_UP_COPY in capsys.readouterr().out
+
+
+def test_start_local_server_skips_missing_artifacts(monkeypatch):
+    mod = importlib.import_module("solstone.think.supervisor")
+    from solstone.think.providers import local_install
+
+    monkeypatch.setattr(
+        local_install,
+        "ensure_artifacts_installed",
+        lambda model_id: (_ for _ in ()).throw(RuntimeError("missing")),
+    )
+    launch = MagicMock()
+    monkeypatch.setattr(mod, "_launch_process", launch)
+
+    assert mod.start_local_server() is None
+    launch.assert_not_called()
+
+
+def test_handle_runner_exits_restarts_llama_server_by_managed_name(monkeypatch):
+    mod = importlib.import_module("solstone.think.supervisor")
+    mod._SERVICE_STATE.clear()
+    mod._RESTART_POLICIES.clear()
+    monkeypatch.setattr(mod.time, "time", lambda: 100.0)
+    monkeypatch.setattr(mod, "shutdown_requested", False)
+
+    managed = _TaskManagedStub(cmd=["/tmp/llama-server", "-m", "/tmp/model.gguf"])
+    managed.name = "llama-server"
+    managed.process.poll.return_value = 1
+    managed.process.returncode = 1
+    replacement = _TaskManagedStub(cmd=managed.cmd)
+    replacement.name = "llama-server"
+    launched = []
+
+    mod._SERVICE_STATE["llama-server"] = {
+        "restart": True,
+        "shutdown_timeout": 12,
+    }
+
+    def fake_launch(name, cmd, *, restart=False, shutdown_timeout=15, ref=None):
+        launched.append((name, cmd, restart, shutdown_timeout))
+        return replacement
+
+    monkeypatch.setattr(mod, "_launch_process", fake_launch)
+    monkeypatch.setattr(mod, "_supervisor_callosum", None)
+
+    procs = [managed]
+    asyncio.run(mod.handle_runner_exits(procs))
+
+    assert launched == [
+        ("llama-server", managed.cmd, True, 12),
+    ]
+    assert procs == [replacement]
 
 
 def test_supervisor_singleton_lock_acquired(tmp_path, monkeypatch):

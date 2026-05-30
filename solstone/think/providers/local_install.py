@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from solstone.think.journal_config import read_journal_config, write_journal_config
-from solstone.think.models import LOCAL_FLASH
+from solstone.think.models import LOCAL_MODEL
 from solstone.think.providers.install_state import (
     IN_FLIGHT_STATES,
     InstallStatus,
@@ -37,6 +37,7 @@ from solstone.think.providers.local import (
 from solstone.think.utils import get_journal
 
 LOCAL_PROVIDER_NAME = "local"
+_PROBE_TIMEOUT_SECONDS = 10
 _LOCAL_METADATA_KEYS = frozenset(
     {
         "binary_artifact",
@@ -45,6 +46,8 @@ _LOCAL_METADATA_KEYS = frozenset(
         "model_id",
         "model_path",
         "model_sha256",
+        "mmproj_path",
+        "mmproj_sha256",
     }
 )
 
@@ -138,10 +141,9 @@ def model_path(model_id: str) -> Path:
     return model_dir(spec.model_id) / spec.filename
 
 
-def projector_path(model_id: str) -> Path | None:
-    """Path to the model's mmproj projector GGUF, or None for text-only models."""
+def mmproj_path(model_id: str) -> Path | None:
     spec = LOCAL_MODEL_SPECS[normalize_model_id(model_id)]
-    if not spec.mmproj_filename:
+    if spec.mmproj_filename is None:
         return None
     return model_dir(spec.model_id) / spec.mmproj_filename
 
@@ -277,6 +279,33 @@ def _clear_macos_quarantine(path: Path) -> None:
         return
 
 
+def probe_binary_runnable(binary_path: str | Path) -> tuple[bool, str | None]:
+    import subprocess
+
+    try:
+        completed = subprocess.run(
+            [str(binary_path), "--version"],
+            capture_output=True,
+            text=True,
+            timeout=_PROBE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"timed out after {_PROBE_TIMEOUT_SECONDS}s"
+    except Exception as exc:
+        return False, str(exc)
+
+    if completed.returncode == 0:
+        return True, None
+
+    detail = (
+        (completed.stderr or "").strip()
+        or (completed.stdout or "").strip()
+        or f"exited with status {completed.returncode}"
+    )
+    return False, detail
+
+
 def install_llama_server() -> dict[str, Any]:
     artifact_key = llama_server_artifact_key()
     pin = pin_for_current_platform()
@@ -310,11 +339,13 @@ def install_llama_server() -> dict[str, Any]:
         _safe_extract_tarball(tarball, install_dir)
         extracted = _find_extracted_binary(install_dir, pin["binary_name"])
         final_path = binary_path_for_pin(artifact_key, pin)
-        if extracted != final_path:
-            final_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(extracted, final_path)
+        inner_dir = extracted.parent
+        if inner_dir != install_dir:
+            for item in inner_dir.iterdir():
+                shutil.move(str(item), str(install_dir / item.name))
+            inner_dir.rmdir()
         _chmod_executable(final_path)
-        _clear_macos_quarantine(final_path)
+        _clear_macos_quarantine(install_dir)
         _write_local_metadata(
             {
                 "binary_artifact": pin["filename"],
@@ -332,16 +363,11 @@ def install_llama_server() -> dict[str, Any]:
         raise
 
 
-def install_model(model_id: str = LOCAL_FLASH) -> dict[str, Any]:
+def install_model(model_id: str = LOCAL_MODEL) -> dict[str, Any]:
     spec = LOCAL_MODEL_SPECS[normalize_model_id(model_id)]
     url = f"https://huggingface.co/{spec.repo}/resolve/{spec.revision}/{spec.filename}"
     dest = model_path(spec.model_id)
-
-    mmproj_dest = (
-        model_dir(spec.model_id) / spec.mmproj_filename
-        if spec.mmproj_filename
-        else None
-    )
+    mmproj_dest = mmproj_path(spec.model_id)
 
     try:
         _write_local_status(
@@ -349,27 +375,26 @@ def install_model(model_id: str = LOCAL_FLASH) -> dict[str, Any]:
         )
         _write_local_metadata({"model_id": spec.model_id})
         _download_file(url, dest, on_progress=_record_local_progress)
-        # Vision models ship an mmproj projector alongside the main weights;
-        # download it in the same phase so the model is usable in one pass.
         if spec.mmproj_filename and mmproj_dest is not None:
             mmproj_url = (
                 f"https://huggingface.co/{spec.repo}/resolve/"
                 f"{spec.revision}/{spec.mmproj_filename}"
             )
-            _download_file(mmproj_url, mmproj_dest, on_progress=_record_local_progress)
+            _download_file(mmproj_url, mmproj_dest)
         _write_local_status(
             transition_state(_read_local_status(), new_state="verifying")
         )
         _verify_sha256(dest, spec.sha256)
-        if mmproj_dest is not None and spec.mmproj_sha256:
+        metadata = {
+            "model_id": spec.model_id,
+            "model_path": str(dest),
+            "model_sha256": spec.sha256,
+        }
+        if spec.mmproj_sha256 and mmproj_dest is not None:
             _verify_sha256(mmproj_dest, spec.mmproj_sha256)
-        _write_local_metadata(
-            {
-                "model_id": spec.model_id,
-                "model_path": str(dest),
-                "model_sha256": spec.sha256,
-            }
-        )
+            metadata["mmproj_path"] = str(mmproj_dest)
+            metadata["mmproj_sha256"] = spec.mmproj_sha256
+        _write_local_metadata(metadata)
         return _write_local_status(
             transition_state(_read_local_status(), new_state="installed")
         )
@@ -380,7 +405,7 @@ def install_model(model_id: str = LOCAL_FLASH) -> dict[str, Any]:
         raise
 
 
-def install_local(model_id: str = LOCAL_FLASH) -> dict[str, Any]:
+def install_local(model_id: str = LOCAL_MODEL) -> dict[str, Any]:
     install_llama_server()
     return install_model(model_id)
 
@@ -401,30 +426,32 @@ def inspect_readiness(model_id: str | None = None) -> dict[str, Any]:
         record = {}
     status = _read_local_status()
     selected_model = normalize_model_id(
-        model_id or record.get("model_id") or LOCAL_FLASH
+        model_id or record.get("model_id") or LOCAL_MODEL
     )
     spec = LOCAL_MODEL_SPECS[selected_model]
     binary_path = Path(record.get("binary_path") or binary_path_for_pin())
     gguf_path = Path(record.get("model_path") or model_path(selected_model))
-    proj_path = projector_path(selected_model)
-    # A vision model isn't fully installed without its projector.
-    projector_installed = proj_path is None or proj_path.exists()
+    configured_mmproj = record.get("mmproj_path")
+    spec_mmproj = mmproj_path(selected_model)
+    resolved_mmproj = Path(configured_mmproj) if configured_mmproj else spec_mmproj
+    mmproj_installed = resolved_mmproj is None or resolved_mmproj.exists()
     ram_sufficient = _ram_sufficient(spec)
     return {
         "install_state": status["install_state"],
         "binary_installed": binary_path.exists() and os.access(binary_path, os.X_OK),
-        "model_installed": gguf_path.exists() and projector_installed,
-        "projector_installed": projector_installed,
+        "model_installed": gguf_path.exists() and mmproj_installed,
+        "gguf_installed": gguf_path.exists(),
+        "mmproj_installed": mmproj_installed,
         "ram_sufficient": ram_sufficient,
         "binary_path": str(binary_path),
         "model_path": str(gguf_path),
-        "projector_path": str(proj_path) if proj_path is not None else None,
+        "mmproj_path": str(resolved_mmproj) if resolved_mmproj is not None else None,
         "model_id": selected_model,
         "install_error": status["install_error"],
     }
 
 
-def ensure_artifacts_installed(model_id: str) -> tuple[Path, Path]:
+def ensure_artifacts_installed(model_id: str) -> tuple[Path, Path, Path | None]:
     selected_model = normalize_model_id(model_id)
     readiness = inspect_readiness(selected_model)
     if not readiness["ram_sufficient"]:
@@ -438,7 +465,12 @@ def ensure_artifacts_installed(model_id: str) -> tuple[Path, Path]:
         raise LocalProviderError(
             "model_missing", "Local model files are not installed."
         )
-    return Path(readiness["binary_path"]), Path(readiness["model_path"])
+    mmproj = readiness.get("mmproj_path")
+    return (
+        Path(readiness["binary_path"]),
+        Path(readiness["model_path"]),
+        Path(mmproj) if mmproj else None,
+    )
 
 
 __all__ = [
@@ -447,11 +479,12 @@ __all__ = [
     "pin_for_current_platform",
     "binary_path_for_pin",
     "model_path",
-    "projector_path",
+    "mmproj_path",
     "install_llama_server",
     "install_model",
     "install_local",
     "install_hint",
+    "probe_binary_runnable",
     "inspect_readiness",
     "ensure_artifacts_installed",
 ]

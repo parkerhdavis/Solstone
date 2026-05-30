@@ -39,6 +39,12 @@ from solstone.think.facets import (
     get_enabled_facets,
     load_segment_facets,
 )
+from solstone.think.pipeline_health import (
+    SEGMENT_FLOOR_TALENTS,
+    classify_segment_completion,
+    read_completed_units,
+    read_segment_progress,
+)
 from solstone.think.runner import run_task
 from solstone.think.sense_splitter import write_idle_stubs, write_sense_outputs
 from solstone.think.talent import get_output_path, get_talent_configs
@@ -232,6 +238,7 @@ def check_callosum_available() -> bool:
 
 
 _SKIPPED: object = object()
+NEVER_SKIP_DAILY = frozenset({"pulse", "awareness_tender"})
 _SEND_RETRY_DELAYS = (0.5, 1.0)  # seconds between retries (3 attempts total)
 
 
@@ -330,6 +337,7 @@ def _drain_priority_batch(
                 name=timed_name,
                 use_id=use_id,
                 state="timeout",
+                **({"stream": stream} if stream else {}),
                 **({"facet": timed_facet} if timed_facet else {}),
             )
 
@@ -359,6 +367,7 @@ def _drain_priority_batch(
                 name=prompt_name,
                 use_id=use_id,
                 state="finish",
+                **({"stream": stream} if stream else {}),
                 **({"facet": agent_facet} if agent_facet else {}),
             )
 
@@ -405,6 +414,7 @@ def _drain_priority_batch(
                 name=prompt_name,
                 use_id=use_id,
                 state=end_state,
+                **({"stream": stream} if stream else {}),
                 **({"facet": agent_facet} if agent_facet else {}),
             )
 
@@ -458,17 +468,20 @@ def _has_audio_embeddings(seg_dir: Path) -> bool:
     return False
 
 
-def _should_skip_preflight(
-    prompt_name: str,
+def _check_daily_skip(
+    name: str,
+    facet: str | None,
     *,
-    day: str,
-    segment: str | None,
-    stream: str | None,
+    mode: str,
+    completed: set[tuple[str, str, str | None]],
+    never_skip: frozenset[str],
 ) -> tuple[bool, str | None]:
-    """Return whether a prompt can be skipped before sending a cortex request."""
-    if not segment:
+    if mode != "daily":
         return (False, None)
-
+    if name in never_skip:
+        return (False, None)
+    if (mode, name, facet) in completed:
+        return (True, "already_complete")
     return (False, None)
 
 
@@ -484,12 +497,23 @@ def run_segment_sense(
     *,
     skip_activity_prompts: bool = False,
     skip_talents: frozenset[str] = frozenset(),
+    live: bool = False,
 ) -> tuple[int, int, list[str]]:
     """Run Sense-first linear orchestrator for a single segment.
 
     Dispatches the Sense agent first, parses its output to determine segment
     density and conditional agent recommendations, then dispatches remaining
     agents based on Sense output.
+
+    A talent whose config declares `new_only` is dispatched only when
+    `live=True` (the observe-triggered current-segment think). On any
+    historical/batch run (`live=False`, the default) such talents are skipped
+    via `talent.skip` with reason `new_only_historical` — never counted as a
+    failure.
+
+    `new_only` is read as raw Python truthiness from the config dict
+    (`config.get("new_only")`), so the talent frontmatter must declare the JSON
+    boolean `true`, not the string `"true"`.
     """
     target_schedule = "segment"
     all_prompts = get_talent_configs(schedule="segment")
@@ -506,6 +530,17 @@ def run_segment_sense(
                 name,
                 "skip_talents_flag",
                 "Skipped by --skip-talents",
+                day=day,
+                segment=segment,
+            )
+            return _SKIPPED
+
+        if config.get("new_only") and not live:
+            _log_skip(
+                name,
+                "new_only_historical",
+                "Skipped: new_only talent runs only on a live current-segment think",
+                mode=target_schedule,
                 day=day,
                 segment=segment,
             )
@@ -546,6 +581,7 @@ def run_segment_sense(
             mode=target_schedule,
             day=day,
             segment=segment,
+            **({"stream": stream} if stream else {}),
         )
         return (0, 1, ["sense (not_configured)"])
 
@@ -615,6 +651,7 @@ def run_segment_sense(
             segment=segment,
             name="sense",
             use_id=sense_agent_id,
+            **({"stream": stream} if stream else {}),
         )
         _update_status(current_agents=["sense"])
 
@@ -679,6 +716,7 @@ def run_segment_sense(
         segment=segment,
         density=density,
         recommend=sense_json.get("recommend") or {},
+        **({"stream": stream} if stream else {}),
     )
 
     if density == "idle" and not refresh:
@@ -791,32 +829,22 @@ def run_segment_sense(
     has_audio_embeddings = _has_audio_embeddings(seg_dir)
     agents_to_run: list[tuple[str, dict]] = []
 
-    entities_config = _cfg("entities")
-    if entities_config:
-        agents_to_run.append(("entities", entities_config))
-    else:
-        _log_skip(
-            "entities",
-            "no_config",
-            "entities config not found",
-            mode=target_schedule,
-            day=day,
-            segment=segment,
-        )
+    for floor_name in SEGMENT_FLOOR_TALENTS:
+        floor_config = _cfg(floor_name)
+        if floor_config:
+            agents_to_run.append((floor_name, floor_config))
+        else:
+            _log_skip(
+                floor_name,
+                "no_config",
+                f"{floor_name} config not found",
+                mode=target_schedule,
+                day=day,
+                segment=segment,
+                **({"stream": stream} if stream else {}),
+            )
 
-    documents_config = _cfg("documents")
-    if documents_config:
-        agents_to_run.append(("documents", documents_config))
-    else:
-        _log_skip(
-            "documents",
-            "no_config",
-            "documents config not found",
-            mode=target_schedule,
-            day=day,
-            segment=segment,
-        )
-
+    # Only fold-consumed segment events carry stream; not_recommended skips stay untagged.
     if recommend.get("screen_record"):
         screen_config = _cfg("screen")
         if screen_config:
@@ -829,6 +857,7 @@ def run_segment_sense(
                 mode=target_schedule,
                 day=day,
                 segment=segment,
+                **({"stream": stream} if stream else {}),
             )
     else:
         _log_skip(
@@ -852,6 +881,7 @@ def run_segment_sense(
                 mode=target_schedule,
                 day=day,
                 segment=segment,
+                **({"stream": stream} if stream else {}),
             )
     else:
         if not recommend.get("speaker_attribution"):
@@ -913,6 +943,7 @@ def run_segment_sense(
             segment=segment,
             name=agent_name,
             use_id=use_id,
+            **({"stream": stream} if stream else {}),
         )
 
         if max_concurrency and len(spawned) >= max_concurrency:
@@ -1066,6 +1097,7 @@ def run_segment_sense(
                 segment=segment,
                 name="awareness_tender",
                 use_id=at_agent_id,
+                **({"stream": stream} if stream else {}),
             )
             _update_status(current_agents=["awareness_tender"])
             s, f, fn = _drain_priority_batch(
@@ -1114,6 +1146,7 @@ def run_segment_sense(
                 segment=segment,
                 name="pulse",
                 use_id=pulse_agent_id,
+                **({"stream": stream} if stream else {}),
             )
             _update_status(current_agents=["pulse"])
             s, f, fn = _drain_priority_batch(
@@ -1148,6 +1181,7 @@ def run_segment_sense(
             mode=target_schedule,
             day=day,
             segment=segment,
+            **({"stream": stream} if stream else {}),
         )
 
     duration_ms = int((time.time() - start_time) * 1000)
@@ -1170,14 +1204,33 @@ def run_segment_sense(
     return (total_success, total_failed, all_failed_names)
 
 
+def _apply_output_persistence(
+    request_config: dict, config: dict, *, force_refresh: bool
+) -> None:
+    """Configure a dispatch request's persistent-output fields in place.
+
+    Generators and cogitate talents that declare an explicit output format
+    produce a persisted file. For those, set ``output`` (so prepare_config
+    computes an output_path) and, when ``force_refresh`` is True, set
+    ``refresh`` (so the output-exists guard in _run_talent is bypassed and the
+    talent regenerates). Cogitate talents with no declared output are left
+    untouched — they do not persist. ``refresh`` is left absent when not
+    forcing, matching the existing dispatch-config representation.
+    """
+    is_generate = config["type"] == "generate"
+    if is_generate or config.get("output"):
+        request_config["output"] = config.get("output") or "md"
+        if force_refresh:
+            request_config["refresh"] = True
+
+
 def run_daily_prompts(
     day: str,
-    refresh: bool,
     verbose: bool,
     max_concurrency: int = 2,
     stream: str | None = None,
     timeout: int | None = 610,
-) -> tuple[int, int, list[str]]:
+) -> tuple[int, int, list[str], set[tuple[str, str | None]]]:
     """Run all daily scheduled prompts in priority order.
 
     Loads all daily prompts, groups by priority, and executes each group with
@@ -1187,14 +1240,15 @@ def run_daily_prompts(
 
     Args:
         day: Day in YYYYMMDD format
-        refresh: Whether to regenerate existing outputs
         verbose: Verbose logging
         max_concurrency: Max agents to run concurrently per priority group.
             0 means unlimited (all agents in a group run in parallel).
 
     Returns:
-        Tuple of (success_count, fail_count, failed_names) where
-        failed_names contains descriptions like "digest (error)".
+        Tuple of (success_count, fail_count, failed_names, applicable_units) where
+        failed_names contains descriptions like "digest (error)" and
+        applicable_units contains (name, facet) daily units that survived
+        structural filters.
     """
     target_schedule = "daily"
 
@@ -1203,7 +1257,9 @@ def run_daily_prompts(
 
     if not all_prompts:
         logging.info(f"No prompts found for schedule: {target_schedule}")
-        return (0, 0, [])
+        return (0, 0, [], set())
+
+    completed_units = read_completed_units(day)
 
     # Group prompts by priority
     priority_groups: dict[int, list[tuple[str, dict]]] = {}
@@ -1244,6 +1300,8 @@ def run_daily_prompts(
     total_success = 0
     total_failed = 0
     all_failed_names: list[str] = []
+    applicable_units: set[tuple[str, str | None]] = set()
+    already_complete_skips = 0
 
     # Process each priority group in order
     for priority in sorted(priority_groups.keys()):
@@ -1311,17 +1369,40 @@ def run_daily_prompts(
                             )
                             continue
 
+                        applicable_units.add((prompt_name, facet_name))
+                        skip, reason = _check_daily_skip(
+                            prompt_name,
+                            facet_name,
+                            mode=target_schedule,
+                            completed=completed_units,
+                            never_skip=NEVER_SKIP_DAILY,
+                        )
+                        if skip:
+                            reason = reason or "already_complete"
+                            _log_skip(
+                                prompt_name,
+                                reason,
+                                "unit already complete in health log",
+                                mode=target_schedule,
+                                day=day,
+                                facet=facet_name,
+                            )
+                            logging.debug(
+                                "Skipping %s for %s: %s",
+                                prompt_name,
+                                facet_name,
+                                reason,
+                            )
+                            already_complete_skips += 1
+                            continue
+
                         logging.info(f"Spawning {prompt_name} for facet: {facet_name}")
 
                         # Always pass day for instructions.day context
                         request_config: dict = {"facet": facet_name, "day": day}
-                        if is_generate:
-                            request_config["output"] = config.get("output", "md")
-                            if refresh:
-                                request_config["refresh"] = True
-                        elif config.get("output"):
-                            # Cogitate agents with explicit output get auto-persisted
-                            request_config["output"] = config["output"]
+                        _apply_output_persistence(
+                            request_config, config, force_refresh=True
+                        )
                         env: dict[str, str] = {
                             "SOL_DAY": day,
                             "SOL_FACET": facet_name,
@@ -1401,14 +1482,34 @@ def run_daily_prompts(
                             )
                 else:
                     # Regular single-instance prompt
+                    applicable_units.add((prompt_name, None))
+                    skip, reason = _check_daily_skip(
+                        prompt_name,
+                        None,
+                        mode=target_schedule,
+                        completed=completed_units,
+                        never_skip=NEVER_SKIP_DAILY,
+                    )
+                    if skip:
+                        reason = reason or "already_complete"
+                        _log_skip(
+                            prompt_name,
+                            reason,
+                            "unit already complete in health log",
+                            mode=target_schedule,
+                            day=day,
+                        )
+                        logging.debug("Skipping %s: %s", prompt_name, reason)
+                        already_complete_skips += 1
+                        continue
+
                     logging.info(f"Spawning {prompt_name}")
 
                     # Always pass day for instructions.day context
                     request_config: dict = {"day": day}
-                    if is_generate:
-                        request_config["output"] = config.get("output", "md")
-                        if refresh:
-                            request_config["refresh"] = True
+                    _apply_output_persistence(
+                        request_config, config, force_refresh=True
+                    )
                     env: dict[str, str] = {"SOL_DAY": day}
                     request_config["env"] = env
                     request_config["schedule"] = target_schedule
@@ -1513,6 +1614,12 @@ def run_daily_prompts(
             failed=group_failed,
         )
 
+    if already_complete_skips:
+        logging.info(
+            "Daily idempotency: skipped %d already-complete unit(s)",
+            already_complete_skips,
+        )
+
     duration_ms = int((time.time() - start_time) * 1000)
     emit(
         "completed",
@@ -1525,7 +1632,7 @@ def run_daily_prompts(
     )
 
     logging.info(f"Prompts completed: {total_success} succeeded, {total_failed} failed")
-    return (total_success, total_failed, all_failed_names)
+    return (total_success, total_failed, all_failed_names, applicable_units)
 
 
 def run_weekly_prompts(
@@ -1677,13 +1784,9 @@ def run_weekly_prompts(
 
                         # Always pass day for instructions.day context
                         request_config: dict = {"facet": facet_name, "day": day}
-                        if is_generate:
-                            request_config["output"] = config.get("output", "md")
-                            if refresh:
-                                request_config["refresh"] = True
-                        elif config.get("output"):
-                            # Cogitate agents with explicit output get auto-persisted
-                            request_config["output"] = config["output"]
+                        _apply_output_persistence(
+                            request_config, config, force_refresh=refresh
+                        )
                         env: dict[str, str] = {
                             "SOL_DAY": day,
                             "SOL_FACET": facet_name,
@@ -1777,10 +1880,9 @@ def run_weekly_prompts(
 
                     # Always pass day for instructions.day context
                     request_config: dict = {"day": day}
-                    if is_generate:
-                        request_config["output"] = config.get("output", "md")
-                        if refresh:
-                            request_config["refresh"] = True
+                    _apply_output_persistence(
+                        request_config, config, force_refresh=refresh
+                    )
                     env: dict[str, str] = {"SOL_DAY": day}
                     if prompt_name == "weekly_reflection":
                         request_config["day"] = week_start
@@ -2881,6 +2983,19 @@ def parse_args() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--live",
+        action="store_true",
+        help=(
+            "Mark this run as a live, current-segment think (observe-triggered "
+            "for a segment that just completed live observation). Talents "
+            "declaring new_only in their frontmatter run ONLY when --live is "
+            "set; without it the run is treated as historical/batch "
+            "re-processing and new_only talents are skipped. Defaults off so "
+            "manually re-thinking an old segment never rebuilds rolling state "
+            "from stale data."
+        ),
+    )
+    parser.add_argument(
         "--updated",
         action="store_true",
         help="List days with pending daily processing and exit",
@@ -2943,18 +3058,6 @@ def main() -> None:
 
     if args.activity and not args.facet:
         parser.error("--activity requires --facet")
-
-    # Auto-enable refresh for updated days (full daily runs only)
-    if not args.refresh and not args.segment and not args.segments:
-        health_dir = day_dir / "health"
-        stream_marker = health_dir / "stream.updated"
-        daily_marker = health_dir / "daily.updated"
-        if stream_marker.is_file() and (
-            not daily_marker.is_file()
-            or stream_marker.stat().st_mtime > daily_marker.stat().st_mtime
-        ):
-            args.refresh = True
-            logging.info("Day %s has pending stream data, enabling refresh", day)
 
     if args.activity and not args.day:
         parser.error("--activity requires --day")
@@ -3093,6 +3196,7 @@ def main() -> None:
                         state_machine=batch_state_machine,
                         skip_activity_prompts=args.no_activity_prompts,
                         skip_talents=skip_talents,
+                        live=False,
                     )
                     # Touch stream.updated marker after each segment
                     try:
@@ -3186,6 +3290,27 @@ def main() -> None:
             if not phase_ok:
                 logging.warning("Sense repair failed, continuing anyway")
 
+        # PRE-PHASE: Run segment-think batch repair (daily only)
+        if not args.segment:
+            logging.info("Running pre-phase: segment-think repair")
+            cmd = ["journal", "think", "--segments", "--day", day]
+            if args.verbose:
+                cmd.append("-v")
+            day_log(day, f"starting: {' '.join(cmd)}")
+            _jsonl_log("phase.start", mode=_run_mode, day=day, phase="segment_think")
+            _phase_start = time.time()
+            phase_ok = run_command(cmd, day)
+            _jsonl_log(
+                "phase.complete",
+                mode=_run_mode,
+                day=day,
+                phase="segment_think",
+                success=phase_ok,
+                duration_ms=int((time.time() - _phase_start) * 1000),
+            )
+            if not phase_ok:
+                logging.warning("Segment-think repair failed, continuing anyway")
+
         # MAIN PHASE: Run prompts
         resolved_stream = args.stream
         if args.segment and args.stream is None:
@@ -3208,14 +3333,16 @@ def main() -> None:
                 state_machine=ActivityStateMachine(journal_root=Path(get_journal())),
                 skip_activity_prompts=args.no_activity_prompts,
                 skip_talents=skip_talents,
+                live=args.live,
             )
         else:
-            success_count, fail_count, failed_names = run_daily_prompts(
-                day=day,
-                refresh=args.refresh,
-                verbose=args.verbose,
-                max_concurrency=args.jobs,
-                stream=resolved_stream,
+            success_count, fail_count, failed_names, applicable_units = (
+                run_daily_prompts(
+                    day=day,
+                    verbose=args.verbose,
+                    max_concurrency=args.jobs,
+                    stream=resolved_stream,
+                )
             )
         _run_result["success"] = success_count
         _run_result["failed"] = fail_count
@@ -3298,13 +3425,34 @@ def main() -> None:
                     "Storage health check failed in post-phase", exc_info=True
                 )
 
-            # Touch daily.updated marker after daily schedule completion
+            # Touch daily.updated marker only after daily and segment work completes.
             try:
-                health_dir = day_path(day) / "health"
-                health_dir.mkdir(parents=True, exist_ok=True)
-                (health_dir / "daily.updated").touch()
+                completed = read_completed_units(day)
+                daily_done = all(
+                    ("daily", name, facet) in completed
+                    for name, facet in applicable_units
+                )
+
+                segments = cluster_segments(day)
+                progress = read_segment_progress(day)
+                completion = classify_segment_completion(segments, progress)
+                blockers = completion.blockers
+
+                if daily_done and not blockers:
+                    health_dir = day_path(day) / "health"
+                    health_dir.mkdir(parents=True, exist_ok=True)
+                    (health_dir / "daily.updated").touch()
+                    logging.info("Day %s fully complete; wrote daily.updated", day)
+                else:
+                    logging.info(
+                        "Day %s withholding daily.updated: "
+                        "daily_units_complete=%s segment_blockers=%s",
+                        day,
+                        daily_done,
+                        blockers,
+                    )
             except Exception:
-                pass
+                logging.warning("Failed to update daily marker", exc_info=True)
 
             # Set first_daily_ready awareness flag after first daily analysis
             try:

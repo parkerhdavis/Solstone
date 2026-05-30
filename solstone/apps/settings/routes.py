@@ -31,6 +31,11 @@ from solstone.apps.settings.copy import (
 from solstone.apps.utils import log_app_action
 from solstone.convey import chat_stream, state
 from solstone.convey import copy as convey_copy
+from solstone.convey.network_access import (
+    NetworkAccessPasswordRequired,
+    NetworkAccessPasswordTooShort,
+    set_network_access,
+)
 from solstone.convey.reasons import (
     ACTIVITY_INVALID,
     ACTIVITY_NOT_FOUND,
@@ -59,8 +64,7 @@ from solstone.convey.sol_initiated.settings import (
     save_settings as save_sol_voice_settings,
 )
 from solstone.convey.utils import error_response
-from solstone.think.models import LOCAL_FLASH, QWEN_35_9B
-from solstone.think.pairing.config import get_host_url
+from solstone.think.models import LOCAL_MODEL, QWEN_35_9B
 from solstone.think.providers.google import validate_vertex_credentials
 from solstone.think.providers.local import LOCAL_MODEL_SPECS
 from solstone.think.providers.mlx import _MLX_MODEL_REGISTRY
@@ -164,8 +168,6 @@ def _project_public_config(config: dict[str, Any]) -> dict[str, Any]:
     has_pw = bool(convey_config.pop("password_hash", None))
     convey_config.pop("password", None)
     convey_config["has_password"] = has_pw
-    pairing_config = projected.setdefault("pairing", {})
-    pairing_config["effective_host_url"] = get_host_url()
     projected["runtime_env"] = {k: bool(os.getenv(k)) for k in API_KEY_ENV_VARS}
     return projected
 
@@ -235,8 +237,8 @@ def update_config() -> Any:
 
     Accepts JSON with a 'section' key and per-section config fields to update.
     Supported writes include identity and transcribe settings, convey security
-    settings (password, allow_network_access, trust_localhost), pairing.host_url,
-    and API-key env vars.
+    settings (password, allow_network_access, trust_localhost), and API-key env
+    vars.
     """
     try:
         request_data = request.get_json()
@@ -274,7 +276,6 @@ def update_config() -> Any:
             ],
             "transcribe": ["backend", "enrich", "preserve_all", "noise_upgrade"],
             "convey": ["allow_network_access", "password", "trust_localhost"],
-            "pairing": ["host_url"],
             "support": ["enabled", "proactive", "anonymous_feedback", "portal_url"],
             "agent": ["name", "name_status", "named_date", "proposal_count"],
             "env": API_KEY_ENV_VARS,
@@ -311,6 +312,24 @@ def update_config() -> Any:
         changed_fields = {}
         old_section = old_config.get(section, {})
 
+        if section == "convey" and "allow_network_access" in data:
+            try:
+                result = set_network_access(
+                    enable=bool(data["allow_network_access"]),
+                    password=data.get("password"),
+                )
+            except NetworkAccessPasswordRequired:
+                return error_response(
+                    NETWORK_SECURITY_REQUIRES_PASSWORD,
+                    detail=CONVEY_REFUSE_NO_PASSWORD_NETWORK,
+                )
+            except NetworkAccessPasswordTooShort:
+                return error_response(
+                    INVALID_CONFIG_VALUE,
+                    detail="Password must be at least 8 characters",
+                )
+            return jsonify(result)
+
         if section == "convey" and "password" in data:
             raw_password = data.pop("password") or ""
             if raw_password:
@@ -329,14 +348,6 @@ def update_config() -> Any:
 
         has_password = _convey_password_is_set(config)
 
-        requested_network_access = None
-        if section == "convey" and "allow_network_access" in data:
-            requested_network_access = bool(data["allow_network_access"])
-            if requested_network_access and not has_password:
-                return error_response(
-                    NETWORK_SECURITY_REQUIRES_PASSWORD,
-                    detail=CONVEY_REFUSE_NO_PASSWORD_NETWORK,
-                )
         if (
             section == "convey"
             and "trust_localhost" in data
@@ -352,12 +363,6 @@ def update_config() -> Any:
         for key in allowed_sections[section]:
             if key in data:
                 new_value = data[key]
-                if section == "pairing" and key == "host_url":
-                    new_value = (
-                        new_value.strip() if isinstance(new_value, str) else new_value
-                    )
-                    if new_value == "":
-                        new_value = None
                 old_value = old_section.get(key)
                 if old_value != new_value:
                     changed_fields[key] = {"old": old_value, "new": new_value}
@@ -388,8 +393,6 @@ def update_config() -> Any:
                                 }
                             config[section][backend_key][nested_key] = new_value
 
-        # When a provider API key is saved/cleared, auto-set the matching
-        # providers.auth mode so cogitate uses the key automatically.
         if section == "env" and changed_fields:
             from solstone.think.providers import PROVIDER_METADATA
 
@@ -401,14 +404,6 @@ def update_config() -> Any:
             }
             if "providers" not in config:
                 config["providers"] = {}
-            if "auth" not in config["providers"]:
-                config["providers"]["auth"] = {}
-            for env_var in changed_fields:
-                provider = env_to_provider.get(env_var)
-                if provider:
-                    new_val = data.get(env_var, "")
-                    mode = "api_key" if new_val else "platform"
-                    config["providers"]["auth"][provider] = mode
 
             # Validate changed provider API keys
             if "key_validation" not in config["providers"]:
@@ -453,18 +448,6 @@ def update_config() -> Any:
             json.dump(config, f, indent=2, ensure_ascii=False)
             f.write("\n")
         os.chmod(config_path, 0o600)
-
-        if section == "convey" and requested_network_access is not None:
-            from solstone.convey.restart import wait_for_convey_restart
-
-            restart_ok, _ = wait_for_convey_restart(timeout=15.0)
-            return jsonify(
-                {
-                    "effective_host_url": get_host_url(),
-                    "ok": True,
-                    "restart_timeout": not restart_ok,
-                }
-            )
 
         # Log if something changed (don't log sensitive values)
         if changed_fields:
@@ -767,8 +750,7 @@ MLX_MODEL_LABELS = {
     "gemma-4-26b-a4b-it-mlx-4bit": "gemma 4 (26B) — 24 GB Mac",
 }
 LOCAL_MODEL_LABELS = {
-    LOCAL_FLASH: "qwen 2.5 coder 7B — 12 GB",
-    "local/qwen3-coder-30b-a3b-q4_k_m": "qwen3 coder 30B — 32 GB",
+    LOCAL_MODEL: "qwen 2.5 coder 7B — 12 GB",
 }
 
 
@@ -800,7 +782,7 @@ def _local_model_error(model: str) -> Any:
 
 
 def _local_model_from_request() -> tuple[str | None, Any | None]:
-    model = request.args.get("model") or LOCAL_FLASH
+    model = request.args.get("model") or LOCAL_MODEL
     if model not in LOCAL_MODEL_SPECS:
         return None, _local_model_error(model)
     return model, None
@@ -945,7 +927,6 @@ def get_providers() -> Any:
         - context_defaults: Context registry with labels/groups for UI
           (includes talent configs with type, schedule, and disabled state)
         - api_keys: Boolean status for each provider's API key
-        - auth: Per-provider auth mode for cogitate ("platform" or "api_key")
     """
     try:
         from solstone.think.models import (
@@ -1010,12 +991,6 @@ def get_providers() -> Any:
             env_key = p.get("env_key", "")
             api_keys[p["name"]] = bool(os.getenv(env_key)) if env_key else False
 
-        # Build auth settings (default "platform" for all providers)
-        auth_config = providers_config.get("auth", {})
-        auth = {
-            p["name"]: auth_config.get(p["name"], "platform") for p in providers_list
-        }
-
         # Get cached key validation results
         key_validation = providers_config.get("key_validation", {})
 
@@ -1032,7 +1007,7 @@ def get_providers() -> Any:
                 pass
 
         provider_status = build_provider_status(providers_list, vertex_creds_configured)
-        local_model_id = request.args.get("local_model") or LOCAL_FLASH
+        local_model_id = request.args.get("local_model") or LOCAL_MODEL
         if local_model_id not in LOCAL_MODEL_SPECS:
             return _local_model_error(local_model_id)
         local_status = local_bootstrap.get_state(local_model_id)
@@ -1052,7 +1027,6 @@ def get_providers() -> Any:
                 "contexts": contexts,
                 "context_defaults": context_defaults,
                 "api_keys": api_keys,
-                "auth": auth,
                 "key_validation": key_validation,
                 "local": local_status,
                 "mlx": {"active_model": mlx_active_model, **mlx_status},
@@ -1349,7 +1323,6 @@ def update_providers() -> Any:
     Accepts JSON with optional keys:
         - generate: {provider?, tier?, backup?} - Set generate defaults
         - cogitate: {provider?, tier?, backup?} - Set cogitate defaults
-        - auth: {provider: "platform"|"api_key"} - Cogitate CLI auth mode
         - contexts: {pattern: {provider?, tier?, disabled?, extract?} | null}
           Set or clear context overrides
 
@@ -1438,41 +1411,6 @@ def update_providers() -> Any:
                         "new": backup,
                     }
                 config["providers"][agent_type]["backup"] = backup
-
-        # Handle auth mode updates
-        if "auth" in request_data:
-            auth_data = request_data["auth"]
-            if not isinstance(auth_data, dict):
-                return error_response(
-                    INVALID_CONFIG_VALUE,
-                    detail="auth must be an object",
-                )
-
-            if "auth" not in config["providers"]:
-                config["providers"]["auth"] = {}
-
-            old_auth = old_providers.get("auth", {})
-
-            for provider, mode in auth_data.items():
-                if provider not in PROVIDER_REGISTRY:
-                    return error_response(
-                        INVALID_CONFIG_VALUE,
-                        detail=f"Invalid provider in auth: {provider}",
-                    )
-                if mode not in ("platform", "api_key"):
-                    return error_response(
-                        INVALID_CONFIG_VALUE,
-                        detail=(
-                            f"Invalid auth mode: {mode}. "
-                            "Must be 'platform' or 'api_key'."
-                        ),
-                    )
-                if old_auth.get(provider) != mode:
-                    changed_fields[f"auth.{provider}"] = {
-                        "old": old_auth.get(provider, "platform"),
-                        "new": mode,
-                    }
-                config["providers"]["auth"][provider] = mode
 
         # Handle context overrides
         if "contexts" in request_data:

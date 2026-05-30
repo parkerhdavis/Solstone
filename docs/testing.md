@@ -3,14 +3,10 @@
 ## Test Structure
 
 - **Framework**: pytest; coverage reporting comes from `make test-cov`, `make ci`, or `make coverage`, not bare `make test`
-- **Unit Tests**: `tests/` root directory
-  - Fast, no external API calls
+- **Unit Tests**: live under `tests/` (and each app's `tests/` dir)
+  - Fast, no external API calls, no real browser
   - Use `tests/fixtures/journal/` mock data
   - Test individual functions and modules
-- **Integration Tests**: `tests/integration/` subdirectory
-  - Test real backends (Anthropic, OpenAI, Google)
-  - Require API keys in `.env`
-  - Test end-to-end workflows
 - **Naming**: Files `test_*.py`, functions `test_*`
 - **Fixtures**: Shared fixtures in `tests/conftest.py`
 
@@ -27,12 +23,9 @@ The `tests/fixtures/journal/` directory contains a complete mock journal structu
 
 ## Running Tests
 
-- `make test` for unit tests
-- `make test-cov` for unit tests with coverage reporting
-- `make test-apps` to run app tests
-- `make test-integration` for integration tests
-- `make test-all` to run all tests (core + apps + integration)
-- `make test-only TEST=path` to run specific tests
+- `make test` runs all unit tests — `tests/` + every `solstone/apps/*/tests/`, in one parallel run
+- `make test-cov` — the same suite with coverage reporting
+- `make test-app APP=<name>` to run a single app's tests; `make test-only TEST=path` for a specific file/pattern
 - `make coverage` to generate a coverage report
 - `make ci` before committing (formats, lints, tests)
 - Always run `sol restart-convey` after editing `solstone/convey/` or `solstone/apps/` to reload code

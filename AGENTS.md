@@ -69,7 +69,7 @@ Top-level dirs intentionally not in the table: `.venv/`, `scratch/`, `logs/`, `t
 Two surfaces:
 
 - **`sol <command>`** — access commands registered in `solstone/think/sol_cli.py`'s `COMMANDS` dict (e.g., `sol import`, `sol indexer`, `sol top`, `sol health`).
-- **`journal <command>`** — host/service commands from the same registry (e.g., `journal think`, `journal supervisor`, `journal heartbeat`). `ALIASES` provides shorthand compound commands (`journal start` → `journal supervisor`, `journal up/down` → `journal service up/down`).
+- **`journal <command>`** — host/service commands from the same registry (e.g., `journal think`, `journal supervisor`, `journal heartbeat`). `ALIASES` provides shorthand compound commands (`journal start` → `journal supervisor`, `journal up/down` → `journal service up/down`). `doctor` is universal: `sol doctor` checks CLI usability; `journal doctor` checks journal-host health.
 - **`sol call <app> <verb>`** — routes to `solstone/think/call.py`, which discovers each `solstone/apps/*/call.py` Typer sub-app and mounts it as a subcommand. Example: `sol call entities list`, `sol call activities create`, `sol call journal search`.
 
 **Adding a top-level command:** add an entry to `COMMANDS` in `solstone/think/sol_cli.py`; ensure the module has a `main()` function.
@@ -108,14 +108,10 @@ Verified against `Makefile`. Grouped by use.
 |--------|-------------|
 | `make format` | Auto-fix formatting and imports with ruff. Safe to run anytime; modifies files. |
 | `make format-check` | Format dry-run. Part of `make ci`; rarely run alone. |
-| `make test` | Unit tests (`tests/`) without coverage. Format-check runs first; failures block tests. Fast inner loop. |
-| `make test-cov` | Unit tests with full-repo terminal coverage; used by `make ci` / `make verify`. |
-| `make test-apps` | Run all `solstone/apps/*/tests/` suites. |
-| `make test-app APP=<name>` | Run a single app's tests. |
+| `make test` | All unit tests — `tests/` + every `solstone/apps/*/tests/`, one parallel run. Format-check runs first; failures block tests. Fast inner loop. |
+| `make test-cov` | Same suite with full-repo terminal coverage; used by `make ci` / `make verify`. |
+| `make test-app APP=<name>` | Run a single app's tests (focus helper). |
 | `make test-only TEST=<path-or-pattern>` | Run a specific test file or pytest node id (`TEST="-k test_name"` also works). |
-| `make test-integration` | Full integration suite. Requires `.env` API keys. Slow; run before shipping AI-behavior changes. |
-| `make test-integration-only TEST=<path>` | Single integration test by path or pattern. |
-| `make test-all` | Everything — core + apps + integration. Pre-ship gate. |
 | `make coverage` | HTML coverage report under `htmlcov/`. Occasional. |
 | `make watch` | pytest-watch — reruns tests on file change. Useful during a test-heavy sprint. |
 | `make ci` | Format-check + ruff + layer-hygiene + coverage tests. **Run before every commit.** |
@@ -159,9 +155,9 @@ Verified against `Makefile`. Grouped by use.
 
 - **Framework:** pytest. Files `test_*.py`, functions `test_*`. Shared fixtures in `tests/conftest.py`.
 - **Fixture journal:** `tests/fixtures/journal/` — a complete mock journal with facets, entities, segments, index state. The autouse `set_test_journal_path` fixture in `tests/conftest.py` sets `SOLSTONE_JOURNAL` to this path for unit tests. Individual tests may override it with `monkeypatch.setenv` when they need an isolated tmp journal (see §8).
-- **Run one test:** `make test-only TEST=tests/test_utils.py::test_foo` or `TEST="-k test_foo"`.
-- **Run app tests:** `make test-apps` or `make test-app APP=<name>`.
-- **Integration tests** (`tests/integration/`): hit real provider APIs, require `.env` keys, run via `make test-integration`.
+- **Run one test:** `make test-only TEST=tests/test_utils.py::test_foo` or `TEST="-k test_foo"`. **One app:** `make test-app APP=<name>`.
+- **`make test` runs everything** — `tests/` and every `solstone/apps/*/tests/` in one parallel run. App tests are not a separate step.
+- **All tests are fast unit/component tests** — no real browser, no live network, no API keys. There is no integration/e2e test tier; tests that would need those were removed in favor of live verification via `make sandbox` / `make verify-browser`.
 - **After editing `solstone/convey/` or `solstone/apps/`:** `sol restart-convey` to reload code in a running stack.
 - **`make dev` + `make sandbox`** both write runtime artifacts into the fixtures journal; `tests/fixtures/journal/.gitignore` covers those — never commit them.
 
@@ -289,13 +285,12 @@ Bare links don't motivate clicking. Each entry below says when you actually need
 | `docs/SOLCLI.md` | Adding a new `sol <cmd>` or `sol call <app> <verb>` |
 | `docs/PROMPT_TEMPLATES.md` | Modifying talent prompt format or frontmatter |
 | `docs/PROVIDERS.md` | Adding a new AI provider; debugging model selection |
-| `docs/testing.md` | Writing integration tests; setting up fixtures; debugging test isolation |
+| `docs/testing.md` | Test structure, fixtures, debugging test isolation |
 | `docs/environment.md` | Journal path resolution, managed-wrapper behavior, service install details, and `SOLSTONE_JOURNAL` rules |
 | `docs/coding-standards.md` | Full naming conventions, ruff / mypy config, dep-management details — reference for everything not promoted into this file |
 | `docs/project-structure.md` | Canonical directory layout; resolving "where does this file go" debates |
 | `docs/DOCTOR.md` | Diagnostics and debugging a running system |
 | `docs/SCREEN_CATEGORIES.md` | Screen-understanding classifier taxonomy (observe side) |
-| `docs/INTEGRATION_TESTS.md` | Deep integration-test setup |
 | `docs/VENDOR.md` | Vendor-level integrations |
 | `docs/design/` | Per-subsystem design docs |
 | `docs/JOURNAL.md` | **Breadcrumb only** — redirects to `solstone/talent/journal/SKILL.md`, the progressive-disclosure journal-layout reference |
