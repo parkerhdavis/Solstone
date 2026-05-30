@@ -162,6 +162,7 @@ def _build_request_body(
         "temperature": temperature,
         "max_tokens": max_output_tokens,
         "stream": False,
+        "chat_template_kwargs": {"enable_thinking": False},
     }
     if json_schema is not None:
         body["response_format"] = {

@@ -35,7 +35,7 @@ def test_local_model_specs():
     assert set(provider.LOCAL_MODEL_SPECS) == {LOCAL_MODEL}
     spec = provider.LOCAL_MODEL_SPECS[LOCAL_MODEL]
     # Fork: the single bundled model is vision-capable Nemotron Omni (mmproj),
-    # not upstream's text-only qwen2.5-coder. See docs/FORK.md "Local vision".
+    # not upstream's qwen3.5-4b VLM. See docs/FORK.md "Local vision".
     assert spec.repo == "ggml-org/NVIDIA-Nemotron-3-Nano-Omni"
     assert (
         spec.sha256
@@ -129,6 +129,7 @@ def test_run_generate_posts_to_loopback(monkeypatch):
     assert captured["json"]["model"] == LOCAL_MODEL
     assert captured["json"]["messages"] == [{"role": "user", "content": "hello"}]
     assert captured["json"]["max_tokens"] == 16
+    assert captured["json"]["chat_template_kwargs"] == {"enable_thinking": False}
     assert result["text"] == "hello"
     assert result["usage"] == {
         "input_tokens": 3,
@@ -214,8 +215,9 @@ def test_openhands_local_llm_kwargs(monkeypatch):
         "api_key": "EMPTY",
         "native_tool_calling": False,
         "input_cost_per_token": 0,
-        "chat_template_kwargs": {"enable_thinking": False},
+        "litellm_extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
     }
+    assert "chat_template_kwargs" not in captured
     assert openhands._prefixed_model("local", LOCAL_MODEL) == f"openai/{LOCAL_MODEL}"
 
 
