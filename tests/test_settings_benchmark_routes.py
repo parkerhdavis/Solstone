@@ -114,6 +114,28 @@ class TestSegmentRoute:
 
 
 # ---------------------------------------------------------------------------
+# /api/benchmark/models
+# ---------------------------------------------------------------------------
+
+
+class TestModelsRoute:
+    def test_rows_carry_served_flag(self, journal_copy):
+        # The providers-tab benchmark card uses `served` to show the single
+        # served model and keep candidate rows non-switchable, so the row must
+        # carry it and exactly the pinned LOCAL_MODEL must be flagged.
+        from solstone.think.models import LOCAL_MODEL
+
+        client = _settings_client(journal_copy)
+        resp = client.get("/app/settings/api/benchmark/models")
+        assert resp.status_code == 200
+        body = resp.get_json()
+        by_id = {m["model_id"]: m for m in body["models"]}
+        assert by_id[LOCAL_MODEL]["served"] is True
+        served = [m["model_id"] for m in body["models"] if m.get("served")]
+        assert served == [LOCAL_MODEL]
+
+
+# ---------------------------------------------------------------------------
 # /api/transcribe — hardware-compat enrichment for the settings UI
 # ---------------------------------------------------------------------------
 

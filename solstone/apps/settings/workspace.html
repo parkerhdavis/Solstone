@@ -8494,12 +8494,15 @@ function primaryTaskForTier(model, role) {
   return candidates[0] ? { id: candidates[0][0], ...candidates[0][1] } : null;
 }
 
-// Model rows are filtered by model_id prefix to match the type's
-// currently-selected provider. The benchmark cards' provider→prefix wiring
-// for the served `local` model is rebuilt in the registry revamp; until then
-// this map is empty, so the per-model detail cards no-op rather than render
-// stale rows (the segment "background processing" card is unaffected).
-const LOCAL_PROVIDER_PREFIXES = {};
+// Maps a selected provider to the model_id prefix whose benchmark card to
+// show. The bundled local provider serves ONE fixed model across all tiers
+// (think/models.py LOCAL_MODEL; normalize_model_id coerces every request to
+// it), so the card shows that served model. Candidate rows in the registry are
+// evaluation-only (the head-to-head lives on a fork-only surface) and must
+// never appear switchable in this shared settings card.
+const LOCAL_PROVIDER_PREFIXES = {
+  local: 'local/',
+};
 
 function renderBenchDetailsFor(type) {
   const container = document.getElementById(type + 'BenchDetails');
@@ -8510,44 +8513,36 @@ function renderBenchDetailsFor(type) {
   const provider = providerSelect?.value;
   const prefix = LOCAL_PROVIDER_PREFIXES[provider];
 
-  if (!prefix) {
-    container.style.display = 'none';
-    // Restore default tier option labels
-    for (const opt of tierSelect.options) {
-      const tier = parseInt(opt.value);
-      if (DEFAULT_TIER_LABELS[tier]) opt.textContent = DEFAULT_TIER_LABELS[tier];
-    }
-    return;
-  }
-
-  if (!benchmarkData || !benchmarkData.models) return;
-
-  // Which capability does this type care about?
-  const requiredCap = type === 'cogitate' ? 'cogitate' : 'generate';
-  const tasksCatalog = benchmarkData.tasks || {};
-
-  // Build tier -> model index for this provider + capability
-  const byTier = { 1: null, 2: null, 3: null };
-  for (const model of benchmarkData.models) {
-    if (!model.model_id.startsWith(prefix)) continue;
-    if (!(model.capabilities || []).includes(requiredCap)) continue;
-    const tier = model.tier_hint;
-    if (tier && !byTier[tier]) byTier[tier] = model;
-  }
-
-  // Tier option text stays as the generic "Best / Average / Fast" labels —
-  // the specific model + benchmark details live in the panel below so the
-  // dropdown itself remains scannable and consistent across providers.
+  // The per-tier dropdown keeps its generic Best/Average/Fast labels — the
+  // served model and its benchmark live in the panel below.
   for (const opt of tierSelect.options) {
     const tier = parseInt(opt.value);
     if (DEFAULT_TIER_LABELS[tier]) opt.textContent = DEFAULT_TIER_LABELS[tier];
   }
 
-  // Build the details panel for the currently-selected tier
-  const currentTier = parseInt(tierSelect.value);
-  const currentModel = byTier[currentTier];
+  if (!prefix || !benchmarkData || !benchmarkData.models) {
+    container.style.display = 'none';
+    return;
+  }
+
+  // Which capability does this type care about?
+  const requiredCap = type === 'cogitate' ? 'cogitate' : 'generate';
+
+  // Show the single served model — all tiers map to it, so the tier selector
+  // doesn't change which model runs. Candidates are not switchable, so they
+  // never populate this card.
+  const served = benchmarkData.models.find(
+    (m) =>
+      m.served &&
+      (m.model_id || '').startsWith(prefix) &&
+      (m.capabilities || []).includes(requiredCap),
+  );
+  if (!served) {
+    container.style.display = 'none';
+    return;
+  }
   container.style.display = '';
-  container.innerHTML = renderDetailsPanel(currentModel, requiredCap, tasksCatalog);
+  container.innerHTML = renderDetailsPanel(served, requiredCap, benchmarkData.tasks || {});
 }
 
 function renderDetailsPanel(model, requiredCap, tasksCatalog) {

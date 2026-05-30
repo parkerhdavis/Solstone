@@ -684,6 +684,10 @@ def list_prevetted_models(
             {
                 "model_id": model_id,
                 "label": spec.get("label"),
+                # served == the one model think/models.py pins as LOCAL_MODEL;
+                # candidate rows are evaluation-only and the UI must not present
+                # them as switchable (see models.json _comment).
+                "served": bool(spec.get("served")),
                 "tier_hint": spec.get("tier_hint"),
                 "size_gb": spec.get("size_gb"),
                 "capabilities": capabilities,
