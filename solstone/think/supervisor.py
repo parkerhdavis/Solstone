@@ -60,6 +60,7 @@ CHECK_INTERVAL = 30
 MAX_UPDATED_CATCHUP = 4
 TEMPFAIL_DELAY = 15  # seconds to wait before retrying a tempfail exit
 STOPPED_TICKS_THRESHOLD = 2
+LOCAL_SERVER_PROCESS_NAME = "llama-server"
 LOCAL_SERVER_READY_TIMEOUT_S = 300.0
 LOCAL_SERVER_HEALTH_POLL_INTERVAL_S = 1.0
 LOCAL_MODEL_WARMING_UP_COPY = "Local model is warming up..."
@@ -128,8 +129,8 @@ _MANAGED_SERVICE_PROCTITLES = frozenset(
         "journal:sense",
         "journal:cortex",
         "journal:convey",
-        "sol:link",
-        "llama-server",
+        "journal:spl",
+        LOCAL_SERVER_PROCESS_NAME,
     }
 )
 
@@ -761,6 +762,11 @@ _daily_state = {
     "last_day": None,  # Track which day we last processed
 }
 
+# State for local provider recovery nudges
+_recovery_state = {
+    "llama_server_down": False,
+}
+
 # Timeout before flushing stale segments (seconds)
 FLUSH_TIMEOUT = 3600
 
@@ -1249,7 +1255,7 @@ def start_local_server() -> RunnerManagedProcess | None:
     if "0.0.0.0" in cmd:
         raise RuntimeError("Local server may not bind 0.0.0.0.")
 
-    managed = _launch_process("llama-server", cmd, restart=True)
+    managed = _launch_process(LOCAL_SERVER_PROCESS_NAME, cmd, restart=True)
     print(f"  {LOCAL_MODEL_WARMING_UP_COPY}", flush=True)
 
     deadline = time.monotonic() + LOCAL_SERVER_READY_TIMEOUT_S
@@ -1361,10 +1367,10 @@ def start_cortex_server() -> RunnerManagedProcess:
     return _launch_process("cortex", cmd, restart=True)
 
 
-def start_link_server() -> RunnerManagedProcess:
-    """Launch the link tunnel service (spl home-side endpoint)."""
-    cmd = ["sol", "link", "-v"]
-    return _launch_process("link", cmd, restart=True)
+def start_spl_service() -> RunnerManagedProcess:
+    """Launch the spl tunnel service."""
+    cmd = ["journal", "spl", "-v"]
+    return _launch_process("spl", cmd, restart=True)
 
 
 def start_convey_server(
@@ -1474,9 +1480,42 @@ async def handle_runner_exits(procs: list[RunnerManagedProcess]) -> None:
                 continue
 
             procs.append(new_proc)
+            if managed.name == LOCAL_SERVER_PROCESS_NAME:
+                _recovery_state["llama_server_down"] = True
             logging.info("Restarted %s after exit code %s", managed.name, returncode)
         else:
             logging.info("Not restarting %s", managed.name)
+
+
+def _nudge_catchup_drain() -> None:
+    """Ask the supervisor loopback path to drain pending catchup work."""
+    if _supervisor_callosum is None:
+        logging.warning("Cannot nudge catchup drain: supervisor callosum unavailable")
+        return
+
+    try:
+        _supervisor_callosum.emit("supervisor", "drain")
+    except Exception as exc:
+        logging.warning("Cannot nudge catchup drain: %s", exc)
+
+
+async def _check_local_server_recovery() -> None:
+    """Detect a recovered local server after supervisor-managed relaunch."""
+    if _is_remote_mode or not _recovery_state["llama_server_down"]:
+        return
+
+    port = read_service_port("local")
+    if port is None:
+        return
+
+    from solstone.think.providers import local_server
+
+    state, _ = await asyncio.to_thread(local_server._probe_health, port)
+    if state != local_server.STATE_READY:
+        return
+
+    _recovery_state["llama_server_down"] = False
+    _nudge_catchup_drain()
 
 
 def run_catchup_drain(
@@ -1843,6 +1882,7 @@ async def supervise(
             # Check for runner exits first (immediate alert)
             if procs:
                 await handle_runner_exits(procs)
+                await _check_local_server_recovery()
 
             # Emit status every 5 seconds
             now = time.time()
@@ -1906,9 +1946,9 @@ def parse_args() -> argparse.ArgumentParser:
         help="Do not start the Cortex server (run it manually for debugging)",
     )
     parser.add_argument(
-        "--no-link",
+        "--no-spl",
         action="store_true",
-        help="Do not start the link tunnel service",
+        help="Do not start the spl tunnel service",
     )
     parser.add_argument(
         "--no-convey",
@@ -2182,10 +2222,10 @@ def main() -> None:
         if not args.no_cortex:
             print("  Starting cortex...", flush=True)
             procs.append(start_cortex_server())
-        # Link tunnel service (opt-out via --no-link)
-        if not args.no_link:
-            print("  Starting link...", flush=True)
-            procs.append(start_link_server())
+        # spl tunnel service (opt-out via --no-spl)
+        if not args.no_spl:
+            print("  Starting spl...", flush=True)
+            procs.append(start_spl_service())
 
     # Make procs accessible to restart handler
     _managed_procs = procs
