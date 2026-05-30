@@ -190,6 +190,7 @@ def run_once(
     audio_fixture: str | None = None,
     prompt_override: str | None = None,
     max_output_tokens: int = _MAX_OUTPUT_TOKENS,
+    base_url: str | None = None,
 ) -> BenchmarkResult:
     """Send one benchmark request via the model's provider.
 
@@ -226,6 +227,7 @@ def run_once(
         audio_b64=audio_b64,
         audio_format=audio_format,
         max_output_tokens=max_output_tokens,
+        base_url=base_url,
     )
 
 

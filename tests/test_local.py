@@ -551,3 +551,47 @@ def test_local_server_connect_failed_health_raises_named_copy(monkeypatch):
 
     assert exc.value.reason_code == "local_model_not_ready"
     assert str(exc.value) == local_server.LOCAL_MODEL_NOT_READY_COPY
+
+
+def test_bench_run_once_standalone_base_url_skips_coercion(monkeypatch):
+    # Standalone mode (base_url given) benchmarks the candidate as itself — no
+    # normalize_model_id coercion to the served model, and no supervisor
+    # connect. This is what the head-to-head standalone harness relies on.
+    provider = _provider()
+
+    def _no_connect():
+        raise AssertionError("standalone mode must not connect to the supervisor")
+
+    monkeypatch.setattr("solstone.think.providers.local_server.connect", _no_connect)
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "model": "x",
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
+            }
+
+    def fake_post(url, json, timeout):
+        captured.update({"url": url, "json": json})
+        return Response()
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    provider.bench_run_once(
+        "local/qwen3.6-35b-a3b", prompt="hi", base_url="http://127.0.0.1:9999"
+    )
+
+    assert captured["url"] == "http://127.0.0.1:9999/v1/chat/completions"
+    # Model id is used verbatim, NOT coerced to LOCAL_MODEL.
+    assert captured["json"]["model"] == "local/qwen3.6-35b-a3b"

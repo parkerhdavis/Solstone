@@ -386,17 +386,21 @@ def bench_run_once(
     audio_b64: str | None = None,
     audio_format: str = "wav",
     max_output_tokens: int = 256,
+    base_url: str | None = None,
 ) -> BenchmarkResult:
-    """Send one benchmark request to the bundled llama-server; return a BenchmarkResult.
+    """Send one benchmark request to a bundled llama-server; return a BenchmarkResult.
 
-    Connect-only: this attaches to the supervisor-owned local daemon (it does
-    not spawn its own server), so the daemon must already be running. Pass
+    Default (``base_url=None``): connect-only — attaches to the supervisor-owned
+    daemon (which must already be running) and coerces the id to the served
+    ``LOCAL_MODEL`` via ``normalize_model_id``. Standalone (``base_url`` given):
+    POST to that server verbatim and use ``model`` as the id WITHOUT coercion, so
+    a non-served candidate is measured as itself (used by the head-to-head
+    standalone harness, which launches one llama-server per candidate). Pass
     ``image_b64`` to benchmark the vision path — the image is routed through the
-    same ``image_url`` content translation the production path uses (Nemotron
-    Omni + mmproj via ``run_generate``), so the measured prompt-eval cost
-    captures the image-encoder work. Audio is unsupported on the bundle:
-    llama-server rejects Nemotron audio input, so ``audio_b64`` raises and audio
-    runs through the Whisper STT pipeline instead. llama-server reports
+    same ``image_url`` content translation production uses, so the measured
+    prompt-eval cost captures the image-encoder work. Audio is unsupported on the
+    bundle: llama-server rejects Nemotron audio input, so ``audio_b64`` raises and
+    audio runs through the Whisper STT pipeline instead. llama-server reports
     per-request ``timings``, so native output/prompt tok/s are populated when
     present — the harness prefers these over the wall-clock-derived rate.
     """
@@ -416,7 +420,16 @@ def bench_run_once(
         )
     del audio_format
 
-    model_id = normalize_model_id(model)
+    # Standalone mode benchmarks the candidate as itself (no coercion, no
+    # supervisor connect); default mode coerces to LOCAL_MODEL and connects to
+    # the supervisor daemon.
+    if base_url is not None:
+        model_id = model
+        target_url = base_url
+    else:
+        model_id = normalize_model_id(model)
+        target_url = local_server.connect().base_url
+
     if image_b64 is not None:
         # Route the image through the same translation production uses: decode
         # the harness's base64 back to bytes so _build_messages -> _content_parts
@@ -424,7 +437,6 @@ def bench_run_once(
         messages = _build_messages([prompt, base64.b64decode(image_b64)], None)
     else:
         messages = _build_messages(prompt, None)
-    server = local_server.connect()
     body = _build_request_body(model_id, messages, 0.2, max_output_tokens, False, None)
     # Disable llama-server's prompt cache for benchmarking: the harness reuses
     # the same prompt across warmup + measured runs, and a cached prefix makes
@@ -433,9 +445,7 @@ def bench_run_once(
     body["cache_prompt"] = False
 
     start = time.perf_counter()
-    response = httpx.post(
-        f"{server.base_url}/v1/chat/completions", json=body, timeout=600.0
-    )
+    response = httpx.post(f"{target_url}/v1/chat/completions", json=body, timeout=600.0)
     elapsed = time.perf_counter() - start
     response.raise_for_status()
     raw = response.json()

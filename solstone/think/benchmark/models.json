@@ -13,7 +13,46 @@
       ],
       "vram_required_gb": 48,
       "notes": "SERVED model (think/models.py LOCAL_MODEL; serves all tiers via normalize_model_id). ~32B omni MoE, Q8_0 GGUF (~33.6 GB) plus its mmproj vision projector (~1.5 GB); min-RAM ~48 GiB, comfortable on the 128 GB Spark. Serves text/agentic cogitate and single-image vision (screen_frame). The omni audio/video modalities are unused on the bundle. Footprint is a spec estimate pending B3 measurement.",
-      "benchmarks": {}
+      "benchmarks": {
+        "dgx-spark": {
+          "output_tok_s": 59.8,
+          "prompt_tok_s": 469.1,
+          "measured_at": "2026-05-30",
+          "mode": "text_only",
+          "vision": {
+            "output_tok_s": 59.7,
+            "prompt_tok_s": 694.5,
+            "measured_at": "2026-05-30",
+            "mode": "vision"
+          },
+          "tasks": {
+            "chat_reply": {
+              "seconds": 1.67,
+              "prompt_tokens": 266,
+              "output_tokens": 82,
+              "measured_at": "2026-05-30"
+            },
+            "agent_turn": {
+              "seconds": 7.31,
+              "prompt_tokens": 710,
+              "output_tokens": 400,
+              "measured_at": "2026-05-30"
+            },
+            "entity_extraction": {
+              "seconds": 10.46,
+              "prompt_tokens": 771,
+              "output_tokens": 583,
+              "measured_at": "2026-05-30"
+            },
+            "screen_frame": {
+              "seconds": 1.63,
+              "prompt_tokens": 372,
+              "output_tokens": 65,
+              "measured_at": "2026-05-30"
+            }
+          }
+        }
+      }
     },
     "local/qwen3.5-4b": {
       "label": "Qwen3.5-4B (VLM)",
@@ -27,7 +66,46 @@
       ],
       "vram_required_gb": 8,
       "notes": "CANDIDATE (not served) -- upstream's bundled default local model. 4B vision VLM with mmproj-F16.gguf; the small-footprint baseline for the head-to-head. size_gb is upstream's published Q4_K_M figure; B3 re-measures at Q8 per the served-quant convention (Decision #13), which will revise it.",
-      "benchmarks": {}
+      "benchmarks": {
+        "dgx-spark": {
+          "output_tok_s": 47.1,
+          "prompt_tok_s": 1166.1,
+          "measured_at": "2026-05-30",
+          "mode": "text_only",
+          "vision": {
+            "output_tok_s": 47.2,
+            "prompt_tok_s": 1555.7,
+            "measured_at": "2026-05-30",
+            "mode": "vision"
+          },
+          "tasks": {
+            "chat_reply": {
+              "seconds": 2.03,
+              "prompt_tokens": 262,
+              "output_tokens": 90,
+              "measured_at": "2026-05-30"
+            },
+            "agent_turn": {
+              "seconds": 7.38,
+              "prompt_tokens": 713,
+              "output_tokens": 333,
+              "measured_at": "2026-05-30"
+            },
+            "entity_extraction": {
+              "seconds": 15.11,
+              "prompt_tokens": 779,
+              "output_tokens": 690,
+              "measured_at": "2026-05-30"
+            },
+            "screen_frame": {
+              "seconds": 1.75,
+              "prompt_tokens": 368,
+              "output_tokens": 71,
+              "measured_at": "2026-05-30"
+            }
+          }
+        }
+      }
     },
     "local/qwen3.6-35b-a3b": {
       "label": "Qwen3.6-35B-A3B (Q8_0)",
@@ -41,7 +119,46 @@
       ],
       "vram_required_gb": 48,
       "notes": "CANDIDATE (not served) -- gated in after confirming the unsloth GGUF ships a vision projector (mmproj-BF16/F16/F32.gguf). 35B MoE, ~3B active; Q8_0 GGUF (~36.9 GB) plus mmproj (~0.9 GB BF16). Built for Solstone's workload (agentic text + single-image vision); same family as the qwen baseline, so its chat template / tool-calling / enable_thinking are aligned. B3 must FIRST confirm the pinned llama.cpp b9291 build loads this Qwen2.5-VL-style ViT projector; if it cannot, this row competes text-only until the aarch64/sm_121 binary is rebuilt at a newer tag. Footprint is a spec estimate pending B3.",
-      "benchmarks": {}
+      "benchmarks": {
+        "dgx-spark": {
+          "output_tok_s": 58.4,
+          "prompt_tok_s": 528.4,
+          "measured_at": "2026-05-30",
+          "mode": "text_only",
+          "vision": {
+            "output_tok_s": 58.3,
+            "prompt_tok_s": 728.7,
+            "measured_at": "2026-05-30",
+            "mode": "vision"
+          },
+          "tasks": {
+            "chat_reply": {
+              "seconds": 1.4,
+              "prompt_tokens": 262,
+              "output_tokens": 66,
+              "measured_at": "2026-05-30"
+            },
+            "agent_turn": {
+              "seconds": 7.46,
+              "prompt_tokens": 713,
+              "output_tokens": 400,
+              "measured_at": "2026-05-30"
+            },
+            "entity_extraction": {
+              "seconds": 11.91,
+              "prompt_tokens": 779,
+              "output_tokens": 654,
+              "measured_at": "2026-05-30"
+            },
+            "screen_frame": {
+              "seconds": 1.86,
+              "prompt_tokens": 368,
+              "output_tokens": 78,
+              "measured_at": "2026-05-30"
+            }
+          }
+        }
+      }
     }
   }
 }
