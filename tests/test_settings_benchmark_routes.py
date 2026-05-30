@@ -112,6 +112,22 @@ class TestSegmentRoute:
         body = resp.get_json()
         assert body["transcriber"] == "whisper"
 
+    def test_carries_budget_and_group_fit(self, journal_copy):
+        client = _settings_client(journal_copy)
+        resp = client.get("/app/settings/api/benchmark/segment")
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert "budget_gb" in body
+        assert "group_fit" in body
+        for key in ("budget_gb", "footprint_gb", "fits", "per_model_gb", "notes"):
+            assert key in body["group_fit"]
+
+    def test_rejects_invalid_budget(self, journal_copy):
+        client = _settings_client(journal_copy)
+        resp = client.get("/app/settings/api/benchmark/segment?budget=not-a-number")
+        assert resp.status_code == 400
+        assert "error" in resp.get_json()
+
 
 # ---------------------------------------------------------------------------
 # /api/benchmark/models

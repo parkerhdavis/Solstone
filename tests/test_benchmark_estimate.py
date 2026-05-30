@@ -408,3 +408,89 @@ class TestRegistryIntegrity:
             assert caps <= allowed, (
                 f"{mid} has unexpected capabilities {caps - allowed}"
             )
+
+
+class TestMemoryBudget:
+    def test_unified_default_reserves_os_headroom(self):
+        hw = {
+            "gpus": [{"name": "NVIDIA DGX Spark", "unified_memory": True}],
+            "ram_gb": 128.0,
+        }
+        assert est_mod.resolve_memory_budget_gb(hw) == 120.0  # 128 - 8 OS reserve
+
+    def test_explicit_budget_overrides_and_clamps_to_total(self):
+        hw = {
+            "gpus": [{"name": "NVIDIA DGX Spark", "unified_memory": True}],
+            "ram_gb": 128.0,
+        }
+        assert est_mod.resolve_memory_budget_gb(hw, 64) == 64.0
+        assert est_mod.resolve_memory_budget_gb(hw, 999) == 128.0
+
+    def test_discrete_gpu_uses_full_vram(self):
+        hw = {"gpus": [{"name": "NVIDIA GeForce RTX 4090", "vram_gb": 24}]}
+        assert est_mod.resolve_memory_budget_gb(hw) == 24.0
+
+    def test_unprobed_host_has_no_budget(self):
+        assert est_mod.resolve_memory_budget_gb(None) is None
+
+    def test_budget_gates_fits_in_vram(self):
+        # huge-vision:72b needs 44 GB. At a 40 GB budget it no longer fits even
+        # on a 128 GB machine -- the budget, not raw memory, is the ceiling.
+        hw = {
+            "gpus": [{"name": "NVIDIA DGX Spark", "unified_memory": True}],
+            "ram_gb": 128.0,
+        }
+        rows = list_prevetted_models(hw, budget_gb=40.0)
+        by_id = {r["model_id"]: r for r in rows}
+        assert by_id["local/huge-vision:72b"]["fits_in_vram"] is False
+        assert by_id["local/measured-model:1b"]["fits_in_vram"] is True
+
+
+class TestGroupFit:
+    _SEGMENTS = {
+        "scenarios": {
+            "solo_active": {
+                "audio_minutes": 5,
+                "qualified_frames": 3,
+                "fixed_overhead_s": 3.0,
+                "talents": [
+                    {"task_id": "chat_reply", "count": 1},  # tier_role cogitate
+                    {"task_id": "screen_frame", "count": 1},  # tier_role vision
+                ],
+            }
+        }
+    }
+
+    def test_distinct_models_counted_once(self, monkeypatch):
+        monkeypatch.setattr(est_mod, "load_segments", lambda: self._SEGMENTS)
+        # Both live roles map to the same model -> footprint counts it once.
+        tier_models = {
+            "vision": "local/measured-model:1b",
+            "cogitate": "local/measured-model:1b",
+        }
+        g = est_mod.estimate_group_fit(tier_models, "solo_active", budget_gb=10.0)
+        assert g.per_model_gb == {"local/measured-model:1b": 2.0}
+        assert g.footprint_gb == 2.0
+        assert g.fits is True
+
+    def test_distinct_models_sum_and_over_budget(self, monkeypatch):
+        monkeypatch.setattr(est_mod, "load_segments", lambda: self._SEGMENTS)
+        tier_models = {
+            "vision": "local/huge-vision:72b",  # 44 GB
+            "cogitate": "local/measured-model:1b",  # 2 GB
+        }
+        g = est_mod.estimate_group_fit(tier_models, "solo_active", budget_gb=40.0)
+        assert g.footprint_gb == 46.0
+        assert g.fits is False
+
+    def test_no_budget_yields_fits_none(self, monkeypatch):
+        monkeypatch.setattr(est_mod, "load_segments", lambda: self._SEGMENTS)
+        g = est_mod.estimate_group_fit(
+            {
+                "vision": "local/measured-model:1b",
+                "cogitate": "local/measured-model:1b",
+            },
+            "solo_active",
+            budget_gb=None,
+        )
+        assert g.fits is None

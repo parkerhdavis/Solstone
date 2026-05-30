@@ -1138,16 +1138,24 @@ def get_benchmark_segment() -> Any:
         STT backend for the audio lane. Defaults to
         ``transcribe.backend`` from journal config (typically
         ``parakeet`` or ``whisper``).
+    budget : float, optional
+        Memory budget in GB Solstone may use on this host. Defaults to
+        the host default (full machine minus a small OS reserve on
+        unified-memory hosts). Drives ``group_fit``.
 
     Response shape mirrors ``SegmentEstimate`` plus the resolved
-    ``tier_models``, ``transcriber``, and ``hardware_class`` so the UI
-    knows exactly what was estimated.
+    ``tier_models``, ``transcriber``, ``hardware_class``, the resolved
+    ``budget_gb``, and a ``group_fit`` block (whether the segment's whole
+    active model group co-resident fits the budget) so the UI knows exactly
+    what was estimated.
     """
     try:
         from solstone.think.benchmark import (
+            estimate_group_fit,
             estimate_segment_time_s,
             load_registry,
             load_segments,
+            resolve_memory_budget_gb,
         )
         from solstone.think.benchmark.estimate import (
             _pick_default_tier_models,
@@ -1178,9 +1186,19 @@ def get_benchmark_segment() -> Any:
 
     transcriber = request.args.get("transcriber") or _configured_transcriber()
 
+    budget_arg = request.args.get("budget")
+    budget_override: float | None = None
+    if budget_arg:
+        try:
+            budget_override = float(budget_arg)
+        except ValueError:
+            return jsonify({"error": f"invalid budget: {budget_arg!r}"}), 400
+    budget_gb = resolve_memory_budget_gb(hardware, budget_override)
+
     est = estimate_segment_time_s(
         tier_models, hardware_class, scenario, transcriber=transcriber
     )
+    group = estimate_group_fit(tier_models, scenario, budget_gb=budget_gb)
 
     return jsonify(
         {
@@ -1188,6 +1206,7 @@ def get_benchmark_segment() -> Any:
             "hardware_class": est.hardware_class,
             "transcriber": transcriber,
             "tier_models": tier_models,
+            "budget_gb": budget_gb,
             "total_seconds": est.total_seconds,
             "audio_seconds": est.audio_seconds,
             "video_seconds": est.video_seconds,
@@ -1196,6 +1215,13 @@ def get_benchmark_segment() -> Any:
             "per_talent": est.per_talent,
             "confidence": est.confidence,
             "notes": list(est.notes),
+            "group_fit": {
+                "budget_gb": group.budget_gb,
+                "footprint_gb": group.footprint_gb,
+                "fits": group.fits,
+                "per_model_gb": group.per_model_gb,
+                "notes": list(group.notes),
+            },
         }
     )
 

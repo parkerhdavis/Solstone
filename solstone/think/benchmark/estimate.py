@@ -29,6 +29,12 @@ _TASKS_FILE = _DATA_DIR / "tasks.json"
 _SEGMENTS_FILE = _DATA_DIR / "segment.json"
 _TRANSCRIBERS_FILE = _DATA_DIR / "transcribers.json"
 
+# Default OS/headroom reserve on unified-memory hosts (Spark/Jetson), where the
+# GPU shares system RAM. The resource budget (resolve_memory_budget_gb) defaults
+# to total RAM minus this reserve; an explicit operator budget overrides it. This
+# replaces the formerly-hardcoded 8 GB inline in _user_hardware.
+_DEFAULT_OS_RESERVE_GB = 8.0
+
 
 Confidence = Literal["measured", "interpolated", "unknown"]
 
@@ -77,6 +83,26 @@ class SegmentEstimate:
     overhead_seconds: float
     per_talent: dict[str, float]
     confidence: Confidence
+    notes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class GroupFit:
+    """Whether the model GROUP for one segment co-resident fits a memory budget.
+
+    Solstone runs several models concurrently across modalities per segment
+    (frame-describe + the per-segment talents — STT runs separately). A model
+    loaded once serves every tier_role it fills, so ``footprint_gb`` sums each
+    *distinct* active model's ``vram_required_gb`` once. ``fits`` is None when no
+    budget is resolvable (e.g. cpu-only / un-probed host). The STT backend's
+    footprint is not folded in (``transcribers.json`` tracks RTF, not size) —
+    called out in ``notes`` rather than silently dropped.
+    """
+
+    budget_gb: float | None
+    footprint_gb: float
+    fits: bool | None
+    per_model_gb: dict[str, float]
     notes: tuple[str, ...]
 
 
@@ -588,6 +614,59 @@ def estimate_segment_time_s(
     )
 
 
+def estimate_group_fit(
+    tier_models: dict[str, str],
+    scenario: str = "solo_active",
+    *,
+    budget_gb: float | None = None,
+) -> GroupFit:
+    """Estimate whether the segment's active model group fits ``budget_gb``.
+
+    The active group is the set of *distinct* models ``tier_models`` maps the
+    scenario's live lanes to — the vision model (when the scenario describes
+    frames) plus the model behind each per-segment talent's ``tier_role``. A
+    model that fills several roles (e.g. the single served local model) counts
+    once. Footprint is each distinct model's ``vram_required_gb`` from the
+    registry; ``budget_gb`` is the resolved resource budget (see
+    ``resolve_memory_budget_gb``).
+    """
+    spec = load_segments().get("scenarios", {}).get(scenario) or {}
+    tasks_catalog = load_tasks().get("tasks", {})
+    registry_models = load_registry().get("models", {})
+
+    active: set[str] = set()
+    if int(spec.get("qualified_frames") or 0) > 0:
+        vision_model = tier_models.get("vision")
+        if vision_model:
+            active.add(vision_model)
+    for entry in spec.get("talents", []) or []:
+        task_spec = tasks_catalog.get(entry.get("task_id")) or {}
+        model_id = tier_models.get(task_spec.get("tier_role"))
+        if model_id:
+            active.add(model_id)
+
+    per_model_gb = {
+        model_id: float(
+            registry_models.get(model_id, {}).get("vram_required_gb") or 0.0
+        )
+        for model_id in sorted(active)
+    }
+    footprint_gb = round(sum(per_model_gb.values()), 1)
+    fits = None if budget_gb is None else footprint_gb <= budget_gb
+    return GroupFit(
+        budget_gb=budget_gb,
+        footprint_gb=footprint_gb,
+        fits=fits,
+        per_model_gb=per_model_gb,
+        notes=(
+            "footprint sums distinct active-group models' vram_required_gb "
+            "(a model loaded once serves every tier_role it fills); the STT "
+            "backend footprint is not included (transcribers.json tracks RTF, "
+            "not size)",
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Registry listing
 # ---------------------------------------------------------------------------
@@ -623,12 +702,20 @@ def list_prevetted_models(
     *,
     scenario: str = "solo_active",
     transcriber: str | None = None,
+    budget_gb: float | None = None,
 ) -> list[dict[str, Any]]:
-    """Return each pre-vetted model with estimates + VRAM fit flag.
+    """Return each pre-vetted model with estimates + budget fit flags.
 
     Each row carries the raw ``estimate`` (output tok/s), the
     per-task ``tasks`` dict (see ``estimate_task_time_s``), **and** a
-    ``segment_estimate`` populated by ``estimate_segment_time_s``.
+    ``segment_estimate`` populated by ``estimate_segment_time_s`` — which now
+    also carries a ``group_fit`` block (see ``estimate_group_fit``): whether the
+    segment's whole active model group co-resident fits the resolved budget.
+
+    ``budget_gb`` is the resource budget Solstone may use on this host (see
+    ``resolve_memory_budget_gb``); ``None`` uses the host default. Both the
+    per-row ``fits_in_vram`` flag and the segment ``group_fit`` are evaluated
+    against it.
 
     The segment estimate uses the row's own model for whichever tier
     roles it can serve (``vision`` / ``generate`` / ``cogitate``) and
@@ -643,7 +730,7 @@ def list_prevetted_models(
     leave the audio lane unmeasured (downgrades segment confidence to
     ``unknown``).
     """
-    hardware_class, user_vram_gb = _user_hardware(hardware)
+    hardware_class, user_budget_gb = _user_hardware(hardware, budget_gb)
     registry = load_registry()
     tasks = load_tasks().get("tasks", {})
     default_tier_models = _pick_default_tier_models(registry)
@@ -679,6 +766,7 @@ def list_prevetted_models(
         seg = estimate_segment_time_s(
             tier_models, hardware_class, scenario, transcriber=transcriber
         )
+        group = estimate_group_fit(tier_models, scenario, budget_gb=user_budget_gb)
 
         rows.append(
             {
@@ -692,7 +780,9 @@ def list_prevetted_models(
                 "size_gb": spec.get("size_gb"),
                 "capabilities": capabilities,
                 "vram_required_gb": vram_required,
-                "fits_in_vram": (user_vram_gb is None or user_vram_gb >= vram_required),
+                "fits_in_vram": (
+                    user_budget_gb is None or user_budget_gb >= vram_required
+                ),
                 "notes": spec.get("notes"),
                 "estimate": {
                     "tok_s": estimate.tok_s,
@@ -712,6 +802,13 @@ def list_prevetted_models(
                     "tier_models": tier_models,
                     "self_attributed_tiers": self_attributed,
                     "notes": list(seg.notes),
+                    "group_fit": {
+                        "budget_gb": group.budget_gb,
+                        "footprint_gb": group.footprint_gb,
+                        "fits": group.fits,
+                        "per_model_gb": group.per_model_gb,
+                        "notes": list(group.notes),
+                    },
                 },
             }
         )
@@ -734,28 +831,64 @@ def _task_applies_to_model(task_spec: dict[str, Any], capabilities: list[str]) -
     return any(cap in ("generate", "cogitate") for cap in capabilities)
 
 
-def _user_hardware(
+def _machine_memory(
     hardware: dict[str, Any] | None,
-) -> tuple[str, float | None]:
-    """Resolve (hardware_class, effective_vram_gb) from a probe payload.
+) -> tuple[str, float | None, bool]:
+    """Resolve (hardware_class, total_usable_memory_gb, is_unified).
 
-    On unified-memory systems (Spark, Jetson) the GPU reports no discrete
-    VRAM; effective VRAM for fit checks is the system RAM.
+    ``total_usable_memory_gb`` is system RAM on unified-memory hosts (Spark,
+    Jetson — the GPU shares RAM and reports no discrete VRAM) or summed discrete
+    VRAM otherwise. ``None`` means an un-probed host or cpu-only with no GPU.
     """
     if not hardware:
-        return "cpu-only", None
+        return "cpu-only", None, False
     gpus = hardware.get("gpus") or []
     if not gpus:
-        return "cpu-only", 0.0
-    primary = gpus[0]
-    hardware_class = resolve_hardware_class(primary.get("name"))
-
-    has_unified = any(g.get("unified_memory") for g in gpus)
-    if has_unified:
-        # Use system RAM as the memory ceiling; keep a small reserve for the OS.
+        return "cpu-only", 0.0, False
+    hardware_class = resolve_hardware_class(gpus[0].get("name"))
+    if any(g.get("unified_memory") for g in gpus):
         ram_gb = float(hardware.get("ram_gb") or 0)
-        effective_vram = max(ram_gb - 8.0, 0.0) if ram_gb else None
-        return hardware_class, effective_vram
-
+        return hardware_class, (ram_gb if ram_gb else None), True
     total_vram = sum(float(g.get("vram_gb") or 0) for g in gpus)
-    return hardware_class, total_vram
+    return hardware_class, total_vram, False
+
+
+def resolve_memory_budget_gb(
+    hardware: dict[str, Any] | None,
+    budget_gb: float | None = None,
+) -> float | None:
+    """How much memory Solstone may use on this host — the first-class budget.
+
+    ``budget_gb`` is an explicit operator cap ("how much of this machine to give
+    the service"), clamped to the machine total. When ``None``, the default
+    budget is the full machine minus a small OS reserve on unified-memory hosts
+    (``_DEFAULT_OS_RESERVE_GB``), or the full discrete VRAM otherwise. Returns
+    ``None`` when no memory is resolvable (un-probed / cpu-only-no-GPU host),
+    the "ceiling unknown" sentinel fit checks already understand.
+    """
+    _, total, is_unified = _machine_memory(hardware)
+    if budget_gb is not None:
+        capped = float(budget_gb)
+        if total is not None:
+            capped = min(capped, total)
+        return max(capped, 0.0)
+    if total is None:
+        return None
+    if is_unified:
+        return max(total - _DEFAULT_OS_RESERVE_GB, 0.0)
+    return total
+
+
+def _user_hardware(
+    hardware: dict[str, Any] | None,
+    budget_gb: float | None = None,
+) -> tuple[str, float | None]:
+    """Resolve (hardware_class, memory_budget_gb) from a probe payload.
+
+    The second element is the memory ceiling used for fit checks — Solstone's
+    resolved resource budget for this host (see ``resolve_memory_budget_gb``),
+    not the raw machine total. ``budget_gb`` threads an explicit operator cap
+    through; ``None`` uses the host default.
+    """
+    hardware_class, _, _ = _machine_memory(hardware)
+    return hardware_class, resolve_memory_budget_gb(hardware, budget_gb)

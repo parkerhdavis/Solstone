@@ -25,6 +25,7 @@ from typing import Any
 import typer
 
 from solstone.think.benchmark import (
+    estimate_group_fit,
     estimate_output_tok_s,
     estimate_segment_time_s,
     estimate_task_time_s,
@@ -33,6 +34,7 @@ from solstone.think.benchmark import (
     load_segments,
     load_tasks,
     resolve_hardware_class,
+    resolve_memory_budget_gb,
 )
 from solstone.think.hardware import load_hardware, probe_hardware
 
@@ -412,6 +414,15 @@ def segment(
             "the user's journal config."
         ),
     ),
+    budget: float | None = typer.Option(
+        None,
+        "--budget",
+        help=(
+            "Memory budget in GB Solstone may use on this host (drives the "
+            "group-fit check). Defaults to the host default: full machine minus "
+            "a small OS reserve on unified-memory hosts, full VRAM otherwise."
+        ),
+    ),
     json: bool = typer.Option(False, "--json", help="Emit JSON instead of text."),
 ) -> None:
     """Estimate wall-clock seconds to fully process one 5-minute segment.
@@ -419,7 +430,9 @@ def segment(
     Headline semantic benchmark — decomposes into audio (transcriber
     RTF), video (screen-frame × qualified_frames), and per-segment
     talents. Pass one model per tier the scenario actually uses;
-    missing tiers are flagged in the notes.
+    missing tiers are flagged in the notes. The ``group_fit`` block reports
+    whether the distinct models in the active group co-resident fit the memory
+    budget (a model loaded once serves every tier it fills).
     """
     hardware = load_hardware()
     if hardware is None:
@@ -442,6 +455,8 @@ def segment(
     est = estimate_segment_time_s(
         tier_models, hardware_class, scenario, transcriber=resolved_transcriber
     )
+    budget_gb = resolve_memory_budget_gb(hardware, budget)
+    group = estimate_group_fit(tier_models, scenario, budget_gb=budget_gb)
 
     if json:
         typer.echo(
@@ -459,6 +474,14 @@ def segment(
                     "notes": list(est.notes),
                     "tier_models": tier_models,
                     "transcriber": resolved_transcriber,
+                    "budget_gb": budget_gb,
+                    "group_fit": {
+                        "budget_gb": group.budget_gb,
+                        "footprint_gb": group.footprint_gb,
+                        "fits": group.fits,
+                        "per_model_gb": group.per_model_gb,
+                        "notes": list(group.notes),
+                    },
                 },
                 indent=2,
             )
@@ -479,6 +502,16 @@ def segment(
     typer.echo(f"  Video frames:   {_format_lane(est.video_seconds)}")
     typer.echo(f"  Talents:        {_format_lane(est.talent_seconds)}")
     typer.echo(f"  Overhead:       {_format_seconds(est.overhead_seconds)}")
+    typer.echo("")
+    if group.fits is None:
+        fit_str = "budget unknown (host not probed)"
+    else:
+        fit_str = "fits" if group.fits else "OVER budget"
+    budget_str = "?" if group.budget_gb is None else f"{group.budget_gb:.0f} GB"
+    typer.echo(
+        f"  Group footprint: {group.footprint_gb:.1f} GB / {budget_str} budget "
+        f"({fit_str})"
+    )
     if est.per_talent:
         typer.echo("")
         typer.echo("  Per talent:")
