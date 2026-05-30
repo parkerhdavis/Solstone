@@ -189,6 +189,79 @@ def test_run_generate_emits_chat_completions_image_url(monkeypatch):
     ]
 
 
+def test_bench_run_once_rejects_audio():
+    # Audio is unsupported on the bundle (llama-server rejects Nemotron audio
+    # input), so the benchmark path raises before touching the server.
+    provider = _provider()
+    with pytest.raises(provider.LocalProviderError) as excinfo:
+        provider.bench_run_once(LOCAL_MODEL, prompt="hi", audio_b64="AAAA")
+    assert "audio" in str(excinfo.value).lower()
+
+
+def test_bench_run_once_emits_image_url(monkeypatch):
+    # The vision benchmark path routes image_b64 through the same image_url
+    # content translation the production path uses, so the measured prompt-eval
+    # captures the image-encoder cost.
+    provider = _provider()
+    monkeypatch.setattr(
+        "solstone.think.providers.local_server.connect",
+        lambda: SimpleNamespace(port=4321, base_url="http://127.0.0.1:4321"),
+    )
+    png = b"\x89PNG\r\n\x1a\npayload"
+    image_b64 = base64.b64encode(png).decode("ascii")
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "model": LOCAL_MODEL,
+                "choices": [
+                    {"message": {"content": "a screenshot"}, "finish_reason": "stop"}
+                ],
+                "usage": {
+                    "prompt_tokens": 50,
+                    "completion_tokens": 8,
+                    "total_tokens": 58,
+                },
+                "timings": {"predicted_per_second": 12.5, "prompt_per_second": 800.0},
+            }
+
+    def fake_post(url, json, timeout):
+        captured.update({"url": url, "json": json})
+        return Response()
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    result = provider.bench_run_once(
+        LOCAL_MODEL, prompt="describe this screen", image_b64=image_b64
+    )
+
+    assert captured["json"]["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "describe this screen"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64," + image_b64},
+                },
+            ],
+        }
+    ]
+    # Benchmarking disables the server prompt cache so prompt-eval timing is honest.
+    assert captured["json"]["cache_prompt"] is False
+    # Native per-request timings are surfaced for the harness to prefer.
+    assert result["native_output_tok_s"] == 12.5
+    assert result["native_prompt_tok_s"] == 800.0
+    assert result["prompt_tokens"] == 50
+    assert result["output_tokens"] == 8
+
+
 def test_openhands_local_llm_kwargs(monkeypatch):
     from solstone.think.providers import openhands
 

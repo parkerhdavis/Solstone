@@ -390,31 +390,40 @@ def bench_run_once(
     """Send one benchmark request to the bundled llama-server; return a BenchmarkResult.
 
     Connect-only: this attaches to the supervisor-owned local daemon (it does
-    not spawn its own server), so the daemon must be running. Production image
-    input works through ``run_generate`` (Nemotron Omni + mmproj), but the
-    benchmark harness's image/audio measurement path is not wired yet — see
-    docs/FORK.md follow-ups — so image/audio benchmark args raise here for now.
-    Audio never benchmarks on the bundle: llama-server rejects Nemotron audio
-    input, so audio runs through the Whisper STT pipeline. llama-server reports
+    not spawn its own server), so the daemon must already be running. Pass
+    ``image_b64`` to benchmark the vision path — the image is routed through the
+    same ``image_url`` content translation the production path uses (Nemotron
+    Omni + mmproj via ``run_generate``), so the measured prompt-eval cost
+    captures the image-encoder work. Audio is unsupported on the bundle:
+    llama-server rejects Nemotron audio input, so ``audio_b64`` raises and audio
+    runs through the Whisper STT pipeline instead. llama-server reports
     per-request ``timings``, so native output/prompt tok/s are populated when
     present — the harness prefers these over the wall-clock-derived rate.
     """
+    import base64
     import time
 
     import httpx
 
     from solstone.think.providers import local_server
 
-    if image_b64 is not None or audio_b64 is not None:
+    if audio_b64 is not None:
         raise LocalProviderError(
             "unsupported_capability",
-            "Image/audio benchmarking is not wired through the harness yet; "
-            "text-only benchmark requests are supported.",
+            "Audio benchmarking is unsupported on the bundle: llama-server "
+            "rejects Nemotron audio input, so audio runs through the Whisper STT "
+            "pipeline. Text and image benchmark requests are supported.",
         )
     del audio_format
 
     model_id = normalize_model_id(model)
-    messages = _build_messages(prompt, None)
+    if image_b64 is not None:
+        # Route the image through the same translation production uses: decode
+        # the harness's base64 back to bytes so _build_messages -> _content_parts
+        # emits an identical image_url data-URL part (capturing encoder cost).
+        messages = _build_messages([prompt, base64.b64decode(image_b64)], None)
+    else:
+        messages = _build_messages(prompt, None)
     server = local_server.connect()
     body = _build_request_body(model_id, messages, 0.2, max_output_tokens, False, None)
     # Disable llama-server's prompt cache for benchmarking: the harness reuses
