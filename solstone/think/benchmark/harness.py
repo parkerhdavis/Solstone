@@ -33,12 +33,12 @@ Three modes:
 Usage::
 
     # Synthetic tok/s benchmark (bundled llama-server; --pull to fetch the GGUF)
-    python -m solstone.think.benchmark.harness --model local/nemotron-3-nano-omni \\
+    python -m solstone.think.benchmark.harness --model local/qwen3.6-35b-a3b \\
         --class dgx-spark --pull
 
     # Task-time benchmark (vision flag auto-applied when task.mode=vision, so
     # this measures the mmproj image-encoder cost via the production image path)
-    python -m solstone.think.benchmark.harness --model local/nemotron-3-nano-omni \\
+    python -m solstone.think.benchmark.harness --model local/qwen3.6-35b-a3b \\
         --class dgx-spark --task screen_frame
 
     # Transcriber RTF (point at any mono 16kHz audio file)

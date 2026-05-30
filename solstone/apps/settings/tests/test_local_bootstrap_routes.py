@@ -135,7 +135,7 @@ def test_local_models_route_returns_settings_shape(settings_env):
     assert response.get_json() == [
         {
             "name": LOCAL_MODEL,
-            "label": "nemotron 3 nano omni VLM — 48 GB",
+            "label": "qwen3.6 35B-A3B VLM — 48 GB",
             "min_ram_gb": 48,
             "size_bytes": LOCAL_MODEL_SPECS[LOCAL_MODEL].size_bytes,
         },

@@ -34,18 +34,18 @@ def test_local_model_specs():
 
     assert set(provider.LOCAL_MODEL_SPECS) == {LOCAL_MODEL}
     spec = provider.LOCAL_MODEL_SPECS[LOCAL_MODEL]
-    # Fork: the single bundled model is vision-capable Nemotron Omni (mmproj),
-    # not upstream's qwen3.5-4b VLM. See docs/FORK.md "Local vision".
-    assert spec.repo == "ggml-org/NVIDIA-Nemotron-3-Nano-Omni"
+    # Fork: the single bundled model is the vision-capable Qwen3.6-35B-A3B VLM
+    # (mmproj), chosen over Nemotron Omni by the B3 head-to-head. See docs/FORK.md.
+    assert spec.repo == "unsloth/Qwen3.6-35B-A3B-GGUF"
     assert (
         spec.sha256
-        == "98e5cbdb3cb9bd172ddfeb164edb3fea049364750eea2fc20d1011e640748571"
+        == "d1a395809f65a43a13ad119eb4e7acdef1ac6d68120f39902c8ab96e72794a59"
     )
     assert spec.min_ram_bytes == 48 * 1024**3
-    assert spec.mmproj_filename == "mmproj-nemotron-3-nano-omni-ga_v1.0.gguf"
+    assert spec.mmproj_filename == "mmproj-BF16.gguf"
     assert (
         spec.mmproj_sha256
-        == "797d096c07c80a5d49ec3793b6d96889fa394a1207e0aa558effebde6928c2a9"
+        == "356dfaa3111376a4f7165e32e8749713378d1700b37cf52e0c50d9f23322334d"
     )
 
 
@@ -188,7 +188,7 @@ def test_run_generate_emits_chat_completions_image_url(monkeypatch):
 
 
 def test_bench_run_once_rejects_audio():
-    # Audio is unsupported on the bundle (llama-server rejects Nemotron audio
+    # Audio is unsupported on the bundle (llama-server serves no audio
     # input), so the benchmark path raises before touching the server.
     provider = _provider()
     with pytest.raises(provider.LocalProviderError) as excinfo:

@@ -261,9 +261,7 @@ def _format_seconds(seconds: float) -> str:
 
 @app.command("estimate")
 def estimate(
-    model_id: str = typer.Argument(
-        ..., help="Model ID, e.g. local/nemotron-3-nano-omni"
-    ),
+    model_id: str = typer.Argument(..., help="Model ID, e.g. local/qwen3.6-35b-a3b"),
     task: str | None = typer.Option(
         None,
         "--task",

@@ -386,7 +386,7 @@ python -m solstone.think.benchmark.harness --model local/qwen2.5-coder-7b \
 
 # Vision-language models (add --vision so prompt-eval captures the
 # image-encoder cost, not just text tokens)
-python -m solstone.think.benchmark.harness --model local/nemotron-3-nano-omni \
+python -m solstone.think.benchmark.harness --model local/qwen3.6-35b-a3b \
     --class rtx-4090 --vision
 ```
 

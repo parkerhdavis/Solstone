@@ -5197,7 +5197,7 @@ const MLX_MODEL_LABELS = {
 };
 const LOCAL_SCOPE_COPY = 'on-device generate and cogitate using bundled llama-server.';
 const LOCAL_MODEL_LABELS = {
-  'local/nemotron-3-nano-omni': 'nemotron 3 nano omni VLM — 48 GB',
+  'local/qwen3.6-35b-a3b': 'qwen3.6 35B-A3B VLM — 48 GB',
 };
 
 async function loadProviders() {
@@ -5480,7 +5480,7 @@ function populateLocalModelPicker(data) {
     opt.textContent = LOCAL_MODEL_LABELS[model.name] || model.label || model.name;
     select.appendChild(opt);
   }
-  const active = data.local_availability?.model || 'local/nemotron-3-nano-omni';
+  const active = data.local_availability?.model || 'local/qwen3.6-35b-a3b';
   select.value = active;
 }
 
@@ -5888,7 +5888,7 @@ function getSelectedMlxModel() {
 
 function getSelectedLocalModel() {
   const select = document.getElementById('field-local-active-model');
-  return select?.value || providersData?.local_availability?.model || 'local/nemotron-3-nano-omni';
+  return select?.value || providersData?.local_availability?.model || 'local/qwen3.6-35b-a3b';
 }
 
 function formatMlxBytes(value) {

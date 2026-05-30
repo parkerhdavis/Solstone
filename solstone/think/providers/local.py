@@ -44,25 +44,27 @@ class LocalModelSpec:
     mmproj_sha256: str | None = None
 
 
-# Fork: the single bundled local model is NVIDIA Nemotron 3 Nano Omni (Q8_0),
-# a vision-capable omni model, paired with its mmproj projector. Upstream ships
-# a text-only qwen2.5-coder here; the fork leans into local vision so the one
-# always-on local daemon serves both text/agentic cogitate AND image input.
-# Audio is NOT wired: llama-server (b9291) rejects Nemotron audio input ("audio
-# input is not supported"), so audio stays on the Whisper STT pipeline. The
-# supervisor passes --mmproj at launch when the spec carries one (upstream
-# machinery, unchanged). See docs/FORK.md "Local vision".
+# Fork: the single bundled local model is Qwen3.6-35B-A3B (Q8_0), a vision VLM
+# (35B MoE, ~3B active) paired with its mmproj projector. Upstream ships a
+# smaller qwen3.5-4b VLM here; the fork serves this heavier same-family model,
+# chosen over NVIDIA Nemotron 3 Nano Omni by the Spark head-to-head (equal tok/s
+# + footprint, stronger agentic/vision quality, and it sheds the unused omni
+# audio/video modalities — see docs/FORK.md). The one always-on local daemon
+# serves both text/agentic cogitate AND image input. Audio is NOT wired: the
+# bundle does not serve audio input through llama-server (b9291), so audio stays
+# on the Whisper STT pipeline. The supervisor passes --mmproj at launch when the
+# spec carries one (upstream machinery, unchanged).
 LOCAL_MODEL_SPECS: dict[str, LocalModelSpec] = {
     LOCAL_MODEL: LocalModelSpec(
         model_id=LOCAL_MODEL,
-        repo="ggml-org/NVIDIA-Nemotron-3-Nano-Omni",
-        filename="nemotron-3-nano-omni-ga_v1.0-Q8_0.gguf",
+        repo="unsloth/Qwen3.6-35B-A3B-GGUF",
+        filename="Qwen3.6-35B-A3B-Q8_0.gguf",
         revision="main",
-        sha256="98e5cbdb3cb9bd172ddfeb164edb3fea049364750eea2fc20d1011e640748571",
-        size_bytes=33_585_495_872,
+        sha256="d1a395809f65a43a13ad119eb4e7acdef1ac6d68120f39902c8ab96e72794a59",
+        size_bytes=36_903_140_320,
         min_ram_bytes=48 * 1024**3,
-        mmproj_filename="mmproj-nemotron-3-nano-omni-ga_v1.0.gguf",
-        mmproj_sha256="797d096c07c80a5d49ec3793b6d96889fa394a1207e0aa558effebde6928c2a9",
+        mmproj_filename="mmproj-BF16.gguf",
+        mmproj_sha256="356dfaa3111376a4f7165e32e8749713378d1700b37cf52e0c50d9f23322334d",
     ),
 }
 
@@ -399,7 +401,7 @@ def bench_run_once(
     ``image_b64`` to benchmark the vision path — the image is routed through the
     same ``image_url`` content translation production uses, so the measured
     prompt-eval cost captures the image-encoder work. Audio is unsupported on the
-    bundle: llama-server rejects Nemotron audio input, so ``audio_b64`` raises and
+    bundle: llama-server does not serve audio input, so ``audio_b64`` raises and
     audio runs through the Whisper STT pipeline instead. llama-server reports
     per-request ``timings``, so native output/prompt tok/s are populated when
     present — the harness prefers these over the wall-clock-derived rate.
@@ -415,7 +417,7 @@ def bench_run_once(
         raise LocalProviderError(
             "unsupported_capability",
             "Audio benchmarking is unsupported on the bundle: llama-server "
-            "rejects Nemotron audio input, so audio runs through the Whisper STT "
+            "does not serve audio input, so audio runs through the Whisper STT "
             "pipeline. Text and image benchmark requests are supported.",
         )
     del audio_format
