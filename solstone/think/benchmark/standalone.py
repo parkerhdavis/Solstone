@@ -25,7 +25,7 @@ Launching the server with ``--mmproj`` and waiting for ``/health`` is also the
 projector, the server exits during load and that surfaces here as a startup
 error.
 
-Stop the supervisor daemon first (``sol supervisor`` / ``sol up``) so this
+Stop the supervisor daemon first (``journal supervisor`` / ``journal up``) so this
 server has the GPU to itself; otherwise the two contend for memory.
 
 Usage::

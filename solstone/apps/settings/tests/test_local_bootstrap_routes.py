@@ -95,7 +95,7 @@ def test_local_availability_payload_exact_shape(settings_env, monkeypatch):
     monkeypatch.setattr(
         local_bootstrap.psutil,
         "virtual_memory",
-        lambda: type("VMem", (), {"total": 32 * 1024**3})(),
+        lambda: type("VMem", (), {"total": 128 * 1024**3})(),
     )
     client = _client(journal_path)
 
@@ -116,8 +116,8 @@ def test_local_availability_payload_exact_shape(settings_env, monkeypatch):
     assert payload == {
         "model": LOCAL_MODEL,
         "platform_supported": True,
-        "total_memory_gb": 32.0,
-        "min_ram_gb": 8,
+        "total_memory_gb": 128.0,
+        "min_ram_gb": 48,
         "binary_present": True,
         "model_present": True,
         "available": True,
@@ -346,7 +346,7 @@ def test_local_bootstrap_migrates_preexisting_install_without_worker(
     monkeypatch.setattr(
         local_bootstrap.psutil,
         "virtual_memory",
-        lambda: type("VMem", (), {"total": 32 * 1024**3})(),
+        lambda: type("VMem", (), {"total": 128 * 1024**3})(),
     )
     monkeypatch.setattr(
         local_bootstrap.threading,
