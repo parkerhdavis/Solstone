@@ -6,6 +6,9 @@ Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), al
 
 ## [Unreleased]
 
+### Changed
+- on linux, the default on-device transcription now works out of the box — its runtime ships with the install and `journal setup` downloads the model, so there's no separate extra to add. NVIDIA GPU owners can still opt into `solstone[parakeet-onnx-cuda]` for GPU acceleration, and `sol doctor` now reports whether the default transcription backend's runtime and model are ready.
+
 ## [0.4.5] - 2026-05-30
 
 ### Added
