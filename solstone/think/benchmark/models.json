@@ -1,9 +1,9 @@
 {
-  "_comment": "Multi-candidate evaluation registry for Solstone's local-model benchmark / preset framework. This is NOT a list of interchangeable served models: exactly one model is SERVED at a time -- the one pinned in think/models.py LOCAL_MODEL (currently local/nemotron-3-nano-omni, which providers/local.py normalize_model_id() coerces every request to). The other rows are CANDIDATES being measured head-to-head to inform whether the served model should change; that switch is a separate, owner-approved follow-up (see the Local Inference & Benchmarking Plan, Decision #7). The settings UI labels candidates as such and must never imply you can switch to one. Benchmarks are measured tok/s + per-task wall-clock per canonical hardware class (see reference.json), populated via solstone.think.benchmark.harness on real hardware (it prints a paste-ready snippet; it never writes this file). An empty benchmarks dict means no measurement yet -- the estimator returns confidence=unknown. Pre-migration dgx-spark numbers for the retired qwen-coder rows were dropped as wrong-provenance: normalize_model_id() coerced those harness runs to the served model, so they did not measure the labeled model. The served + candidate models are re-measured from scratch (Plan phase B3). Provider-neutral by design (Decision #8): rows are keyed by a provider-prefixed model_id (local/ today; a future google//openai//anthropic/ cloud row fits the same shape). Local-only fields (size_gb, vram_required_gb, the hardware-class benchmark axis) are optional and simply omitted for cloud rows, whose latency/cost gets measured on a parallel axis added when cloud benchmarking lands. The (hardware x budget) preset dimension and whole-model-group footprint fit (Decision #9) are layered on by the estimator (Plan phase B6) and do not change this row schema. Capabilities use the tasks.json tier_role vocabulary (generate / cogitate / vision / audio); a model lists every role it can serve. Audio is unsupported on the bundle (llama-server rejects it; audio runs through the Whisper STT pipeline), so no local row lists 'audio'.",
+  "_comment": "Multi-candidate evaluation registry for Solstone's local-model benchmark / preset framework. This is NOT a list of interchangeable served models: exactly one model is SERVED at a time -- the one pinned in think/models.py LOCAL_MODEL (currently local/qwen3.6-35b-a3b, which providers/local.py normalize_model_id() coerces every request to). The other rows are CANDIDATES being measured head-to-head to inform whether the served model should change; that switch is a separate, owner-approved follow-up (see the Local Inference & Benchmarking Plan, Decision #7). The settings UI labels candidates as such and must never imply you can switch to one. Benchmarks are measured tok/s + per-task wall-clock per canonical hardware class (see reference.json), populated via solstone.think.benchmark.harness on real hardware (it prints a paste-ready snippet; it never writes this file). An empty benchmarks dict means no measurement yet -- the estimator returns confidence=unknown. Pre-migration dgx-spark numbers for the retired qwen-coder rows were dropped as wrong-provenance: normalize_model_id() coerced those harness runs to the served model, so they did not measure the labeled model. The served + candidate models are re-measured from scratch (Plan phase B3). Provider-neutral by design (Decision #8): rows are keyed by a provider-prefixed model_id (local/ today; a future google//openai//anthropic/ cloud row fits the same shape). Local-only fields (size_gb, vram_required_gb, the hardware-class benchmark axis) are optional and simply omitted for cloud rows, whose latency/cost gets measured on a parallel axis added when cloud benchmarking lands. The (hardware x budget) preset dimension and whole-model-group footprint fit (Decision #9) are layered on by the estimator (Plan phase B6) and do not change this row schema. Capabilities use the tasks.json tier_role vocabulary (generate / cogitate / vision / audio); a model lists every role it can serve. Audio is unsupported on the bundle (llama-server rejects it; audio runs through the Whisper STT pipeline), so no local row lists 'audio'.",
   "models": {
     "local/nemotron-3-nano-omni": {
       "label": "NVIDIA Nemotron 3 Nano Omni (Q8_0)",
-      "served": true,
+      "served": false,
       "tier_hint": 1,
       "size_gb": 35.1,
       "capabilities": [
@@ -12,7 +12,7 @@
         "vision"
       ],
       "vram_required_gb": 48,
-      "notes": "SERVED model (think/models.py LOCAL_MODEL; serves all tiers via normalize_model_id). ~32B omni MoE, Q8_0 GGUF (~33.6 GB) plus its mmproj vision projector (~1.5 GB); min-RAM ~48 GiB, comfortable on the 128 GB Spark. Serves text/agentic cogitate and single-image vision (screen_frame). The omni audio/video modalities are unused on the bundle. Footprint is a spec estimate pending B3 measurement.",
+      "notes": "CANDIDATE (not served) -- the prior served model, retired in favor of qwen3.6-35b-a3b after the B3 head-to-head (equal speed/footprint; qwen3.6 had the agentic/vision edge and sheds Nemotron's unused omni audio/video). ~32B omni MoE, Q8_0 GGUF (~33.6 GB) plus mmproj (~1.5 GB), min-RAM ~48 GiB. Kept as a comparison row; the bundle can re-serve it if LOCAL_MODEL is repinned.",
       "benchmarks": {
         "dgx-spark": {
           "output_tok_s": 59.8,
@@ -109,7 +109,7 @@
     },
     "local/qwen3.6-35b-a3b": {
       "label": "Qwen3.6-35B-A3B (Q8_0)",
-      "served": false,
+      "served": true,
       "tier_hint": 1,
       "size_gb": 37.8,
       "capabilities": [
@@ -118,7 +118,7 @@
         "vision"
       ],
       "vram_required_gb": 48,
-      "notes": "CANDIDATE (not served) -- gated in after confirming the unsloth GGUF ships a vision projector (mmproj-BF16/F16/F32.gguf). 35B MoE, ~3B active; Q8_0 GGUF (~36.9 GB) plus mmproj (~0.9 GB BF16). Built for Solstone's workload (agentic text + single-image vision); same family as the qwen baseline, so its chat template / tool-calling / enable_thinking are aligned. B3 must FIRST confirm the pinned llama.cpp b9291 build loads this Qwen2.5-VL-style ViT projector; if it cannot, this row competes text-only until the aarch64/sm_121 binary is rebuilt at a newer tag. Footprint is a spec estimate pending B3.",
+      "notes": "SERVED model (think/models.py LOCAL_MODEL; serves all tiers via normalize_model_id). 35B MoE, ~3B active; Q8_0 GGUF (~36.9 GB) plus mmproj-BF16 (~0.9 GB), min-RAM ~48 GiB. Serves text/agentic cogitate and single-image vision. Chosen over Nemotron Omni by the B3 Spark head-to-head: equal tok/s + footprint, stronger agentic/vision quality, and the pinned b9291 build loads its Qwen2.5-VL mmproj ViT. Numbers below are measured.",
       "benchmarks": {
         "dgx-spark": {
           "output_tok_s": 58.4,

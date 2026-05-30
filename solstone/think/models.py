@@ -146,12 +146,14 @@ CLAUDE_OPUS_4 = "claude-opus-4-7"
 CLAUDE_SONNET_4 = "claude-sonnet-4-6"
 CLAUDE_HAIKU_4 = "claude-haiku-4-5"
 
-# Fork: the bundled local model is vision-capable Nemotron 3 Nano Omni (see
+# Fork: the bundled local model is vision-capable Qwen3.6-35B-A3B (see
 # solstone/think/providers/local.py LOCAL_MODEL_SPECS and docs/FORK.md). Upstream
-# now ships its own vision VLM here (local/qwen3.5-4b) — a small runs-anywhere
-# 4B; the fork keeps the heavier Spark-targeted omni model. The vision/--jinja/
+# ships a smaller runs-anywhere VLM here (local/qwen3.5-4b); the fork serves the
+# heavier same-family 35B-A3B MoE, chosen over Nemotron 3 Nano Omni by the Spark
+# head-to-head (equal tok/s + footprint, stronger agentic/vision quality, and it
+# sheds the unused omni audio/video modalities). The vision/--jinja/
 # enable_thinking wiring is shared (upstream's, model-agnostic).
-LOCAL_MODEL = "local/nemotron-3-nano-omni"
+LOCAL_MODEL = "local/qwen3.6-35b-a3b"
 
 QWEN_35_9B = "qwen3.5:9b"
 GEMMA4_26B_A4B_4BIT = "gemma-4-26b-a4b-it-mlx-4bit"

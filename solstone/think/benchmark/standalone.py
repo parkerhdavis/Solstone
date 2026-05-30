@@ -32,7 +32,7 @@ Usage::
 
     # Installed model (resolves artifacts from the provider's spec/cache):
     python -m solstone.think.benchmark.standalone \\
-        --model local/nemotron-3-nano-omni --class dgx-spark
+        --model local/qwen3.6-35b-a3b --class dgx-spark
 
     # Candidate not yet in the spec table — point at downloaded artifacts:
     python -m solstone.think.benchmark.standalone --model local/qwen3.6-35b-a3b \\
