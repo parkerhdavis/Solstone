@@ -64,6 +64,7 @@ def _serialize_backlog_day(day: BacklogDay) -> dict:
         "segments": day.segments,
         "units": day.units,
         "not_sensed": day.not_sensed,
+        "reason": day.reason,
         "why": [_serialize_backlog_unit(unit) for unit in day.why],
         "error": _serialize_backlog_error(day.error) if day.error else None,
     }
@@ -77,6 +78,7 @@ def _serialize_backlog_view(view: BacklogView) -> dict:
         "stuck_days": view.stuck_days,
         "oldest_pending_day": view.oldest_pending_day,
         "errors": [_serialize_backlog_error(error) for error in view.errors],
+        "degraded": view.degraded,
     }
 
 
@@ -88,6 +90,18 @@ def _empty_backlog_view() -> BacklogView:
         stuck_days=0,
         oldest_pending_day=None,
         errors=(),
+    )
+
+
+def _degraded_backlog_view() -> BacklogView:
+    return BacklogView(
+        window=BACKLOG_DEFAULT_WINDOW,
+        days=(),
+        pending_days=0,
+        stuck_days=0,
+        oldest_pending_day=None,
+        errors=(),
+        degraded=True,
     )
 
 
@@ -569,7 +583,13 @@ class JournalStats:
                 if use_cache:
                     self._save_day_cache(day_dir, day_data)
 
-        self.backlog_view = read_backlog_view()
+        try:
+            self.backlog_view = read_backlog_view()
+        except Exception:
+            logger.exception(
+                "backlog derivation failed; stats will be flagged degraded"
+            )
+            self.backlog_view = _degraded_backlog_view()
 
         # Scan tokens directory once after all days are processed
         self.scan_all_tokens(Path(journal), use_cache=use_cache)
