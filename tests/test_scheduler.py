@@ -1070,6 +1070,84 @@ class TestCheck:
 
 
 # ---------------------------------------------------------------------------
+# catch_up
+# ---------------------------------------------------------------------------
+
+
+class TestCatchUp:
+    def test_catch_up_submits_overdue_weekly_without_boundary(self, journal_path):
+        """Overdue weekly entry is caught up once, with no live boundary crossing."""
+        import solstone.think.scheduler as mod
+
+        callosum = Mock()
+        callosum.emit = Mock(return_value=True)
+
+        _write_config(
+            journal_path,
+            {
+                "weekly_day": "sunday",
+                "weekly_time": "03:00",
+                "w": {
+                    "cmd": ["journal", "think", "--weekly", "-v"],
+                    "every": "weekly",
+                },
+            },
+        )
+        # Ran weeks ago — overdue against the most recent Sunday 03:00 mark.
+        _write_state(
+            journal_path,
+            {"w": {"last_run": datetime(2026, 3, 1, 4, 0).timestamp()}},
+        )
+
+        # Non-boundary instant. init() baselines the marks to *now*, so a live
+        # check() crosses no boundary and fires nothing — catch_up() must.
+        with _fake_now(datetime(2026, 3, 25, 10, 0)):
+            mod.init(callosum)
+            mod.check()
+            callosum.emit.assert_not_called()  # edge-triggered: nothing
+
+            mod.catch_up()  # level-triggered: catches the overdue entry
+
+        callosum.emit.assert_called_once()
+        call = callosum.emit.call_args
+        assert call[0][0] == "supervisor"
+        assert call[0][1] == "request"
+        assert call[1]["cmd"] == ["journal", "think", "--weekly", "-v"]
+        assert call[1]["scheduler_name"] == "w"
+        assert call[1]["ref"].startswith("sched:w:")
+
+    def test_catch_up_skips_recently_run_entry(self, journal_path):
+        """An entry that already ran this period is not re-submitted (no double-fire)."""
+        import solstone.think.scheduler as mod
+
+        callosum = Mock()
+        callosum.emit = Mock(return_value=True)
+
+        _write_config(
+            journal_path,
+            {
+                "weekly_day": "sunday",
+                "weekly_time": "03:00",
+                "w": {
+                    "cmd": ["journal", "think", "--weekly", "-v"],
+                    "every": "weekly",
+                },
+            },
+        )
+        # Ran after the most recent Sunday 03:00 mark (2026-03-22 03:00).
+        _write_state(
+            journal_path,
+            {"w": {"last_run": datetime(2026, 3, 22, 4, 0).timestamp()}},
+        )
+
+        with _fake_now(datetime(2026, 3, 25, 10, 0)):
+            mod.init(callosum)
+            mod.catch_up()
+
+        callosum.emit.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # collect_status
 # ---------------------------------------------------------------------------
 
@@ -1180,12 +1258,32 @@ class TestHeartbeatSchedule:
             raw = json.load(f)
 
         assert raw["providers"] == {
-            "cmd": ["sol", "providers", "check"],
+            "cmd": ["journal", "providers", "check"],
             "every": "daily",
             "enabled": True,
             "max_runtime": "5m",
         }
         assert mod._entries["providers"]["max_runtime"] == 300
+
+    def test_register_defaults_creates_facet_candidates(self, journal_path):
+        """register_defaults() creates a facet candidates entry."""
+        import solstone.think.scheduler as mod
+
+        mock_cal = Mock()
+        mod.init(mock_cal)
+        mod.register_defaults()
+
+        config_path = journal_path / "config" / "schedules.json"
+        with open(config_path) as f:
+            raw = json.load(f)
+
+        assert raw["facet-candidates"] == {
+            "cmd": ["journal", "facet-candidates"],
+            "every": "weekly",
+            "enabled": True,
+            "max_runtime": "10m",
+        }
+        assert mod._entries["facet-candidates"]["max_runtime"] == 600
 
     def test_register_defaults_idempotent(self, journal_path):
         """register_defaults() does not overwrite existing heartbeat config."""
@@ -1221,7 +1319,7 @@ class TestHeartbeatSchedule:
         import solstone.think.scheduler as mod
 
         existing = {
-            "cmd": ["sol", "providers", "check", "--custom"],
+            "cmd": ["journal", "providers", "check", "--custom"],
             "every": "daily",
             "enabled": False,
         }

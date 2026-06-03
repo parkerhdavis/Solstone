@@ -33,7 +33,7 @@ from solstone.think.models import calc_agent_cost
 from solstone.think.runner import _atomic_symlink
 from solstone.think.talent import get_output_path
 from solstone.think.talents import TALENT_EXECUTION_MODULE
-from solstone.think.utils import get_journal, get_project_root, get_rev, now_ms
+from solstone.think.utils import get_journal, get_rev, now_ms
 
 
 class TalentProcess:
@@ -163,7 +163,7 @@ class CortexService:
             self.callosum.start(callback=self._handle_callosum_message)
             self.logger.info("Connected to Callosum message bus")
             self.callosum.emit(
-                "supervisor", "request", cmd=["sol", "providers", "check"]
+                "supervisor", "request", cmd=["journal", "providers", "check"]
             )
             self.logger.info("Requested providers health check via supervisor")
         except Exception as e:
@@ -327,12 +327,6 @@ class CortexService:
                             raise RuntimeError(
                                 f"Cannot resolve cwd for talent '{talent_key}'"
                             ) from exc
-                    elif cwd_value == "repo":
-                        subprocess_cwd = get_project_root()
-                    else:
-                        raise RuntimeError(
-                            f"Cannot resolve cwd for talent '{talent_key}'"
-                        )
 
             process = subprocess.Popen(
                 cmd,
@@ -714,6 +708,7 @@ class CortexService:
             thinking_count = 0
             tool_count = 0
             finish_usage = None
+            degraded = None
             error_message = None
             model = None
             runtime_seconds = None
@@ -738,6 +733,7 @@ class CortexService:
                         if event_type == "finish":
                             status = "completed"
                             finish_usage = event.get("usage")
+                            degraded = event.get("degraded")
                             end_ts = event.get("ts", 0)
                             if end_ts and start_ts:
                                 runtime_seconds = round((end_ts - start_ts) / 1000.0, 1)
@@ -768,6 +764,7 @@ class CortexService:
                 "tool_count": tool_count,
                 "cost": calc_agent_cost(model, finish_usage),
                 "error_message": error_message if status == "error" else None,
+                "degraded": degraded,
                 "output_file": self._summarize_output_file(request),
                 "prompt": request.get("prompt", ""),
             }

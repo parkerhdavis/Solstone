@@ -38,7 +38,7 @@ Read, in order, when you enter the repo for a coding task:
 | `solstone/think/` | Post-processing core — cortex, talent, callosum, indexer, entities, facets, activities, scheduler, heartbeat, supervisor | anything downstream of capture; most coder work lives here | `docs/THINK.md`, `docs/CORTEX.md`, `docs/CALLOSUM.md` |
 | `solstone/convey/` | Web app framework — app discovery, routing, bridge | layout / framework-level UI changes | `docs/CONVEY.md` |
 | `solstone/apps/` | Convey apps — each self-contained (`call.py` Typer sub-app + `routes.py` + `templates/`) | adding a user-facing feature, a `sol call <app>` verb, a UI surface | `docs/APPS.md` (required reading before modifying `solstone/apps/`) |
-| `solstone/talent/` | AI talent configs (markdown prompts + optional `.py` post-hooks) + `SKILL.md`s (journal, coder, partner, …) | defining or tuning a talent; adding a journal-side skill | `solstone/talent/journal/SKILL.md`, `docs/PROMPT_TEMPLATES.md` |
+| `solstone/talent/` | AI talent configs (markdown prompts + optional `.py` post-hooks) + `SKILL.md`s (journal, partner, …) | defining or tuning a talent; adding a journal-side skill | `solstone/talent/journal/SKILL.md`, `docs/PROMPT_TEMPLATES.md` |
 | `scripts/` | Repo maintenance scripts — `check_layer_hygiene.py` | tooling that guards the codebase; wired into `make ci` | (none) |
 | `tests/` | Pytest suites + `tests/fixtures/journal/` mock journal | writing tests; debugging flakiness; `make dev` / `make sandbox` use fixtures as the journal | `docs/testing.md` |
 | `docs/` | All longform documentation | reference lookups; never your first stop | §10 below |
@@ -68,7 +68,7 @@ Top-level dirs intentionally not in the table: `.venv/`, `scratch/`, `logs/`, `t
 
 Two surfaces:
 
-- **`sol <command>`** — access commands registered in `solstone/think/sol_cli.py`'s `COMMANDS` dict (e.g., `sol import`, `sol indexer`, `sol top`, `sol health`).
+- **`sol <command>`** — access commands registered in `solstone/think/sol_cli.py`'s `COMMANDS` dict (e.g., `sol import`, `sol chat`).
 - **`journal <command>`** — host/service commands from the same registry (e.g., `journal think`, `journal supervisor`, `journal heartbeat`). `ALIASES` provides shorthand compound commands (`journal start` → `journal supervisor`, `journal up/down` → `journal service up/down`). `doctor` is universal: `sol doctor` checks CLI usability; `journal doctor` checks journal-host health.
 - **`sol call <app> <verb>`** — routes to `solstone/think/call.py`, which discovers each `solstone/apps/*/call.py` Typer sub-app and mounts it as a subcommand. Example: `sol call entities list`, `sol call activities create`, `sol call journal search`.
 
@@ -158,7 +158,7 @@ Verified against `Makefile`. Grouped by use.
 - **Run one test:** `make test-only TEST=tests/test_utils.py::test_foo` or `TEST="-k test_foo"`. **One app:** `make test-app APP=<name>`.
 - **`make test` runs everything** — `tests/` and every `solstone/apps/*/tests/` in one parallel run. App tests are not a separate step.
 - **All tests are fast unit/component tests** — no real browser, no live network, no API keys. There is no integration/e2e test tier; tests that would need those were removed in favor of live verification via `make sandbox` / `make verify-browser`.
-- **After editing `solstone/convey/` or `solstone/apps/`:** `sol restart-convey` to reload code in a running stack.
+- **After editing `solstone/convey/` or `solstone/apps/`:** `journal restart-convey` to reload code in a running stack.
 - **`make dev` + `make sandbox`** both write runtime artifacts into the fixtures journal; `tests/fixtures/journal/.gitignore` covers those — never commit them.
 - **Test invariants, not snapshots.** A test asserts what must hold in *every* valid state of the system — not what happens to be true today. Never pin a test to hand-edited prose (CHANGELOG / README / docs), to a value the system is *designed* to change (a version, a date, a growing count), or to a transient state. The tell: if doing the correct next thing — cut a release, rename a label, graduate a shipped changelog entry — turns the test red, the test is wrong, not the system. And test the code that *produces* a fact, never the rendered text about it. (A `[Unreleased]`-pinned changelog test was exactly this anti-pattern — its pass condition required the release process to *not* run; removed 2026-05-30.)
 
@@ -181,6 +181,8 @@ Each domain has exactly **one** write-owning module (or one tightly-scoped famil
 | Domain | Write-owning module(s) |
 |--------|------------------------|
 | Entities (`entities/*/entity.json`, `entities/*/*.npz`) | `solstone/think/entities/journal.py` + `solstone/think/entities/consolidation.py` + `solstone/think/entities/saving.py` + `solstone/think/entities/merge.py` + `solstone/apps/entities/call.py` |
+| Entity merge candidates (`entities/review-candidates.jsonl`) | `solstone/think/entities/review_candidates.py` + `solstone/apps/entities/call.py` |
+| Facet review candidates (`facets/review-candidates.jsonl`) | `solstone/think/facet_review_candidates.py` |
 | Facets (`facets/*/facet.json`, `facets/*/relationships/`) | `solstone/think/facets.py` + `solstone/apps/facets/*` (if/when created) |
 | Observations (`observations.jsonl`) | `solstone/think/entities/observations.py` |
 | Activities (`facets/*/activities/*.jsonl`) | `solstone/think/activities.py` |
@@ -222,7 +224,7 @@ CLI subcommands with write verbs default to safe.
 
 ### L6 — Indexers never mutate source data
 
-An indexer's job is to build indexes from source-of-truth data. Indexers may not mutate the source data they read. Re-running `sol indexer --rescan` on an unchanged journal must be a no-op for domain state.
+An indexer's job is to build indexes from source-of-truth data. Indexers may not mutate the source data they read. Re-running `journal indexer --rescan` on an unchanged journal must be a no-op for domain state.
 
 ### L7 — Importers only write to imports/
 

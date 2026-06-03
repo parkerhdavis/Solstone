@@ -13,6 +13,11 @@ from pathlib import Path
 
 import typer
 
+from solstone.think.curation import (
+    accept_entity_candidate,
+    dismiss_entity_candidate,
+    merge_preview_fields,
+)
 from solstone.think.entities.consolidation import consolidate_detected_entities
 from solstone.think.entities.core import entity_slug, is_valid_entity_type
 from solstone.think.entities.journal import (
@@ -33,6 +38,12 @@ from solstone.think.entities.relationships import (
     entity_memory_path,
     load_facet_relationship,
     save_facet_relationship,
+)
+from solstone.think.entities.review_candidates import (
+    find_candidate,
+    load_candidates,
+    locked_modify_candidates,
+    utc_now_iso,
 )
 from solstone.think.entities.saving import (
     save_detected_entity,
@@ -434,6 +445,224 @@ def consolidate(
     """Consolidate segment-detected entities into journal identities."""
     n = consolidate_detected_entities(get_journal(), full=full)
     typer.echo(f"Wrote {n} new entities.")
+
+
+@app.command("record-merge-candidate")
+def record_merge_candidate(
+    source: str = typer.Argument(
+        help="Variant name (folds INTO the canonical target)."
+    ),
+    target: str = typer.Argument(help="Canonical name to keep (merge target)."),
+    facet: str | None = typer.Option(
+        None, "--facet", "-f", help="Facet (or set SOL_FACET)."
+    ),
+    day: str | None = typer.Option(
+        None, "--day", "-d", help="Review day YYYYMMDD (or set SOL_DAY)."
+    ),
+    evidence: str = typer.Option(
+        ..., "--evidence", help="Short human summary of the evidence band."
+    ),
+    basis: str = typer.Option(
+        "name-variant", "--basis", help="Variant relationship basis."
+    ),
+    detections: int | None = typer.Option(
+        None, "--detections", help="Combined detection count (strength signal)."
+    ),
+    needs: int | None = typer.Option(
+        None, "--needs", help="Detections still needed to cross promotion threshold."
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Output the record as JSON."
+    ),
+) -> None:
+    """Record a proposed entity merge (source variant -> canonical target)."""
+    facet = resolve_sol_facet(facet)
+    day = resolve_sol_day(day)
+    source_slug = entity_slug(source)
+    target_slug = entity_slug(target)
+
+    if source_slug == target_slug:
+        typer.echo("Error: source and target resolve to the same entity.", err=True)
+        raise typer.Exit(1)
+
+    row: dict | None = None
+    created = False
+
+    def mutate(rows: list[dict]) -> list[dict]:
+        nonlocal row, created
+        existing = find_candidate(rows, facet, source_slug, target_slug)
+        now = utc_now_iso()
+        if existing is None:
+            row = {
+                "facet": facet,
+                "source": source,
+                "source_slug": source_slug,
+                "target": target,
+                "target_slug": target_slug,
+                "status": "open",
+                "evidence": {
+                    "basis": basis,
+                    "summary": evidence,
+                    "detection_count": detections,
+                    "needs": needs,
+                },
+                "first_surfaced": day,
+                "last_surfaced": day,
+                "created_at": now,
+                "updated_at": now,
+            }
+            created = True
+            return list(rows) + [row]
+
+        ev = existing.setdefault("evidence", {})
+        ev["basis"] = basis
+        ev["summary"] = evidence
+        if detections is not None:
+            ev["detection_count"] = detections
+        if needs is not None:
+            ev["needs"] = needs
+        existing["last_surfaced"] = day
+        existing["updated_at"] = now
+        row = existing
+        created = False
+        return rows
+
+    locked_modify_candidates(mutate)
+
+    if row is None:  # pragma: no cover - defensive assertion
+        raise RuntimeError("record-merge-candidate produced no row")
+
+    if json_output:
+        typer.echo(json.dumps(row, indent=2, ensure_ascii=False))
+        return
+    if created:
+        typer.echo(f"merge candidate recorded: {source} -> {target}")
+        return
+    typer.echo(
+        f"merge candidate updated: {source} -> {target} (status: {row.get('status')})"
+    )
+
+
+@app.command("merge-candidates")
+def list_merge_candidates(
+    facet: str | None = typer.Option(None, "--facet", "-f", help="Filter by facet."),
+    status: str | None = typer.Option(None, "--status", help="Filter by status."),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON."),
+) -> None:
+    """List recorded entity merge candidates."""
+    rows = load_candidates()
+    if facet is not None:
+        rows = [row for row in rows if row.get("facet") == facet]
+    if status is not None:
+        rows = [row for row in rows if row.get("status") == status]
+
+    if json_output:
+        typer.echo(json.dumps(rows, indent=2, ensure_ascii=False))
+        return
+
+    if not rows:
+        typer.echo("No merge candidates found.")
+        return
+
+    for row in rows:
+        evidence_data = row.get("evidence", {})
+        typer.echo(
+            f"{row.get('source', '')} -> {row.get('target', '')}  "
+            f"[{row.get('status', '')}]  facet={row.get('facet', '')}  "
+            f"detections={evidence_data.get('detection_count')}  "
+            f"needs={evidence_data.get('needs')}  "
+            f"last={row.get('last_surfaced', '')}"
+        )
+
+
+def _echo_merge_candidate_error(result: dict) -> None:
+    typer.echo(f"Error: {result.get('error', 'operation failed')}", err=True)
+    raise typer.Exit(1)
+
+
+def _echo_merge_preview(result: dict) -> None:
+    fields = merge_preview_fields(result["merge"])
+    typer.echo("Merge preview:")
+    akas = fields["akas_added"]
+    if akas:
+        typer.echo(f"  aliases added: {', '.join(akas)}")
+    else:
+        typer.echo("  aliases added: none")
+    typer.echo(f"  emails added: {fields['emails_added_count']}")
+    typer.echo(
+        "  facet links: "
+        f"{fields['facet_moved_count']} moved, "
+        f"{fields['facet_merged_count']} merged"
+    )
+    typer.echo(f"  observations moved: {fields['observations_appended']}")
+    typer.echo(
+        "  speaker labels updated: "
+        f"{fields['labels_rewritten']} labels, "
+        f"{fields['corrections_rewritten']} corrections"
+    )
+    typer.echo(
+        "  voice samples moved: "
+        f"{fields['voiceprints_added']} added, "
+        f"{fields['voiceprints_target_total']} total"
+    )
+    errors = fields["segment_errors"]
+    if errors:
+        typer.echo(f"  segment update errors: {len(errors)}")
+
+
+@app.command("accept-merge-candidate")
+def accept_merge_candidate(
+    source_slug: str = typer.Argument(help="Source entity slug to merge from."),
+    target_slug: str = typer.Argument(help="Target entity slug to merge into."),
+    facet: str | None = typer.Option(
+        None, "--facet", "-f", help="Facet name (or set SOL_FACET)."
+    ),
+    commit: bool = typer.Option(False, "--commit/--no-commit"),
+) -> None:
+    """Preview or accept one recorded entity merge candidate."""
+    facet = resolve_sol_facet(facet)
+    result = accept_entity_candidate(
+        facet,
+        source_slug,
+        target_slug,
+        commit=commit,
+    )
+    status = result.get("status")
+    if status == "error":
+        _echo_merge_candidate_error(result)
+    if status == "preview":
+        _echo_merge_preview(result)
+        return
+    if status == "accepted":
+        typer.echo(f"Accepted merge candidate: {source_slug} -> {target_slug}")
+        return
+    if status == "already_accepted":
+        typer.echo(f"Merge candidate already accepted: {source_slug} -> {target_slug}")
+        return
+    typer.echo(f"accept result for {source_slug} -> {target_slug}: {status}")
+
+
+@app.command("dismiss-merge-candidate")
+def dismiss_merge_candidate(
+    source_slug: str = typer.Argument(help="Source entity slug."),
+    target_slug: str = typer.Argument(help="Target entity slug."),
+    facet: str | None = typer.Option(
+        None, "--facet", "-f", help="Facet name (or set SOL_FACET)."
+    ),
+) -> None:
+    """Dismiss one recorded entity merge candidate."""
+    facet = resolve_sol_facet(facet)
+    result = dismiss_entity_candidate(facet, source_slug, target_slug)
+    status = result.get("status")
+    if status == "error":
+        _echo_merge_candidate_error(result)
+    if status == "dismissed":
+        typer.echo(f"Dismissed merge candidate: {source_slug} -> {target_slug}")
+        return
+    if status == "already_dismissed":
+        typer.echo(f"Merge candidate already dismissed: {source_slug} -> {target_slug}")
+        return
+    typer.echo(f"dismiss result for {source_slug} -> {target_slug}: {status}")
 
 
 @app.command("merge")

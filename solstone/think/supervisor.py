@@ -29,7 +29,8 @@ from solstone.think.callosum import CallosumConnection, CallosumServer
 from solstone.think.maint import run_pending_tasks
 from solstone.think.models import LOCAL_MODEL, is_local_provider_needed
 from solstone.think.pipeline_health import read_day_stuck
-from solstone.think.readiness import clear_ready, signal_ready
+from solstone.think.providers.mlx_server import MLX_SERVER_PROCESS_NAME
+from solstone.think.readiness import START_TIME_TOLERANCE_S, clear_ready, signal_ready
 from solstone.think.runner import ManagedProcess as RunnerManagedProcess
 from solstone.think.runner import _command_partition
 from solstone.think.sync_check import (
@@ -41,6 +42,7 @@ from solstone.think.sync_check import (
     write_self_heartbeat,
 )
 from solstone.think.utils import (
+    EXIT_EMPTY,
     EXIT_TEMPFAIL,
     day_path,
     find_available_port,
@@ -124,14 +126,24 @@ def _candidate_journal(proc: "psutil.Process") -> Path | None:
 # via proc.name() after the supervisor dies — which is what lets the sweep
 # find it. The supervisor-owned `llama-server` reports its own bare binary
 # name (no colon prefix) and is included here so the sweep reaps it too.
-_MANAGED_SERVICE_PROCTITLES = frozenset(
+# The mlx-vlm server is a Python process, but our launcher sets the same
+# managed proctitle so proc.name() is stable for orphan sweeping.
+_LOCAL_SERVER_PROCTITLES = frozenset(
     {
-        "journal:sense",
-        "journal:cortex",
-        "journal:convey",
-        "journal:spl",
         LOCAL_SERVER_PROCESS_NAME,
+        MLX_SERVER_PROCESS_NAME,
     }
+)
+_MANAGED_SERVICE_PROCTITLES = (
+    frozenset(
+        {
+            "journal:sense",
+            "journal:cortex",
+            "journal:convey",
+            "journal:spl",
+        }
+    )
+    | _LOCAL_SERVER_PROCTITLES
 )
 
 
@@ -536,7 +548,7 @@ class TaskQueue:
             )
 
             exit_code = managed.wait()
-            exit_status = "ok" if exit_code == 0 else "error"
+            exit_status = _exit_status_for_code(exit_code)
 
             for ref in refs:
                 callosum.emit(
@@ -764,7 +776,7 @@ _daily_state = {
 
 # State for local provider recovery nudges
 _recovery_state = {
-    "llama_server_down": False,
+    "local_server_down": False,
 }
 
 # Timeout before flushing stale segments (seconds)
@@ -818,8 +830,7 @@ def is_supervisor_up() -> bool:
     except psutil.Error:
         return False
 
-    tolerance = 1.5  # drift between time.time() and psutil create_time()
-    return abs(recorded_start - create_time) <= tolerance
+    return abs(recorded_start - create_time) <= START_TIME_TOLERANCE_S
 
 
 class RestartPolicy:
@@ -844,6 +855,17 @@ class RestartPolicy:
 
 
 _RESTART_POLICIES: dict[str, RestartPolicy] = {}
+
+
+def describe_exit(returncode: int) -> str:
+    """Render a process return code, decoding signals for negative codes."""
+    if returncode >= 0:
+        return f"exit {returncode}"
+    try:
+        name = signal.Signals(-returncode).name
+    except ValueError:
+        return f"exit {returncode} / signal {-returncode}"
+    return f"exit {returncode} / {name}"
 
 
 def _get_restart_policy(name: str) -> RestartPolicy:
@@ -943,6 +965,20 @@ def _stop_process(managed: RunnerManagedProcess) -> None:
     managed.cleanup()
 
 
+def _exit_status_for_code(exit_code: int) -> str:
+    """Map a scheduled task's process exit code to a scheduler status label.
+
+    0 -> "ok"; EXIT_EMPTY -> "empty" (a rollup ran over zero inputs - a distinct,
+    non-error "nothing to do" outcome); any other non-zero code -> "error".
+    Timeouts are mapped separately by the caller.
+    """
+    if exit_code == 0:
+        return "ok"
+    if exit_code == EXIT_EMPTY:
+        return "empty"
+    return "error"
+
+
 def _record_scheduler_completion(
     scheduler_name: str,
     *,
@@ -1021,7 +1057,7 @@ def _maybe_submit_startup_digest(*, no_cortex: bool) -> None:
     ):
         return
 
-    _task_queue.submit(["sol", "call", "identity", "digest"])
+    _task_queue.submit(["journal", "identity", "digest"])
     _digest_submitted_this_boot = True
     logging.info("startup: submitted identity digest")
 
@@ -1211,8 +1247,73 @@ def start_sense() -> RunnerManagedProcess:
     return _launch_process("sense", ["journal", "sense", "-v"], restart=True)
 
 
+def _start_mlx_local_server() -> RunnerManagedProcess | None:
+    """Launch the supervisor-owned mlx-vlm server when artifacts are present."""
+    from solstone.think.providers import local_server, mlx_install
+
+    readiness = mlx_install.inspect_readiness()
+    readiness_keys = (
+        "platform_supported",
+        "package_available",
+        "ram_sufficient",
+        "model_installed",
+    )
+    if not all(readiness.get(key) for key in readiness_keys):
+        logging.info(
+            "MLX local model not ready; skipping mlx-vlm server startup: %s",
+            {key: readiness.get(key) for key in readiness_keys},
+        )
+        return None
+
+    runtime_dir = readiness["runtime_dir"]
+    model_id = readiness["model_id"]
+    port = find_available_port()
+    write_service_port("local", port)
+    script_path = str(Path(sys.executable).with_name(MLX_SERVER_PROCESS_NAME))
+    cmd = [
+        script_path,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--model",
+        str(runtime_dir),
+    ]
+    if "0.0.0.0" in cmd:
+        raise RuntimeError("Local server may not bind 0.0.0.0.")
+
+    logging.info("Starting mlx-vlm server for %s from %s", model_id, runtime_dir)
+    managed = _launch_process(MLX_SERVER_PROCESS_NAME, cmd, restart=True)
+    print(f"  {LOCAL_MODEL_WARMING_UP_COPY}", flush=True)
+
+    deadline = time.monotonic() + LOCAL_SERVER_READY_TIMEOUT_S
+    while time.monotonic() < deadline:
+        if managed.process.poll() is not None:
+            logging.warning(
+                "mlx-vlm server exited during warmup with code %s",
+                managed.process.returncode,
+            )
+            return managed
+        state, error = local_server._probe_health(port)
+        if state == local_server.STATE_READY:
+            logging.info("mlx-vlm server ready on port %s", port)
+            return managed
+        if state == local_server.STATE_FAILED and error:
+            logging.debug("mlx-vlm server health probe failed during warmup: %s", error)
+        time.sleep(LOCAL_SERVER_HEALTH_POLL_INTERVAL_S)
+
+    logging.warning(
+        "mlx-vlm server did not become ready within %.0fs; continuing startup",
+        LOCAL_SERVER_READY_TIMEOUT_S,
+    )
+    return managed
+
+
 def start_local_server() -> RunnerManagedProcess | None:
     """Launch the supervisor-owned local llama-server when artifacts are present."""
+    if sys.platform == "darwin":
+        return _start_mlx_local_server()
+
     from solstone.think.providers import local_install, local_server
 
     try:
@@ -1419,7 +1520,15 @@ async def handle_runner_exits(procs: list[RunnerManagedProcess]) -> None:
     if all_tempfail:
         logging.info("Runner waiting for session: %s", ", ".join(sorted(exited_names)))
     else:
-        msg = f"Runner process exited: {', '.join(sorted(exited_names))}"
+        parts = []
+        for m in sorted(exited, key=lambda managed: managed.name):
+            policy = _get_restart_policy(m.name)
+            if policy.last_start:
+                uptime = f"up {time.time() - policy.last_start:.1f}s"
+            else:
+                uptime = "up unknown"
+            parts.append(f"{m.name} ({describe_exit(m.process.returncode)}, {uptime})")
+        msg = f"Runner process exited: {', '.join(parts)}"
         logging.error(msg)
 
     for managed in exited:
@@ -1480,8 +1589,8 @@ async def handle_runner_exits(procs: list[RunnerManagedProcess]) -> None:
                 continue
 
             procs.append(new_proc)
-            if managed.name == LOCAL_SERVER_PROCESS_NAME:
-                _recovery_state["llama_server_down"] = True
+            if managed.name in _LOCAL_SERVER_PROCTITLES:
+                _recovery_state["local_server_down"] = True
             logging.info("Restarted %s after exit code %s", managed.name, returncode)
         else:
             logging.info("Not restarting %s", managed.name)
@@ -1501,7 +1610,7 @@ def _nudge_catchup_drain() -> None:
 
 async def _check_local_server_recovery() -> None:
     """Detect a recovered local server after supervisor-managed relaunch."""
-    if _is_remote_mode or not _recovery_state["llama_server_down"]:
+    if _is_remote_mode or not _recovery_state["local_server_down"]:
         return
 
     port = read_service_port("local")
@@ -1514,7 +1623,7 @@ async def _check_local_server_recovery() -> None:
     if state != local_server.STATE_READY:
         return
 
-    _recovery_state["llama_server_down"] = False
+    _recovery_state["local_server_down"] = False
     _nudge_catchup_drain()
 
 
@@ -2111,8 +2220,10 @@ def main() -> None:
 
     pid_path.write_text(str(os.getpid()))
     start_time_path = health_dir / "supervisor.start_time"
-    # Written here, not at _supervisor_start, to minimize drift from psutil create_time().
-    start_time_path.write_text(str(time.time()))
+    # Stamp THIS process's kernel create_time() so the recorded value equals what
+    # is_supervisor_up()/_valid_marker() later read via psutil for this pid —
+    # eliminating (not minimizing) drift from a wall-clock time.time() stamp.
+    start_time_path.write_text(str(psutil.Process().create_time()))
     logging.info("Singleton lock acquired (PID %d)", os.getpid())
     _sweep_orphaned_sol_processes(journal_path)
 
@@ -2265,6 +2376,10 @@ def main() -> None:
     # Startup catchup: submit thinks for days with pending stream data
     if daily_enabled:
         run_catchup_drain()
+
+    # Startup catch-up: submit overdue schedule entries missed while down
+    if schedule_enabled and _supervisor_callosum:
+        scheduler.catch_up()
 
     try:
         print("  Supervisor ready", flush=True)

@@ -284,14 +284,6 @@ class TestProvidersShow:
                 "cogitate_ready": True,
                 "issues": [],
             },
-            "mlx": {
-                "configured": False,
-                "generate_ready": False,
-                "cogitate_ready": False,
-                "cogitate_cli": "",
-                "cogitate_cli_found": False,
-                "issues": [],
-            },
             "local": {
                 "configured": False,
                 "generate_ready": False,
@@ -318,42 +310,26 @@ class TestProvidersShow:
             )
 
         assert result.exit_code == 0
-        assert "local: binary_missing" in result.output.splitlines()
+        lines = result.output.splitlines()
+        assert lines == [
+            "anthropic: ANTHROPIC_API_KEY not set",
+            "google: ready",
+            "local: binary_missing",
+            "openai: ready",
+        ]
         assert not result.output.lstrip().startswith("{")
 
 
 class TestProvidersInstall:
-    def test_install_local_dispatches_to_local_install(self, settings_env, monkeypatch):
-        settings_env()
-        calls = []
-
-        def install_local():
-            calls.append(True)
-            return {"name": "local", "install_state": "installed"}
-
-        monkeypatch.setattr(
-            "solstone.think.providers.local_install.install_local", install_local
-        )
-
-        result = runner.invoke(call_app, ["settings", "providers", "install", "local"])
-
-        assert result.exit_code == 0
-        assert calls == [True]
-        assert json.loads(result.output) == {
-            "name": "local",
-            "install_state": "installed",
-        }
-
-    @pytest.mark.parametrize("name", ["anthropic", "openai", "openhands"])
-    def test_install_non_local_raises_bad_parameter(self, settings_env, name):
+    @pytest.mark.parametrize("args", [[], ["local"], ["anthropic"]])
+    def test_install_redirects_to_journal_install_provider(self, settings_env, args):
         settings_env()
 
-        result = runner.invoke(call_app, ["settings", "providers", "install", name])
+        result = runner.invoke(call_app, ["settings", "providers", "install", *args])
 
         assert result.exit_code != 0
         combined = result.output + result.stderr
-        assert name in combined
-        assert "only 'local' is supported" in combined
+        assert "journal install-provider" in combined
 
     @pytest.mark.parametrize("verb", ["uninstall", "disable", "enable", "validate-key"])
     @pytest.mark.parametrize("name", ["anthropic", "openai", "openhands"])

@@ -4,17 +4,22 @@
 """Tests for think.facets module."""
 
 import json
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
 from slugify import slugify
 
 from solstone.think.facets import (
+    FACET_CANDIDATE_WINDOW_DAYS,
     _format_principal_role,
     _get_principal_display_name,
     _rank_entities_by_signal,
+    aggregate_speculative_facets,
+    ensure_facet,
     facet_summaries,
     facet_summary,
+    find_orphan_facets,
     get_active_facets,
     get_facets,
 )
@@ -295,6 +300,77 @@ def test_get_facets_empty_entities(monkeypatch):
         assert entity_names is None
 
 
+def test_find_orphan_facets_detects_content_bearing_dirs_only(tmp_path, monkeypatch):
+    """Orphan detection promotes only real content-bearing facet dirs."""
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+    facets_dir = tmp_path / "facets"
+
+    orphan_a = facets_dir / "orphan-a" / "todos"
+    orphan_a.mkdir(parents=True)
+    (orphan_a / "20260101.jsonl").write_text(
+        json.dumps({"text": "Review"}) + "\n", encoding="utf-8"
+    )
+
+    orphan_b = facets_dir / "orphan-b" / "entities" / "alice"
+    orphan_b.mkdir(parents=True)
+    (orphan_b / "observations.jsonl").write_text(
+        json.dumps({"content": "Met Alice"}) + "\n", encoding="utf-8"
+    )
+
+    junk = facets_dir / "junk"
+    junk.mkdir(parents=True)
+    (junk / ".gitkeep").write_text("", encoding="utf-8")
+
+    lock_only = facets_dir / "lock-only" / "entities" / "x"
+    lock_only.mkdir(parents=True)
+    (lock_only / "observations.jsonl.lock").write_text("", encoding="utf-8")
+
+    has_json = facets_dir / "has-json"
+    (has_json / "news").mkdir(parents=True)
+    (has_json / "facet.json").write_text(
+        json.dumps({"title": "Has Json"}), encoding="utf-8"
+    )
+    (has_json / "news" / "20260101.md").write_text("news\n", encoding="utf-8")
+
+    assert find_orphan_facets() == ["orphan-a", "orphan-b"]
+
+
+def test_find_orphan_facets_fixture_excludes_broken_facet(monkeypatch):
+    """The .gitkeep-only broken fixture is not promoted as an orphan."""
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(FIXTURES_PATH))
+
+    assert "broken-facet" not in find_orphan_facets()
+
+
+def test_ensure_facet_repairs_orphan_visible_in_get_facets(tmp_path, monkeypatch):
+    """ensure_facet writes default metadata once and makes the facet visible."""
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+    todos_dir = tmp_path / "facets" / "orphan" / "todos"
+    todos_dir.mkdir(parents=True)
+    (todos_dir / "20260101.jsonl").write_text(
+        json.dumps({"text": "Review"}) + "\n", encoding="utf-8"
+    )
+
+    assert "orphan" not in get_facets()
+    assert ensure_facet("orphan") is True
+
+    facets = get_facets()
+    assert "orphan" in facets
+    assert facets["orphan"]["title"] == "Orphan"
+    assert facets["orphan"]["color"] == "#667eea"
+    assert facets["orphan"]["emoji"] == "📦"
+    assert ensure_facet("orphan") is False
+
+    today = datetime.now().strftime("%Y%m%d")
+    log_path = tmp_path / "facets" / "orphan" / "logs" / f"{today}.jsonl"
+    entries = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [entry["action"] for entry in entries] == ["facet_heal"]
+
+
 def test_facet_summaries(monkeypatch):
     """Test facet_summaries() generates correct agent prompt format."""
     monkeypatch.setenv("SOLSTONE_JOURNAL", str(FIXTURES_PATH))
@@ -507,6 +583,108 @@ def test_get_active_facets_malformed_json(monkeypatch, tmp_path):
     active = get_active_facets("20240115")
 
     assert active == {"work"}
+
+
+_MISSING = object()
+
+
+def _write_segment_sense(
+    journal: Path,
+    day: str,
+    segment: str,
+    speculative_facet: object = _MISSING,
+    *,
+    stream: str = "archon",
+) -> None:
+    talents_dir = journal / "chronicle" / day / stream / segment / "talents"
+    talents_dir.mkdir(parents=True, exist_ok=True)
+    payload = {}
+    if speculative_facet is not _MISSING:
+        payload["speculative_facet"] = speculative_facet
+    (talents_dir / "sense.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_aggregate_speculative_facets_surfaces_above_threshold(monkeypatch, tmp_path):
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+    day = "20260602"
+    for segment in ("090000_300", "093000_300", "100000_300"):
+        _write_segment_sense(tmp_path, day, segment, "Home Reno")
+
+    result = aggregate_speculative_facets(days=[day])
+
+    assert result == [
+        {
+            "name": "Home Reno",
+            "name_key": "home reno",
+            "count": 3,
+            "window_days": FACET_CANDIDATE_WINDOW_DAYS,
+            "samples": [
+                {"day": day, "stream": "archon", "segment": "090000_300"},
+                {"day": day, "stream": "archon", "segment": "093000_300"},
+                {"day": day, "stream": "archon", "segment": "100000_300"},
+            ],
+        }
+    ]
+
+
+def test_aggregate_speculative_facets_skips_one_off(monkeypatch, tmp_path):
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+    day = "20260602"
+    _write_segment_sense(tmp_path, day, "090000_300", "Home Reno")
+    _write_segment_sense(tmp_path, day, "093000_300", None)
+    _write_segment_sense(tmp_path, day, "100000_300", None)
+
+    assert aggregate_speculative_facets(days=[day]) == []
+
+
+def test_aggregate_speculative_facets_skips_invalid_values(monkeypatch, tmp_path):
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+    day = "20260602"
+    _write_segment_sense(tmp_path, day, "090000_300", None)
+    _write_segment_sense(tmp_path, day, "093000_300")
+    _write_segment_sense(tmp_path, day, "100000_300", 123)
+    _write_segment_sense(tmp_path, day, "103000_300", "")
+    _write_segment_sense(tmp_path, day, "110000_300", "Home Reno")
+
+    result = aggregate_speculative_facets(days=[day], min_count=1)
+
+    assert len(result) == 1
+    assert result[0]["name_key"] == "home reno"
+    assert result[0]["count"] == 1
+
+
+def test_aggregate_speculative_facets_uses_rolling_window(monkeypatch, tmp_path):
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+    now = datetime.now()
+    today = now.strftime("%Y%m%d")
+    two_days_ago = (now - timedelta(days=2)).strftime("%Y%m%d")
+    old_day = (now - timedelta(days=FACET_CANDIDATE_WINDOW_DAYS + 5)).strftime("%Y%m%d")
+    _write_segment_sense(tmp_path, today, "090000_300", "Home Reno")
+    _write_segment_sense(tmp_path, today, "093000_300", "Home Reno")
+    _write_segment_sense(tmp_path, two_days_ago, "100000_300", "Home Reno")
+    _write_segment_sense(tmp_path, old_day, "090000_300", "Home Reno")
+    _write_segment_sense(tmp_path, old_day, "093000_300", "Home Reno")
+
+    result = aggregate_speculative_facets()
+
+    assert len(result) == 1
+    assert result[0]["name_key"] == "home reno"
+    assert result[0]["count"] == 3
+
+
+def test_aggregate_speculative_facets_groups_case_and_whitespace(monkeypatch, tmp_path):
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+    day = "20260602"
+    _write_segment_sense(tmp_path, day, "090000_300", "Home Reno")
+    _write_segment_sense(tmp_path, day, "093000_300", "  home   reno ")
+    _write_segment_sense(tmp_path, day, "100000_300", "HOME RENO")
+
+    result = aggregate_speculative_facets(days=[day])
+
+    assert len(result) == 1
+    assert result[0]["name"] == "Home Reno"
+    assert result[0]["name_key"] == "home reno"
+    assert result[0]["count"] == 3
 
 
 # ============================================================================

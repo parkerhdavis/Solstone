@@ -56,6 +56,7 @@ from solstone.observe.utils import (
 from solstone.think.streams import stream_name, update_stream, write_segment_stream
 from solstone.think.utils import day_path, iter_segments, now_ms, segment_path
 
+from .share_delete import DELETABLE_SOURCE_STREAMS, delete_source_stream
 from .utils import (
     ObserverRegistry,
     append_history_record,
@@ -502,6 +503,45 @@ def _save_to_failed(
 # === Ingest API (key-protected) ===
 
 
+@observer_bp.route("/source/<stream>", methods=["DELETE"])
+@observer_bp.route("/source/<stream>/<key>", methods=["DELETE"])
+def delete_source(stream: str, key: str | None = None) -> Any:
+    """Delete an allowed source stream for an authenticated observer."""
+    observer, key_prefix, error = resolve_observer_identity(key)
+    if error is not None:
+        return error
+
+    if stream not in DELETABLE_SOURCE_STREAMS:
+        return error_response(
+            INVALID_SEGMENT_OR_STREAM,
+            detail="Only known source streams can be deleted",
+        )
+
+    form_stream = request.form.get("stream", "").strip()
+    meta_stream = ""
+    meta_str = request.form.get("meta", "").strip()
+    if meta_str:
+        try:
+            parsed = json.loads(meta_str)
+            if isinstance(parsed, dict):
+                meta_stream = str(parsed.get("stream", "")).strip()
+        except json.JSONDecodeError:
+            meta_stream = ""
+
+    for candidate in (form_stream, meta_stream):
+        if candidate and candidate not in DELETABLE_SOURCE_STREAMS:
+            return error_response(
+                INVALID_SEGMENT_OR_STREAM,
+                detail="Only known source streams can be deleted",
+            )
+
+    receipt = delete_source_stream(stream)
+    logger.info(
+        "Deleted %s source (observer=%s)", stream, observer.get("name", key_prefix)
+    )
+    return jsonify(receipt), 200
+
+
 def _process_ingest_files(
     observer: dict,
     key_prefix: str,
@@ -759,7 +799,7 @@ def ingest_upload(key: str | None = None) -> Any:
         logger.warning(
             f"Observer '{observer_name}' ({key_prefix}) connecting from host "
             f"'{effective_host}' — hostname differs from registered name. "
-            f"Use `sol observer rename` to update if the host was renamed."
+            f"Use `journal observer rename` to update if the host was renamed."
         )
 
     if not segment:
