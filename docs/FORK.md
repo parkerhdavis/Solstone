@@ -1,6 +1,6 @@
 # Fork Divergence
 
-This document catalogs how this fork (`parkerhdavis/Solstone`) currently diverges from upstream (`solpbc/solstone`). It is a **map of the live divergence surface**, not a running changelog — when a fork change lands upstream or is removed, it drops out of the sections below into [Historical context](#historical-context) rather than accreting.
+This document catalogs how this fork (`parkerhdavis/Solstone`) currently diverges from upstream (`solpbc/solstone-journal`, formerly `solpbc/solstone`). It is a **map of the live divergence surface**, not a running changelog — when a fork change lands upstream or is removed, it drops out of the sections below into [Historical context](#historical-context) rather than accreting.
 
 The fork is a dev/testing instance running on a DGX Spark (GB10, aarch64 Linux). Almost all divergence clusters around two things upstream doesn't carry:
 
