@@ -69,6 +69,33 @@ def collect_version() -> str | None:
         return None
 
 
+def collect_revision() -> str | None:
+    """Return the source git short-HEAD, rooted at the solstone package dir.
+
+    Reports the running commit even when the frozen package ``version`` is
+    stale (it does not advance on ``git pull``).  Returns ``None`` when git is
+    unavailable or the source tree is not a checkout (e.g. a wheel install).
+    Rooted at the package dir, not the process CWD, so it works from a service
+    whose CWD differs from the checkout.  Never raises.
+    """
+    import subprocess
+
+    # parents[2] of .../solstone/apps/support/diagnostics.py is the solstone
+    # package dir; git rev-parse walks up from there to the checkout's .git.
+    package_dir = Path(__file__).resolve().parents[2]
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=package_dir,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return result.stdout.strip() if result.returncode == 0 else None
+    except Exception:
+        return None
+
+
 def collect_platform() -> dict[str, str]:
     """Return OS / platform info."""
     return {
@@ -120,6 +147,7 @@ def collect_recent_errors(limit: int = 10) -> list[dict[str, Any]]:
     candidates: list[tuple[datetime, dict[str, Any]]] = []
     for log_file in health_dir.glob("*.log"):
         file_mtime: datetime | None = None
+        last_parsed_dt: datetime | None = None
         try:
             lines = log_file.read_text(errors="replace").splitlines()
             for line in lines:
@@ -131,13 +159,19 @@ def collect_recent_errors(limit: int = 10) -> list[dict[str, Any]]:
                     if not parts:
                         raise ValueError
                     dt = datetime.fromisoformat(parts[0])
+                    last_parsed_dt = dt
                     approx = False
                     # Head slice is intentional: the prefix carries ERROR details.
                     message = (parts[1] if len(parts) > 1 else "").strip()[:500]
                 except ValueError:
-                    if file_mtime is None:
-                        file_mtime = datetime.fromtimestamp(log_file.stat().st_mtime)
-                    dt = file_mtime
+                    if last_parsed_dt is not None:
+                        dt = last_parsed_dt
+                    else:
+                        if file_mtime is None:
+                            file_mtime = datetime.fromtimestamp(
+                                log_file.stat().st_mtime
+                            )
+                        dt = file_mtime
                     approx = True
                     message = line.strip()[:500]
 
@@ -193,6 +227,11 @@ def collect_all() -> dict[str, Any]:
         diagnostics["version"] = collect_version()
     except Exception as exc:
         logger.debug("version collection failed: %s", exc)
+
+    try:
+        diagnostics["revision"] = collect_revision()
+    except Exception as exc:
+        logger.debug("revision collection failed: %s", exc)
 
     try:
         diagnostics["platform"] = collect_platform()

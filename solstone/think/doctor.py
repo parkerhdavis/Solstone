@@ -41,6 +41,7 @@ from typing import IO, Any, Callable, Sequence
 
 from solstone.think import features as _features
 from solstone.think.health_cli import fetch_supervisor_status
+from solstone.think.pipeline_health import BACKLOG_STATE_UNKNOWN, read_backlog_view
 from solstone.think.probe import (
     CONFIG_DIR_READABLE_CHECK,
     DEFAULT_REQUIRES_PYTHON,
@@ -113,6 +114,12 @@ _DEFAULT_STT_RUNTIME_FIX = (
 _DEFAULT_STT_MODEL_FIX = (
     "parakeet model is not downloaded — fetch it with: journal install-models"
 )
+JOURNAL_CAUGHT_UP_CHECK = Check("journal_caught_up", "advisory", ("linux", "darwin"))
+_CAUGHT_UP_BACKLOG_FIX = (
+    "solstone catches up on its own; reprocess a day from the health surface "
+    "to prioritize it"
+)
+_CAUGHT_UP_CANT_TELL_FIX = "re-run journal doctor; check the health logs if it persists"
 
 
 def python_sanity_check(args: Args) -> CheckResult:
@@ -345,24 +352,8 @@ def _recognized_legacy_target(target: Path) -> str | None:
     return None
 
 
-def _legacy_backup_dir() -> Path:
-    return Path("/tmp")
-
-
-def _legacy_backup_path(binary: str) -> Path:
-    timestamp = time.strftime("%Y%m%d%H%M%S", time.gmtime())
-    base = _legacy_backup_dir() / f"{binary}.old-symlink-{timestamp}"
-    for index in range(100):
-        candidate = base if index == 0 else base.with_name(f"{base.name}-{index}")
-        if not candidate.exists() and not candidate.is_symlink():
-            return candidate
-    raise RuntimeError(
-        "could not find unique backup path under /tmp after 100 attempts"
-    )
-
-
-def _latest_legacy_backup(binary: str) -> Path | None:
-    matches = list(_legacy_backup_dir().glob(f"{binary}.old-symlink-*"))
+def _latest_legacy_backup(install_guard: object, binary: str) -> Path | None:
+    matches = list(install_guard._legacy_backup_dir().glob(f"{binary}.old-symlink-*"))
     if not matches:
         return None
 
@@ -421,7 +412,7 @@ def _auto_migrate_legacy_aliases(
     _target, tag = legacy
 
     try:
-        backup = _legacy_backup_path(binary)
+        backup = install_guard._legacy_backup_path(binary)
         backup.parent.mkdir(parents=True, exist_ok=True)
         alias.replace(backup)
 
@@ -465,11 +456,11 @@ def stale_alias_symlink_check(args: Args, binary: str) -> CheckResult:
     install_guard = importlib.import_module(check_alias.__module__)
     alias = install_guard.alias_paths()[binary]
     if not alias.exists() and not alias.is_symlink():
-        backup = _latest_legacy_backup(binary)
+        backup = _latest_legacy_backup(install_guard, binary)
         if backup is not None:
             return make_result(
                 check,
-                "fail",
+                "warn",
                 _partial_migration_detail(binary, backup),
                 "restore the backup or re-run from a fresh shell",
             )
@@ -510,9 +501,9 @@ def stale_alias_symlink_check(args: Args, binary: str) -> CheckResult:
         fail_detail = f"unexpected alias state for {binary}: {state}"
     return make_result(
         check,
-        "fail",
+        "warn",
         fail_detail,
-        f"run `journal setup` from the repo that owns the wrapper, or remove `~/.local/bin/{binary}` manually if the repo is gone",
+        f"another sol/journal CLI is installed at ~/.local/bin/{binary}; run `journal setup` to repair",
     )
 
 
@@ -566,6 +557,37 @@ def journal_sync_check(args: Args) -> CheckResult:
 
     status: Status = "fail" if result.is_conflict else "ok"
     return make_result(check, status, format_doctor_report(result))
+
+
+def journal_caught_up_check(args: Args) -> CheckResult:
+    del args
+    check = JOURNAL_CAUGHT_UP_CHECK
+    try:
+        view = read_backlog_view()
+    except Exception as exc:
+        return make_result(
+            check,
+            "warn",
+            f"couldn't fully determine — backlog read failed: {type(exc).__name__}: {exc}",
+            _CAUGHT_UP_CANT_TELL_FIX,
+        )
+
+    unknown_days = sum(1 for day in view.days if day.state == BACKLOG_STATE_UNKNOWN)
+    if view.errors or unknown_days:
+        return make_result(
+            check,
+            "warn",
+            f"couldn't fully determine — {unknown_days} day(s) unknown",
+            _CAUGHT_UP_CANT_TELL_FIX,
+        )
+
+    if view.pending_days == 0 and view.stuck_days == 0:
+        return make_result(check, "ok", "caught up")
+
+    detail = f"{view.pending_days} day(s) pending, {view.stuck_days} day(s) stuck"
+    if view.oldest_pending_day:
+        detail += f"; oldest outstanding {view.oldest_pending_day}"
+    return make_result(check, "warn", detail, _CAUGHT_UP_BACKLOG_FIX)
 
 
 def _resolve_configured_backend() -> str | None:
@@ -665,6 +687,7 @@ JOURNAL_CHECKS: list[tuple[Check, Runner]] = [
     (SERVICE_IDENTITY_CHECK, service_identity_check),
     (SERVICE_RUNNING_CHECK, service_running_check),
     (JOURNAL_SYNC_CHECK, journal_sync_check),
+    (JOURNAL_CAUGHT_UP_CHECK, journal_caught_up_check),
     (STALE_ALIAS_CHECK, partial(stale_alias_symlink_check, binary="journal")),
     (LAUNCHD_STALE_PLIST_CHECK, launchd_stale_plist_check),
     (DEFAULT_STT_READY_CHECK, default_stt_ready_check),

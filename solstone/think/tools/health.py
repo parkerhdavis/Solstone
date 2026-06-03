@@ -17,7 +17,7 @@ from solstone.think.surfaces.types import HealthReport
 from solstone.think.utils import require_solstone
 
 app = typer.Typer(
-    help="Health: journal-data trust signals (for infrastructure/service liveness, use `sol health`).",
+    help="Health: journal-data trust signals (for infrastructure/service liveness, use `journal health`).",
     no_args_is_help=True,
 )
 
@@ -64,6 +64,10 @@ def _render_summary(report: HealthReport) -> None:
     typer.echo(
         "  talent_run_failures_24h: "
         + str(report.synthesis_health.talent_run_failures_24h)
+    )
+    typer.echo(
+        "  talent_degraded_outputs_24h: "
+        + str(report.synthesis_health.talent_degraded_outputs_24h)
     )
     typer.echo(
         "  indexer_last_rebuild_at: "

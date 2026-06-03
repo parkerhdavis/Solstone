@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import psutil
@@ -284,7 +285,7 @@ def test_get_command_name():
     get = mod.TaskQueue.get_command_name
 
     # sol X -> X
-    assert get(["sol", "indexer", "--rescan"]) == "indexer"
+    assert get(["journal", "indexer", "--rescan"]) == "indexer"
     assert get(["sol", "insight", "20240101"]) == "insight"
     assert get(["journal", "think", "--day", "20240101"]) == "daily"
 
@@ -333,7 +334,7 @@ def test_get_command_name():
         ],
         ["journal", "think", "--weekly", "-v"],
         ["journal", "think"],
-        ["sol", "indexer", "--rescan"],
+        ["journal", "indexer", "--rescan"],
         ["journal", "sense", "--day", "20260101"],
     ],
 )
@@ -738,7 +739,7 @@ def test_task_queue_same_command_queued(monkeypatch):
     msg1 = {
         "tract": "supervisor",
         "event": "request",
-        "cmd": ["sol", "indexer", "--rescan"],
+        "cmd": ["journal", "indexer", "--rescan"],
     }
     mod._handle_task_request(msg1)
 
@@ -749,7 +750,7 @@ def test_task_queue_same_command_queued(monkeypatch):
     msg2 = {
         "tract": "supervisor",
         "event": "request",
-        "cmd": ["sol", "indexer", "--rescan-full"],
+        "cmd": ["journal", "indexer", "--rescan-full"],
     }
     mod._handle_task_request(msg2)
 
@@ -758,7 +759,7 @@ def test_task_queue_same_command_queued(monkeypatch):
     assert len(mod._task_queue._queues["indexer"]) == 1
     # Queue entries are {refs, cmd} dicts (refs is a list for coalescing)
     assert mod._task_queue._queues["indexer"][0]["cmd"] == [
-        "sol",
+        "journal",
         "indexer",
         "--rescan-full",
     ]
@@ -783,7 +784,7 @@ def test_task_queue_dedupe_exact_match(monkeypatch):
     msg1 = {
         "tract": "supervisor",
         "event": "request",
-        "cmd": ["sol", "indexer", "--rescan"],
+        "cmd": ["journal", "indexer", "--rescan"],
     }
     mod._handle_task_request(msg1)
 
@@ -791,7 +792,7 @@ def test_task_queue_dedupe_exact_match(monkeypatch):
     msg2 = {
         "tract": "supervisor",
         "event": "request",
-        "cmd": ["sol", "indexer", "--rescan"],
+        "cmd": ["journal", "indexer", "--rescan"],
     }
     mod._handle_task_request(msg2)
 
@@ -801,7 +802,7 @@ def test_task_queue_dedupe_exact_match(monkeypatch):
     msg3 = {
         "tract": "supervisor",
         "event": "request",
-        "cmd": ["sol", "indexer", "--rescan"],
+        "cmd": ["journal", "indexer", "--rescan"],
     }
     mod._handle_task_request(msg3)
 
@@ -826,7 +827,7 @@ def test_task_queue_different_commands_independent(monkeypatch):
     msg1 = {
         "tract": "supervisor",
         "event": "request",
-        "cmd": ["sol", "indexer", "--rescan"],
+        "cmd": ["journal", "indexer", "--rescan"],
     }
     mod._handle_task_request(msg1)
 
@@ -852,7 +853,7 @@ def test_process_queue_spawns_next(monkeypatch):
     mod._task_queue._running = {"indexer": {"ref": "ref123", "thread": None}}
     mod._task_queue._queues = {
         "indexer": [
-            {"refs": ["queued-ref"], "cmd": ["sol", "indexer", "--rescan-full"]}
+            {"refs": ["queued-ref"], "cmd": ["journal", "indexer", "--rescan-full"]}
         ]
     }
 
@@ -869,7 +870,7 @@ def test_process_queue_spawns_next(monkeypatch):
     # Should have spawned the queued task with its refs list
     assert len(spawned) == 1
     assert spawned[0][0] == ["queued-ref"]  # refs list preserved from queue
-    assert spawned[0][1] == ["sol", "indexer", "--rescan-full"]  # cmd
+    assert spawned[0][1] == ["journal", "indexer", "--rescan-full"]  # cmd
     assert spawned[0][2] == "indexer"  # cmd_name
 
     # Queue should be empty now
@@ -920,7 +921,7 @@ def test_task_request_uses_caller_provided_ref(monkeypatch):
     msg = {
         "tract": "supervisor",
         "event": "request",
-        "cmd": ["sol", "indexer", "--rescan"],
+        "cmd": ["journal", "indexer", "--rescan"],
         "ref": "my-custom-ref-123",
     }
     mod._handle_task_request(msg)
@@ -948,7 +949,7 @@ def test_task_queue_preserves_caller_ref(monkeypatch):
     msg1 = {
         "tract": "supervisor",
         "event": "request",
-        "cmd": ["sol", "indexer", "--rescan"],
+        "cmd": ["journal", "indexer", "--rescan"],
         "ref": "first-ref",
     }
     mod._handle_task_request(msg1)
@@ -957,7 +958,7 @@ def test_task_queue_preserves_caller_ref(monkeypatch):
     msg2 = {
         "tract": "supervisor",
         "event": "request",
-        "cmd": ["sol", "indexer", "--rescan-full"],
+        "cmd": ["journal", "indexer", "--rescan-full"],
         "ref": "second-ref",
     }
     mod._handle_task_request(msg2)
@@ -966,7 +967,7 @@ def test_task_queue_preserves_caller_ref(monkeypatch):
     assert len(mod._task_queue._queues["indexer"]) == 1
     assert mod._task_queue._queues["indexer"][0]["refs"] == ["second-ref"]
     assert mod._task_queue._queues["indexer"][0]["cmd"] == [
-        "sol",
+        "journal",
         "indexer",
         "--rescan-full",
     ]
@@ -990,7 +991,7 @@ def test_task_queue_coalesces_refs_on_dedupe(monkeypatch):
     msg1 = {
         "tract": "supervisor",
         "event": "request",
-        "cmd": ["sol", "indexer", "--rescan"],
+        "cmd": ["journal", "indexer", "--rescan"],
         "ref": "first-ref",
     }
     mod._handle_task_request(msg1)
@@ -999,7 +1000,7 @@ def test_task_queue_coalesces_refs_on_dedupe(monkeypatch):
     msg2 = {
         "tract": "supervisor",
         "event": "request",
-        "cmd": ["sol", "indexer", "--rescan"],
+        "cmd": ["journal", "indexer", "--rescan"],
         "ref": "second-ref",
     }
     mod._handle_task_request(msg2)
@@ -1008,7 +1009,7 @@ def test_task_queue_coalesces_refs_on_dedupe(monkeypatch):
     msg3 = {
         "tract": "supervisor",
         "event": "request",
-        "cmd": ["sol", "indexer", "--rescan"],
+        "cmd": ["journal", "indexer", "--rescan"],
         "ref": "third-ref",
     }
     mod._handle_task_request(msg3)
@@ -1033,7 +1034,7 @@ def test_process_queue_spawns_with_multiple_refs(monkeypatch):
         "indexer": [
             {
                 "refs": ["ref-A", "ref-B", "ref-C"],
-                "cmd": ["sol", "indexer", "--rescan"],
+                "cmd": ["journal", "indexer", "--rescan"],
             }
         ]
     }
@@ -1051,7 +1052,7 @@ def test_process_queue_spawns_with_multiple_refs(monkeypatch):
     # Should spawn with all three refs
     assert len(spawned) == 1
     assert spawned[0][0] == ["ref-A", "ref-B", "ref-C"]  # all refs passed
-    assert spawned[0][1] == ["sol", "indexer", "--rescan"]
+    assert spawned[0][1] == ["journal", "indexer", "--rescan"]
 
 
 def test_stale_queue_detected_on_submit(monkeypatch):
@@ -1078,7 +1079,7 @@ def test_stale_queue_detected_on_submit(monkeypatch):
     mod._task_queue._running = {"indexer": {"ref": "stale-ref", "thread": dead_thread}}
     mod._task_queue._queues = {
         "indexer": [
-            {"refs": ["queued-ref"], "cmd": ["sol", "indexer", "--rescan-full"]}
+            {"refs": ["queued-ref"], "cmd": ["journal", "indexer", "--rescan-full"]}
         ]
     }
 
@@ -1086,7 +1087,7 @@ def test_stale_queue_detected_on_submit(monkeypatch):
     msg = {
         "tract": "supervisor",
         "event": "request",
-        "cmd": ["sol", "indexer", "--rescan-new"],
+        "cmd": ["journal", "indexer", "--rescan-new"],
         "ref": "new-ref",
     }
     mod._handle_task_request(msg)
@@ -1228,6 +1229,16 @@ def test_scheduler_completion_updates_scheduler_json(tmp_path, monkeypatch):
         "last_ref": "ref-1",
     }
     assert data["other"] == {"last_run": 1}
+
+
+def test_exit_status_for_code_maps_empty_sentinel():
+    from solstone.think.supervisor import _exit_status_for_code
+    from solstone.think.utils import EXIT_EMPTY
+
+    assert _exit_status_for_code(0) == "ok"
+    assert _exit_status_for_code(EXIT_EMPTY) == "empty"
+    assert _exit_status_for_code(1) == "error"
+    assert _exit_status_for_code(75) == "error"
 
 
 def test_run_task_completes_when_scheduler_writeback_fails(monkeypatch):
@@ -1412,7 +1423,7 @@ def test_task_queue_shutdown_terminates_active_tasks():
     mod = importlib.import_module("solstone.think.supervisor")
     queue = mod.TaskQueue(on_queue_change=None)
     first = _TaskManagedStub(cmd=["sol", "import"])
-    second = _TaskManagedStub(cmd=["sol", "indexer"])
+    second = _TaskManagedStub(cmd=["journal", "indexer"])
     queue._active = {"first": first, "second": second}
 
     assert queue.shutdown() == 2
@@ -1432,7 +1443,7 @@ def test_task_queue_shutdown_continues_after_timeout():
     mod = importlib.import_module("solstone.think.supervisor")
     queue = mod.TaskQueue(on_queue_change=None)
     first = _TaskManagedStub(cmd=["sol", "import"])
-    second = _TaskManagedStub(cmd=["sol", "indexer"])
+    second = _TaskManagedStub(cmd=["journal", "indexer"])
     first.terminate.side_effect = subprocess.TimeoutExpired(
         cmd=["sol", "import"], timeout=10
     )
@@ -1475,7 +1486,7 @@ def test_enforce_deadlines_terminates_when_elapsed_exceeds_cap(caplog, monkeypat
 def test_collect_task_status_no_cap(monkeypatch):
     mod = importlib.import_module("solstone.think.supervisor")
     queue = mod.TaskQueue(on_queue_change=None)
-    managed = _TaskManagedStub(cmd=["sol", "providers"], start_time=100.0)
+    managed = _TaskManagedStub(cmd=["journal", "providers"], start_time=100.0)
     queue._active["ref-1"] = managed
     monkeypatch.setattr(mod.time, "time", lambda: 112.0)
 
@@ -1493,7 +1504,7 @@ def test_collect_task_status_no_cap(monkeypatch):
 def test_collect_task_status_under_cap(monkeypatch):
     mod = importlib.import_module("solstone.think.supervisor")
     queue = mod.TaskQueue(on_queue_change=None)
-    managed = _TaskManagedStub(cmd=["sol", "providers"], start_time=100.0)
+    managed = _TaskManagedStub(cmd=["journal", "providers"], start_time=100.0)
     queue._active["ref-1"] = managed
     queue.set_cap("providers", 300)
     monkeypatch.setattr(mod.time, "time", lambda: 112.0)
@@ -1507,7 +1518,7 @@ def test_collect_task_status_under_cap(monkeypatch):
 def test_collect_task_status_over_cap(monkeypatch):
     mod = importlib.import_module("solstone.think.supervisor")
     queue = mod.TaskQueue(on_queue_change=None)
-    managed = _TaskManagedStub(cmd=["sol", "providers"], start_time=100.0)
+    managed = _TaskManagedStub(cmd=["journal", "providers"], start_time=100.0)
     queue._active["ref-1"] = managed
     queue.set_cap("providers", 5)
     monkeypatch.setattr(mod.time, "time", lambda: 112.0)
@@ -1626,6 +1637,93 @@ def test_stop_process_uses_service_shutdown_timeout():
 
     managed.terminate.assert_called_once_with(timeout=9)
     managed.cleanup.assert_called_once_with()
+
+
+def test_start_local_server_launches_mlx_server_on_darwin(
+    tmp_path, monkeypatch, capsys
+):
+    mod = importlib.import_module("solstone.think.supervisor")
+    from solstone.think.providers import local_server, mlx_install
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    mod._SERVICE_STATE.clear()
+    runtime_dir = tmp_path / "gemma4" / "variant-1120"
+    written_ports = []
+    spawned = []
+    managed = _TaskManagedStub(cmd=[])
+    managed.name = "mlx-vlm-server"
+    managed.process.returncode = None
+
+    monkeypatch.setattr(
+        mlx_install,
+        "inspect_readiness",
+        lambda: {
+            "platform_supported": True,
+            "package_available": True,
+            "ram_sufficient": True,
+            "model_installed": True,
+            "runtime_dir": str(runtime_dir),
+            "model_id": "gemma-4-26b-a4b-it-mlx-4bit",
+        },
+    )
+    monkeypatch.setattr(mod, "find_available_port", lambda: 2468)
+    monkeypatch.setattr(
+        mod,
+        "write_service_port",
+        lambda service, port: written_ports.append((service, port)),
+    )
+    monkeypatch.setattr(local_server, "_probe_health", lambda port: ("ready", None))
+
+    def fake_spawn(cmd, *, ref=None, callosum=None, day=None):
+        spawned.append(cmd)
+        managed.cmd = cmd
+        managed.ref = ref
+        return managed
+
+    monkeypatch.setattr(mod.RunnerManagedProcess, "spawn", fake_spawn)
+
+    result = mod.start_local_server()
+
+    assert result is managed
+    assert written_ports == [("local", 2468)]
+    assert spawned == [
+        [
+            str(Path(sys.executable).with_name("mlx-vlm-server")),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "2468",
+            "--model",
+            str(runtime_dir),
+        ]
+    ]
+    assert "0.0.0.0" not in spawned[0]
+    assert "--draft-model" not in spawned[0]
+    assert "--draft-kind" not in spawned[0]
+    assert mod._SERVICE_STATE["mlx-vlm-server"]["restart"] is True
+    assert mod.LOCAL_MODEL_WARMING_UP_COPY in capsys.readouterr().out
+
+
+def test_start_local_server_skips_when_mlx_not_installed_on_darwin(monkeypatch):
+    mod = importlib.import_module("solstone.think.supervisor")
+    from solstone.think.providers import mlx_install
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(
+        mlx_install,
+        "inspect_readiness",
+        lambda: {
+            "platform_supported": True,
+            "package_available": True,
+            "ram_sufficient": True,
+            "model_installed": False,
+        },
+    )
+    launch = MagicMock()
+    monkeypatch.setattr(mod, "_launch_process", launch)
+
+    assert mod.start_local_server() is None
+    launch.assert_not_called()
 
 
 def test_start_local_server_launches_llama_server_key_and_cmd(
@@ -1774,7 +1872,8 @@ def test_supervisor_singleton_lock_acquired(tmp_path, monkeypatch):
     start_time = float(
         (tmp_path / "health" / "supervisor.start_time").read_text().strip()
     )
-    assert start_time > 0
+    assert start_time == psutil.Process(os.getpid()).create_time()
+    assert mod.is_supervisor_up() is True
 
 
 def test_supervisor_singleton_lock_blocked(tmp_path, monkeypatch, capsys):
@@ -1972,3 +2071,21 @@ def test_is_supervisor_up_with_matching_process_identity(tmp_path, monkeypatch):
     )
 
     assert mod.is_supervisor_up() is True
+
+
+def test_is_supervisor_up_boundary_at_shared_tolerance(tmp_path, monkeypatch):
+    mod = importlib.reload(importlib.import_module("solstone.think.supervisor"))
+
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+    health_dir = tmp_path / "health"
+    health_dir.mkdir(parents=True, exist_ok=True)
+    (health_dir / "supervisor.pid").write_text(str(os.getpid()))
+    create_time = psutil.Process(os.getpid()).create_time()
+    within = create_time + mod.START_TIME_TOLERANCE_S - 0.1
+    beyond = create_time + mod.START_TIME_TOLERANCE_S + 0.1
+
+    (health_dir / "supervisor.start_time").write_text(str(within))
+    assert mod.is_supervisor_up() is True
+
+    (health_dir / "supervisor.start_time").write_text(str(beyond))
+    assert mod.is_supervisor_up() is False

@@ -60,7 +60,7 @@ JOURNAL_ACCESS_CMD_ERROR = (
     "('journal' surfaces only journal-service commands; see 'journal --help'.)"
 )
 SOL_SERVICE_CMD_REMOVED_ERROR = (
-    "'{cmd}' moved to 'journal {cmd}' in solstone 0.4.0 — run that instead.\n"
+    "'{cmd}' moved to 'journal {cmd}' — run that instead.\n"
     "('sol' is the journal-access surface; 'journal' surfaces journal-service "
     "commands; see 'journal --help'.)"
 )
@@ -77,43 +77,50 @@ COMMANDS: dict[str, Command] = {
     # think package - daily processing and analysis
     "import": Command("solstone.think.importers.cli", "access"),
     "think": Command("solstone.think.thinking", "service"),
-    "indexer": Command("solstone.think.indexer", "access"),
+    "indexer": Command("solstone.think.indexer", "service"),
     "start": Command("solstone.think.start", "service"),
     "supervisor": Command("solstone.think.supervisor", "service"),
     "schedule": Command("solstone.think.scheduler", "service"),
-    "top": Command("solstone.think.top", "access"),
-    "health": Command("solstone.think.health_cli", "access"),
+    "top": Command("solstone.think.top", "service"),
+    "health": Command("solstone.think.health_cli", "service"),
     "notify": Command("solstone.think.notify_cli", "access"),
     "doctor": Command("solstone.think.doctor", "universal"),
     "config": Command("solstone.think.config_cli", "service"),
     "install-models": Command("solstone.think.install_models", "service"),
+    "install-provider": Command("solstone.think.install_provider", "service"),
     "skills": Command("solstone.think.skills_cli", "access"),
     "password": Command("solstone.think.password_cli", "service"),
-    "streams": Command("solstone.think.streams", "access"),
-    "segment": Command("solstone.think.segment", "access"),
-    "journal-stats": Command("solstone.think.journal_stats", "access"),
-    "reprocess": Command("solstone.think.reprocess", "access"),
+    "streams": Command("solstone.think.streams", "service"),
+    "segment": Command("solstone.think.segment", "service"),
+    "journal-stats": Command("solstone.think.journal_stats", "service"),
+    "reprocess": Command("solstone.think.reprocess", "service"),
     # observe package - multimodal capture
     "transcribe": Command("solstone.observe.transcribe", "service"),
     "describe": Command("solstone.observe.describe", "service"),
+    "extract": Command("solstone.observe.extract_pdf", "service"),
+    "depict": Command("solstone.observe.depict", "service"),
     "sense": Command("solstone.observe.sense", "service"),
     "transfer": Command("solstone.observe.transfer", "service"),
     "export": Command("solstone.observe.export", "service"),
     "grab": Command("solstone.observe.grab", "service"),
-    "observer": Command("solstone.observe.observer_cli", "access"),
+    "observer": Command("solstone.observe.observer_cli", "service"),
     # AI providers and talent execution
-    "providers": Command("solstone.think.providers_cli", "access"),
+    "providers": Command("solstone.think.providers_cli", "service"),
+    "facet-candidates": Command("solstone.think.facet_candidates_cli", "service"),
     "cortex": Command("solstone.think.cortex", "service"),
     "talent": Command("solstone.think.talent_cli", "service"),
     "link": Command("solstone.think.link", "access"),
     "spl": Command("solstone.think.spl", "service"),
     "call": Command("solstone.think.call", "access"),
-    "engage": Command("solstone.think.engage", "access"),
+    "navigate": Command("solstone.think.tools.navigate", "service"),
+    "routines": Command("solstone.think.tools.routines", "service"),
+    "identity": Command("solstone.think.tools.sol", "service"),
+    "engage": Command("solstone.think.engage", "service"),
     "chat": Command("solstone.think.chat_cli", "access"),
     "heartbeat": Command("solstone.think.heartbeat", "service"),
     # convey package - web UI
     "convey": Command("solstone.convey.cli", "service"),
-    "restart-convey": Command("solstone.convey.restart", "access"),
+    "restart-convey": Command("solstone.convey.restart", "service"),
     "maint": Command("solstone.convey.maint_cli", "service"),
     "service": Command("solstone.think.service", "service"),
     "services": Command("solstone.think.services", "service"),
@@ -126,8 +133,8 @@ COMMANDS: dict[str, Command] = {
 # Maps alias names to (module, default_args) tuples.
 # These provide shortcuts for common operations with preset arguments.
 #
-# Example: "reindex": ("solstone.think.indexer", ["--rescan"])
-#   Running "sol reindex" is equivalent to "sol indexer --rescan"
+# Example: "up": Alias("solstone.think.service", ["up"], "service")
+#   Running "journal up" is equivalent to "journal service up"
 # =============================================================================
 
 ALIASES: dict[str, Alias] = {
@@ -140,17 +147,12 @@ ALIASES: dict[str, Alias] = {
 # Access-tagged commands are assigned to one of the four intent groups below.
 # Future access commands must be assigned here deliberately.
 ACCESS_HELP_GROUPS: tuple[HelpGroup, ...] = (
-    HelpGroup(SOL_HELP_GROUP_CONVERSATION, ("chat", "engage")),
-    HelpGroup(
-        SOL_HELP_GROUP_YOUR_JOURNAL,
-        ("call", "import", "journal-stats", "segment", "streams", "indexer"),
-    ),
-    HelpGroup(
-        SOL_HELP_GROUP_DIAGNOSE, ("top", "health", "notify", "doctor", "reprocess")
-    ),
+    HelpGroup(SOL_HELP_GROUP_CONVERSATION, ("chat",)),
+    HelpGroup(SOL_HELP_GROUP_YOUR_JOURNAL, ("call", "import")),
+    HelpGroup(SOL_HELP_GROUP_DIAGNOSE, ("notify", "doctor")),
     HelpGroup(
         SOL_HELP_GROUP_TOOLS,
-        ("providers", "observer", "skills", "restart-convey", "link"),
+        ("skills", "link"),
     ),
 )
 

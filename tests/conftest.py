@@ -171,10 +171,35 @@ def _cleanup_push_runtime():
     stop_all_push_runtime()
 
 
+def _reset_chat_module_state():
+    """Bring solstone.convey.chat to a clean slate between tests.
+
+    stop_all_chat_runtime() cancels watchdog timers and clears the runtime,
+    _reserved_use_ids, and the thinking buffers. The remaining module-global
+    singletons are test-state only — notably _last_use_id, a monotonic id
+    counter production must NOT reset (resetting it live would collide
+    use_ids) — so they are cleared here in the fixture rather than in
+    production stop_all_chat_runtime().
+    """
+    import solstone.convey.chat as chat
+
+    stop_all_chat_runtime()
+    with chat._state_lock:
+        chat._current_chat_use_id = None
+        chat._current_chat_state = None
+        chat._queued_triggers.clear()
+        chat._active_talents.clear()
+        chat._last_use_id = 0
+
+
 @pytest.fixture(autouse=True)
 def _cleanup_chat_runtime():
+    # Reset before and after every test so a sibling that mutates chat's
+    # module-global singletons can't bleed into the next test, regardless of
+    # whether the test called its own _reset_chat_state helper.
+    _reset_chat_module_state()
     yield
-    stop_all_chat_runtime()
+    _reset_chat_module_state()
 
 
 @pytest.fixture
@@ -314,7 +339,7 @@ def reset_supervisor_state():
 
         # Reset before test
         mod._daily_state["last_day"] = None
-        mod._recovery_state["llama_server_down"] = False
+        mod._recovery_state["local_server_down"] = False
         mod._is_remote_mode = False
         # Create fresh task queue
         mod._task_queue = mod.TaskQueue(on_queue_change=None)
@@ -326,7 +351,7 @@ def reset_supervisor_state():
 
         # Reset after test
         mod._daily_state["last_day"] = None
-        mod._recovery_state["llama_server_down"] = False
+        mod._recovery_state["local_server_down"] = False
         mod._is_remote_mode = False
         mod._observer_health = {}
         mod._enabled_observers = set()

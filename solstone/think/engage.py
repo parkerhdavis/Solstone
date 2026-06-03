@@ -3,7 +3,7 @@
 
 """CLI for delegating work to cogitate agents.
 
-Provides ``sol engage <name>`` for delegating work to cogitate agents.
+Provides ``journal engage <name>`` for delegating work to cogitate agents.
 """
 
 import sys
@@ -68,7 +68,7 @@ def _engage(
 
 @engage_app.command()
 def engage(
-    name: str = typer.Argument(help="Agent name to delegate to (e.g. coder)."),
+    name: str = typer.Argument(help="Agent name to delegate to (e.g. partner)."),
     wait: bool = typer.Option(
         False,
         "--wait",
@@ -88,8 +88,8 @@ def engage(
 
     Example::
 
-        echo 'Fix the matching bug' | sol engage coder
-        echo 'Fix the matching bug' | sol engage coder --wait
+        echo 'Review my priorities this week' | journal engage partner
+        echo 'Review my priorities this week' | journal engage partner --wait
     """
     prompt = sys.stdin.read()
     if not prompt.strip():
@@ -100,7 +100,7 @@ def engage(
 
 
 def main() -> None:
-    """Entry point for ``sol engage``."""
+    """Entry point for ``journal engage``."""
     if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
         engage_app()
         return

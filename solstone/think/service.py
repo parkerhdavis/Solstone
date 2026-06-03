@@ -21,11 +21,13 @@ Default convey port for installed services is 5015.
 
 from __future__ import annotations
 
+import logging
 import os
 import plistlib
 import shlex
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from xml.parsers.expat import ExpatError
@@ -41,6 +43,11 @@ SERVICE_LABEL = "org.solpbc.solstone"
 SYSTEMD_UNIT = "solstone"
 DEFAULT_SERVICE_PORT = 5015
 READY_TIMEOUT_SECONDS = 60.0
+SERVICE_FILE_DESCRIPTOR_LIMIT = 4096
+_LAUNCHD_UNLOAD_POLL_INTERVAL_S = 0.1
+_LAUNCHD_UNLOAD_TIMEOUT_S = 2.0
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -198,6 +205,7 @@ def _generate_plist(
         "StandardErrorPath": service_log,
         "RunAtLoad": True,
         "KeepAlive": {"SuccessfulExit": False},
+        "SoftResourceLimits": {"NumberOfFiles": SERVICE_FILE_DESCRIPTOR_LIMIT},
     }
     return plistlib.dumps(plist)
 
@@ -605,6 +613,7 @@ def _generate_systemd_unit(
         f"RestartSec=5\n"
         f"KillMode=control-group\n"
         f"TimeoutStopSec=30\n"
+        f"LimitNOFILE={SERVICE_FILE_DESCRIPTOR_LIMIT}\n"
         f"StandardOutput=append:{service_log}\n"
         f"StandardError=inherit\n"
         f"{env_lines}\n"
@@ -653,6 +662,28 @@ def _install(port: int = DEFAULT_SERVICE_PORT) -> int:
             capture_output=True,
             check=False,
         )
+
+        # bootout is async; bootstrapping over a still-loaded label intermittently
+        # fails with "Bootstrap failed: 5: Input/output error". Wait (bounded) for the
+        # label to disappear before writing the plist and bootstrapping.
+        deadline = time.monotonic() + _LAUNCHD_UNLOAD_TIMEOUT_S
+        while time.monotonic() < deadline:
+            try:
+                probe = subprocess.run(
+                    ["launchctl", "print", f"gui/{uid}/{SERVICE_LABEL}"],
+                    capture_output=True,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                break
+            if probe.returncode != 0:
+                break
+            time.sleep(_LAUNCHD_UNLOAD_POLL_INTERVAL_S)
+        else:
+            logger.warning(
+                "Timed out waiting for launchd label %s to unload; bootstrapping anyway",
+                SERVICE_LABEL,
+            )
 
         path.write_bytes(plist_data)
         print(f"Wrote {path}")
@@ -909,7 +940,10 @@ def _up(port: int = DEFAULT_SERVICE_PORT) -> int:
         clear_ready()
         rc = _start()
         if rc != 0:
-            return rc
+            if wait_ready(timeout=READY_TIMEOUT_SECONDS) is None:
+                return rc
+            _status()
+            return 0
 
     if wait_ready(timeout=READY_TIMEOUT_SECONDS) is None:
         print(_ready_timeout_message(), file=sys.stderr)

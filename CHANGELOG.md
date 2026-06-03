@@ -4,10 +4,47 @@ All notable changes to solstone (the Python package) will be documented in this 
 
 Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), aligned with `cmo/brand/changelog-voice.md`.
 
-## [Unreleased]
+## [0.4.10] - 2026-06-02
+
+### Added
+- pdfs and still images that come in with your day are now read into your journal and made searchable, the same way a transcript is. sol can find what a document or an image actually contains, not just that one was there. on a scanned pdf with no selectable text, sol reads the page itself. nothing new leaves your machine, and what's kept on disk is unchanged.
+
+### Fixed
+- if you run the on-device option on a Mac, it works again. on apple silicon, on-device thinking and vision had started turning away every request, so the day's processing stalled; this resolves it. and if the on-device engine ever restarts, your journal now catches up on anything it missed while it was down.
+- solstone no longer tells you an update is available when there isn't one. if you were already on the latest build, or running a pre-release or development build that's ahead of it, the check could nudge you for nothing. it now points to an update only when a genuinely newer published version exists.
+
+## [0.4.9] - 2026-06-02
+
+### Fixed
+- upgrading on macos is steadier when the journal service is already running. setup waits for the old service to finish unloading and uses the service's real start time, so a healthy upgrade does not stall at readiness.
+- solstone raises the file limit for the installed journal service, giving long-running journals more room for observers, local providers, and background work.
+- revealing a provider key in settings is now only visual. clicking the eye button no longer triggers an unwanted save, validation, or clear.
+
+## [0.4.8] - 2026-06-01
+
+### Fixed
+- macos setup now tolerates a launchd race where the journal service starts and becomes healthy even though `launchctl kickstart` reports a transient error. setup trusts the supervisor readiness marker, so an upgrade can continue to observer registration instead of stopping at "service up failed".
+
+## [0.4.7] - 2026-05-31
+
+### Fixed
+- upgrading over an older install no longer stops because the `sol` or `journal` shortcut in your shell points somewhere stale. setup now repairs the shortcuts it owns and keeps going, whether solstone came from the macos app or from the terminal.
+- sol's background thinking can ask the journal for identity, routines, health, and talent context again. those approved journal tools were being turned away before sol could use them; now they work without widening what sol is allowed to run.
+- fresh installs from PyPI resolve cleanly when pip chooses the dependencies. solstone now pins the matching telemetry packages used by sol's thinking runtime, so install no longer lands on an incompatible mix.
+
+## [0.4.6] - 2026-05-31
+
+### Added
+- you can now re-run sol's thinking on any day from the page, either "process now" to pick up where it left off or "redo from scratch" to start the day over. the same is available in the terminal with `sol reprocess <day>`.
 
 ### Changed
-- on linux, the default on-device transcription now works out of the box — its runtime ships with the install and `journal setup` downloads the model, so there's no separate extra to add. NVIDIA GPU owners can still opt into `solstone[parakeet-onnx-cuda]` for GPU acceleration, and `sol doctor` now reports whether the default transcription backend's runtime and model are ready.
+- your journal now tells you plainly whether it's caught up. the stats and health pages show an honest "is my journal caught up?" answer plus a "days that need a hand" list for any day it can't finish on its own, like one with corrupted data or a step that keeps failing. catch-up runs on its own in the background, never leaves older days behind, and `journal doctor` reports the same answer from the terminal.
+- the on-device option is now a single "Local (on-device)" choice on both macOS and linux. on a Mac it now runs entirely on your machine, including sol's thinking, so the local-only path covers more of your journal without anything leaving your machine.
+- on linux, the default on-device transcription now works the moment you install, with no extra to add. the runtime ships with the install and `journal setup` fetches the model. owners with an NVIDIA GPU can still opt into a GPU-accelerated build, and `journal doctor` now reports whether the default transcription runtime and model are ready.
+- local journal commands now live with the journal service. things like navigating, routines, identity, on-device provider install, health, and stats moved from `sol` to `journal` (for example `journal navigate`, `journal health`, `journal reprocess`). the old `sol` forms now point you to the new one.
+
+### Fixed
+- your journal no longer shows finished work as still pending. days that had an earlier error but later completed were being counted as outstanding, so the backlog looked larger than it was. the count now reflects what's actually still incomplete.
 
 ## [0.4.5] - 2026-05-30
 

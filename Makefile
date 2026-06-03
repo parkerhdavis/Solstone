@@ -26,18 +26,20 @@ VENV_PY := $(VENV_BIN)/python
 PYTHON := $(VENV_PY)
 PARAKEET_ONNX_VARIANT ?= $(shell if nvidia-smi -L >/dev/null 2>&1; then echo cuda; else echo cpu; fi)
 
-# Dev install extras: parakeet-onnx-cuda's onnxruntime-gpu / nvidia-* deps have
-# no arm64 wheels, so on any arm64 host (Darwin arm64 and Linux aarch64 alike --
-# e.g. the DGX Spark) we sync only the platform-agnostic extras and skip the
-# full extras sync (which would otherwise force resolution of parakeet variants
-# and fail). x86_64 Linux keeps the full set.
-ifeq ($(shell uname -s),Darwin)
-EXTRAS_ARGS := --extra pdf --extra whisper
-else ifeq ($(shell uname -m),aarch64)
-EXTRAS_ARGS := --extra pdf --extra whisper
-else
-EXTRAS_ARGS := --all-extras
-endif
+# Dev install extras: NEVER use --all-extras. It enables BOTH parakeet-onnx-cpu
+# and parakeet-onnx-cuda, which are mutually-exclusive hardware backends:
+#   - cpu pulls onnxruntime; cuda pulls onnxruntime-gpu. Both packages own the
+#     SAME onnxruntime/ import dir. The dedicated per-host parakeet step below
+#     (uv sync --extra all --extra parakeet-onnx-$(PARAKEET_ONNX_VARIANT)) then
+#     uninstalls the non-selected variant, and that uninstall deletes the shared
+#     onnxruntime/ files -> `import onnxruntime` fails (ModuleNotFoundError) even
+#     though uv still lists it installed. Surfaces as `journal install-models`
+#     dying with "No module named 'onnxruntime'" on a non-NVIDIA Linux box.
+#   - on Darwin, --all-extras also forces resolution of cuda's nvidia-* wheels,
+#     which have no arm64 builds, so `uv sync` errors out outright.
+# Sync ONLY the platform-agnostic bundle here (`all` = pdf + whisper); the
+# dedicated parakeet step installs exactly one variant for the host.
+EXTRAS_ARGS := --extra all
 
 # Require uv only for goals that actually use it. `preflight` is a pure
 # stdlib readiness battery and `install` runs preflight as its own fail-fast
@@ -159,7 +161,7 @@ sandbox: .installed
 	echo "Waiting for services..."; \
 	READY=false; \
 	for i in $$(seq 1 20); do \
-		if SOLSTONE_JOURNAL="$$SANDBOX_JOURNAL" $(VENV_BIN)/sol health > /dev/null 2>&1; then \
+		if SOLSTONE_JOURNAL="$$SANDBOX_JOURNAL" $(VENV_BIN)/journal health > /dev/null 2>&1; then \
 			READY=true; \
 			break; \
 		fi; \
@@ -213,7 +215,7 @@ verify-api: .installed
 	@SANDBOX_JOURNAL=$$(cat .sandbox.journal); \
 	CONVEY_PORT=$$(cat "$$SANDBOX_JOURNAL/health/convey.port"); \
 	RESULT=0; \
-	SOLSTONE_JOURNAL="$$SANDBOX_JOURNAL" $(VENV_BIN)/sol indexer --rescan-full > /dev/null; \
+	SOLSTONE_JOURNAL="$$SANDBOX_JOURNAL" $(VENV_BIN)/journal indexer --rescan-full > /dev/null; \
 	SOLSTONE_JOURNAL="$$SANDBOX_JOURNAL" $(VENV_BIN)/python tests/verify_api.py verify --base-url "http://localhost:$$CONVEY_PORT" || RESULT=$$?; \
 	$(MAKE) sandbox-stop; \
 	exit $$RESULT
@@ -229,7 +231,7 @@ update-api-baselines: .installed
 		SANDBOX_JOURNAL=$$(cat .sandbox.journal); \
 		CONVEY_PORT=$$(cat "$$SANDBOX_JOURNAL/health/convey.port"); \
 		RESULT=0; \
-		SOLSTONE_JOURNAL="$$SANDBOX_JOURNAL" $(VENV_BIN)/sol indexer --rescan-full > /dev/null; \
+		SOLSTONE_JOURNAL="$$SANDBOX_JOURNAL" $(VENV_BIN)/journal indexer --rescan-full > /dev/null; \
 		SOLSTONE_JOURNAL="$$SANDBOX_JOURNAL" $(VENV_BIN)/python tests/verify_api.py update --base-url "http://localhost:$$CONVEY_PORT" || RESULT=$$?; \
 		$(MAKE) sandbox-stop; \
 		exit $$RESULT; \
@@ -323,7 +325,7 @@ review: .installed
 	BASE_URL="http://localhost:$$CONVEY_PORT"; \
 	RESULT_API=0; \
 	RESULT_BROWSER=0; \
-	SOLSTONE_JOURNAL="$$SANDBOX_JOURNAL" $(VENV_BIN)/sol indexer --rescan-full > /dev/null; \
+	SOLSTONE_JOURNAL="$$SANDBOX_JOURNAL" $(VENV_BIN)/journal indexer --rescan-full > /dev/null; \
 	echo ""; \
 	echo "=== API baseline verification ==="; \
 	SOLSTONE_JOURNAL="$$SANDBOX_JOURNAL" $(VENV_BIN)/python tests/verify_api.py verify --base-url "$$BASE_URL" || RESULT_API=$$?; \
