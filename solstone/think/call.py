@@ -31,7 +31,7 @@ def _discover_app_calls() -> None:
 
     Each ``call.py`` must export an ``app`` variable that is a
     ``typer.Typer`` instance.  The app directory name becomes the
-    sub-command name (e.g. ``sol call todos list ...``).
+    sub-command name (e.g. ``sol call entities search ...``).
 
     Errors in one app do not prevent others from loading.
     """
@@ -107,10 +107,15 @@ call_app.add_typer(journal_app, name="journal")
 call_app.add_typer(ledger_app, name="ledger")
 call_app.add_typer(_moved_stub("navigate"), name="navigate")
 call_app.add_typer(profile_app, name="profile")
-call_app.add_typer(_moved_stub("routines"), name="routines")
 call_app.add_typer(_moved_stub("identity"), name="identity")
 
 
 def main() -> None:
     """Entry point for ``sol call``."""
-    call_app()
+    from solstone.think.utils import CorruptConfigError
+
+    try:
+        call_app()
+    except CorruptConfigError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc

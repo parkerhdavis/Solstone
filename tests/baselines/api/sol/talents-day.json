@@ -49,17 +49,6 @@
       "title": "Activities Review",
       "type": "cogitate"
     },
-    "awareness_tender": {
-      "app": null,
-      "color": "#6c757d",
-      "description": "Maintains identity/awareness.md — a compact situational awareness snapshot",
-      "multi_facet": false,
-      "output_format": null,
-      "schedule": "segment",
-      "source": "system",
-      "title": "Awareness Tender",
-      "type": "cogitate"
-    },
     "chat": {
       "app": null,
       "color": "#6c757d",
@@ -92,17 +81,6 @@
       "source": "system",
       "title": "Maintenance Window",
       "type": "generate"
-    },
-    "digest": {
-      "app": null,
-      "color": "#6c757d",
-      "description": "Synthesize a plain-English digest of who sol is and what's happening now.",
-      "multi_facet": false,
-      "output_format": null,
-      "schedule": "none",
-      "source": "system",
-      "title": "Digest",
-      "type": "cogitate"
     },
     "documents": {
       "app": null,
@@ -164,11 +142,11 @@
       "color": "#26a69a",
       "description": "Research and generate single-sentence descriptions for attached entities",
       "multi_facet": false,
-      "output_format": null,
+      "output_format": "md",
       "schedule": null,
       "source": "app",
       "title": "Entity Description",
-      "type": "cogitate"
+      "type": "generate"
     },
     "entities:entity_observer": {
       "app": "entities",
@@ -195,7 +173,7 @@
     "exec": {
       "app": null,
       "color": "#6c757d",
-      "description": "Sol — the journal itself, as a conversational partner",
+      "description": "Sol — takes action and makes changes in the journal",
       "multi_facet": false,
       "output_format": null,
       "schedule": null,
@@ -208,66 +186,11 @@
       "color": "#0d47a1",
       "description": "Creates comprehensive daily newsletters for each facet, capturing activities, progress, and insights",
       "multi_facet": true,
-      "output_format": null,
+      "output_format": "md",
       "schedule": "daily",
       "source": "system",
       "title": "Facet Newsletter Generator",
-      "type": "cogitate"
-    },
-    "heartbeat": {
-      "app": null,
-      "color": "#6c757d",
-      "description": "Sol's periodic self-awareness — journal health, agency tending, curation scan",
-      "multi_facet": false,
-      "output_format": null,
-      "schedule": "none",
-      "source": "system",
-      "title": "Heartbeat",
-      "type": "cogitate"
-    },
-    "import:review": {
-      "app": "import",
-      "color": "#37474f",
-      "description": "Unified import review: resolves staged entities, then facets, then config in dependency order.",
-      "multi_facet": false,
-      "output_format": null,
-      "schedule": null,
-      "source": "app",
-      "title": "Import Review",
-      "type": "cogitate"
-    },
-    "import:review_config": {
-      "app": "import",
-      "color": "#6a1b9a",
-      "description": "Reviews and resolves staged config field differences from journal-to-journal import.",
-      "multi_facet": false,
-      "output_format": null,
-      "schedule": null,
-      "source": "app",
-      "title": "Import Config Reviewer",
-      "type": "cogitate"
-    },
-    "import:review_entities": {
-      "app": "import",
-      "color": "#1565c0",
-      "description": "Reviews and resolves staged entities from journal-to-journal import, handling low-confidence matches, ID collisions, and principal conflicts.",
-      "multi_facet": false,
-      "output_format": null,
-      "schedule": null,
-      "source": "app",
-      "title": "Import Entity Reviewer",
-      "type": "cogitate"
-    },
-    "import:review_facets": {
-      "app": "import",
-      "color": "#2e7d32",
-      "description": "Reviews and resolves staged facet items from journal-to-journal import, handling unmapped entities and facet.json conflicts.",
-      "multi_facet": false,
-      "output_format": null,
-      "schedule": null,
-      "source": "app",
-      "title": "Import Facet Reviewer",
-      "type": "cogitate"
+      "type": "generate"
     },
     "morning_briefing": {
       "app": null,
@@ -278,18 +201,7 @@
       "schedule": "daily",
       "source": "system",
       "title": "Morning Briefing",
-      "type": "cogitate"
-    },
-    "naming": {
-      "app": null,
-      "color": "#6c757d",
-      "description": "Proposes a personalized name for the owner's journal assistant",
-      "multi_facet": false,
-      "output_format": null,
-      "schedule": null,
-      "source": "system",
-      "title": "Naming",
-      "type": "cogitate"
+      "type": "generate"
     },
     "participation": {
       "app": null,
@@ -316,34 +228,23 @@
     "pulse": {
       "app": null,
       "color": "#6c757d",
-      "description": "Living narrative of the owner's day — updated each segment",
+      "description": "Living situational read of the owner's day — the shape of today, what needs them, and a one-line glance.",
       "multi_facet": false,
-      "output_format": null,
-      "schedule": "segment",
+      "output_format": "json",
+      "schedule": "cadence",
       "source": "system",
       "title": "Pulse",
-      "type": "cogitate"
+      "type": "generate"
     },
-    "reflection": {
+    "read": {
       "app": null,
       "color": "#6c757d",
-      "description": "Sol — longer-form reflective synthesis grounded in the journal",
+      "description": "Sol — finds, reads, and synthesizes anything in the journal (read-only)",
       "multi_facet": false,
       "output_format": null,
       "schedule": null,
       "source": "system",
-      "title": "Reflection",
-      "type": "cogitate"
-    },
-    "routine": {
-      "app": null,
-      "color": "#6c757d",
-      "description": "User-defined routine execution — runs owner instructions on schedule",
-      "multi_facet": false,
-      "output_format": null,
-      "schedule": "none",
-      "source": "system",
-      "title": "Routine",
+      "title": "Read",
       "type": "cogitate"
     },
     "schedule": {
@@ -379,28 +280,6 @@
       "title": "Segment Sense",
       "type": "generate"
     },
-    "skills:skill_editor": {
-      "app": "skills",
-      "color": "#8e24aa",
-      "description": "Writes or refreshes one skill profile per day from observer-flagged patterns or chat edit requests.",
-      "multi_facet": false,
-      "output_format": "md",
-      "schedule": "daily",
-      "source": "app",
-      "title": "Skill Editor",
-      "type": "generate"
-    },
-    "skills:skill_observer": {
-      "app": "skills",
-      "color": "#5e35b1",
-      "description": "Daily owner-wide scan for recurring skill patterns in today's activities.",
-      "multi_facet": false,
-      "output_format": null,
-      "schedule": "daily",
-      "source": "app",
-      "title": "Skill Observer",
-      "type": "cogitate"
-    },
     "speaker_attribution": {
       "app": null,
       "color": "#d84315",
@@ -415,13 +294,13 @@
     "steward": {
       "app": null,
       "color": "#6c757d",
-      "description": "Synthesizes federated health signals into identity/health.md.",
+      "description": "Writes the owner-facing health summary (headline, sentence, suggested action) from the deterministic health surface.",
       "multi_facet": false,
-      "output_format": null,
-      "schedule": "daily",
+      "output_format": "json",
+      "schedule": "cadence",
       "source": "system",
       "title": "Steward",
-      "type": "cogitate"
+      "type": "generate"
     },
     "support:support": {
       "app": "support",
@@ -444,39 +323,6 @@
       "source": "app",
       "title": "timeline:segment_summary",
       "type": "generate"
-    },
-    "todos:daily": {
-      "app": "todos",
-      "color": "#ef6c00",
-      "description": "Carries forward unfinished tasks, aggregates per-activity todo detections, validates completions against journal evidence, and prioritises the day's checklist.",
-      "multi_facet": true,
-      "output_format": null,
-      "schedule": "daily",
-      "source": "app",
-      "title": "Daily TODO Curator",
-      "type": "cogitate"
-    },
-    "todos:todo": {
-      "app": "todos",
-      "color": "#e65100",
-      "description": "Detects todo items from activity transcripts and validates existing todos against activity evidence via sol call commands.",
-      "multi_facet": false,
-      "output_format": null,
-      "schedule": "activity",
-      "source": "app",
-      "title": "TODO Detector",
-      "type": "cogitate"
-    },
-    "todos:weekly": {
-      "app": "todos",
-      "color": "#f4511e",
-      "description": "Audits the past week's journal follow-ups to confirm completions and surface the next five high-impact todos for today.",
-      "multi_facet": false,
-      "output_format": null,
-      "schedule": null,
-      "source": "app",
-      "title": "TODO Weekly Scout",
-      "type": "cogitate"
     },
     "weekly_reflection": {
       "app": null,

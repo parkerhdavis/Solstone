@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from timefhuman import timefhuman
 
 from solstone.think.media import MIME_TYPES
+from solstone.think.providers import managed_provider_env_keys
 
 DATE_RE = re.compile(r"\d{8}")
 STREAM_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
@@ -49,6 +50,23 @@ class SolstoneNotConfigured(RuntimeError):
         super().__init__(message)
         self.path = path
         self.error = error
+
+
+class CorruptConfigError(Exception):
+    """Raised when config/journal.json exists but cannot be parsed.
+
+    Distinct from the missing-file case (which returns defaults). The message
+    is owner-voice because it surfaces at sol call / HTTP boundaries.
+    """
+
+    def __init__(self, path: str | Path, *, error: Exception | None = None):
+        self.path = str(path)
+        self.error = error
+        super().__init__(
+            f"I couldn't read your settings file at {self.path}. "
+            "Your settings were NOT changed. "
+            "Repair the file or restore config/journal.json from a backup, then try again."
+        )
 
 
 def now_ms() -> int:
@@ -709,15 +727,6 @@ def _resolve_os_timezone() -> str:
         return ""
 
 
-def _write_config_atomic(path: Path, config: dict[str, Any]) -> None:
-    from solstone.think.entities.core import atomic_write
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    content = json.dumps(config, indent=2, ensure_ascii=False) + "\n"
-    atomic_write(path, content)
-    os.chmod(path, 0o600)
-
-
 def ensure_journal_config() -> dict[str, Any]:
     """Materialize <journal>/config/journal.json and return its contents.
 
@@ -725,6 +734,8 @@ def ensure_journal_config() -> dict[str, Any]:
     file exists but lacks ``convey.secret``, the secret is backfilled. Identity
     fields on an existing file are never modified.
     """
+    from solstone.think.journal_config import write_journal_config
+
     global _default_config
 
     journal = Path(get_journal())
@@ -735,7 +746,7 @@ def ensure_journal_config() -> dict[str, Any]:
             config = json.load(fh)
         if not config.get("convey", {}).get("secret"):
             config.setdefault("convey", {})["secret"] = secrets.token_hex(32)
-            _write_config_atomic(config_path, config)
+            write_journal_config(config)
         return config
 
     if _default_config is None:
@@ -761,7 +772,7 @@ def ensure_journal_config() -> dict[str, Any]:
     config["identity"]["preferred"] = login_name
     config["identity"]["timezone"] = timezone
     config.setdefault("convey", {})["secret"] = secrets.token_hex(32)
-    _write_config_atomic(config_path, config)
+    write_journal_config(config)
     return config
 
 
@@ -813,11 +824,7 @@ def get_config() -> dict[str, Any]:
         with open(config_path, "r", encoding="utf-8") as f:
             return json.load(f)
     except (json.JSONDecodeError, OSError) as exc:
-        # Log error but return defaults to avoid breaking callers
-        logging.getLogger(__name__).warning(
-            "Failed to load config from %s: %s", config_path, exc
-        )
-        return copy.deepcopy(_default_config)
+        raise CorruptConfigError(config_path, error=exc) from exc
 
 
 def _append_task_log(dir_path: str | Path, message: str) -> None:
@@ -893,13 +900,54 @@ def day_input_summary(day: str) -> str:
         return f"{segment_count} segments, {duration_str}"
 
 
+def init_cli_runtime(verbose: bool, debug: bool) -> None:
+    """Configure logging and the journal/provider runtime for a CLI entry point.
+
+    Sets the root log level from the ``verbose``/``debug`` flags, resolves the
+    journal path via :func:`get_journal`, and loads ``journal.json``'s ``env``
+    section into ``os.environ`` — stripping any managed provider key (registry-
+    derived) that config does not set, so a stray shell-set provider key is never
+    used. Shared by :func:`setup_cli` (argparse entry points) and the house Typer
+    service commands so both honour the same ``-v``/``-d`` + provider-env contract.
+    """
+    if debug:
+        log_level = logging.DEBUG
+    elif verbose:
+        log_level = logging.INFO
+    else:
+        log_level = logging.WARNING
+
+    logging.basicConfig(level=log_level)
+
+    # Initialize journal path (auto-creates if needed)
+    get_journal()
+
+    # journal.json's `env` section is the authoritative and exclusive source for
+    # managed provider API keys. Load every config-declared var into os.environ,
+    # then strip any managed provider key (registry-derived) that config does not
+    # set, so a stray shell-set provider key is never used. Non-managed vars are
+    # loaded as-is; Vertex/ADC auth vars are not managed keys and are never stripped.
+    config = get_config()
+    config_env = config.get("env", {})
+    for key, value in config_env.items():
+        os.environ[key] = str(value)
+    for env_key in managed_provider_env_keys():
+        if not config_env.get(env_key):
+            os.environ.pop(env_key, None)
+
+
 def setup_cli(parser: argparse.ArgumentParser, *, parse_known: bool = False):
     """Parse command line arguments and configure logging.
 
     The parser will be extended with ``-v``/``--verbose`` and ``-d``/``--debug`` flags.
     The journal path is resolved via get_journal() which auto-creates a default path
     if needed. Environment variables from the journal config's ``env`` section
-    (in ``journal.json``) are loaded as fallbacks for any keys not already set.
+    (in ``journal.json``) are loaded into ``os.environ``. journal.json is the
+    authoritative and exclusive source for managed provider API keys (the
+    provider registry's ``env_key`` values): a managed provider key absent from
+    config is stripped so a shell-set value is never used. Vertex/ADC auth vars
+    are not managed keys and are never stripped; non-managed vars load as
+    declared.
     The parsed arguments are returned. If ``parse_known`` is ``True`` a tuple of
     ``(args, extra)`` is returned using :func:`argparse.ArgumentParser.parse_known_args`.
     """
@@ -915,22 +963,7 @@ def setup_cli(parser: argparse.ArgumentParser, *, parse_known: bool = False):
         args = parser.parse_args()
         extra = None
 
-    if args.debug:
-        log_level = logging.DEBUG
-    elif args.verbose:
-        log_level = logging.INFO
-    else:
-        log_level = logging.WARNING
-
-    logging.basicConfig(level=log_level)
-
-    # Initialize journal path (auto-creates if needed)
-    get_journal()
-
-    # Load config env from journal.json — strict source for API keys
-    config = get_config()
-    for key, value in config.get("env", {}).items():
-        os.environ[key] = str(value)
+    init_cli_runtime(args.verbose, args.debug)
 
     return (args, extra) if parse_known else args
 

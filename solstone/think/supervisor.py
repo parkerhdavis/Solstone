@@ -6,25 +6,28 @@ from __future__ import annotations
 import argparse
 import asyncio
 import concurrent.futures
+import fcntl
 import getpass
 import json
 import logging
 import os
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, NoReturn
 
 import psutil
 
-from solstone.think import routines, scheduler
+from solstone.think import maintenance, scheduler
+from solstone.think.app_supervised import FLAG, is_app_supervised, resolve_parent_fd
 from solstone.think.callosum import CallosumConnection, CallosumServer
 from solstone.think.maint import run_pending_tasks
 from solstone.think.models import LOCAL_MODEL, is_local_provider_needed
@@ -61,8 +64,17 @@ DEFAULT_THRESHOLD = 60
 CHECK_INTERVAL = 30
 MAX_UPDATED_CATCHUP = 4
 TEMPFAIL_DELAY = 15  # seconds to wait before retrying a tempfail exit
+HANDLE_SHUTDOWN_REAP_S = 3.0
+APP_SUPERVISED_SHUTDOWN_CEILING_S = 10.0
+APP_SUPERVISED_TASK_DRAIN_S = 2.0
+APP_SUPERVISED_CHILD_STOP_S = 2.0
+APP_SUPERVISED_CALLOSUM_JOIN_S = 2.0
+PARENT_DEATH_POLL_INTERVAL_S = 1.0
 STOPPED_TICKS_THRESHOLD = 2
 LOCAL_SERVER_PROCESS_NAME = "llama-server"
+LOCAL_WEDGE_THRESHOLD = 3
+LOCAL_WEDGE_RECYCLE_GRACE_S = 120.0
+LOCAL_WEDGE_PROVIDER_MAP_CAP = 512
 LOCAL_SERVER_READY_TIMEOUT_S = 300.0
 LOCAL_SERVER_HEALTH_POLL_INTERVAL_S = 1.0
 LOCAL_MODEL_WARMING_UP_COPY = "Local model is warming up..."
@@ -85,6 +97,31 @@ _sync_conflict_shutdown: bool = False
 # Supervisor identity (set in main() once ref is assigned)
 _supervisor_ref: str | None = None
 _supervisor_start: float | None = None
+_parent_death_sigterm_sent = threading.Event()
+
+
+def app_supervised_graceful_budget_s() -> float:
+    """Sum of configured app-supervised graceful shutdown step budgets.
+
+    After the parent-death watcher self-SIGTERMs, the graceful path runs these
+    configured caps in finally-block order: handle_shutdown's managed-child
+    reap, task-queue drain, managed child-stop, and Callosum join.
+
+    The assertion that this budget stays below APP_SUPERVISED_SHUTDOWN_CEILING_S
+    guards that configured step budgets leave room under the hard parent-death
+    backstop. It is not a guarantee that wall time can never exceed this sum.
+    In the common non-D-state case, bounded terminate calls (timeout plus
+    KILL_REAP_GRACE_S) keep the graceful path well under the ceiling. For
+    pathological slow-to-reap children, a step may exceed its nominal cap; the
+    parent-death backstop remains the hard guarantee by sleeping to the ceiling,
+    SIGKILLing every child's process group, then calling os._exit(1).
+    """
+    return (
+        HANDLE_SHUTDOWN_REAP_S
+        + APP_SUPERVISED_TASK_DRAIN_S
+        + APP_SUPERVISED_CHILD_STOP_S
+        + APP_SUPERVISED_CALLOSUM_JOIN_S
+    )
 
 
 def _sd_notify(state: str) -> None:
@@ -98,6 +135,151 @@ def _sd_notify(state: str) -> None:
             s.sendto(state.encode(), addr)
     except OSError as exc:
         logging.warning("sd_notify failed: %s", exc)
+
+
+def _parent_fd_is_usable(fd: int) -> bool:
+    try:
+        mode = os.fstat(fd).st_mode
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+    except OSError:
+        return False
+    access_mode = flags & os.O_ACCMODE
+    return stat.S_ISFIFO(mode) and access_mode in (os.O_RDONLY, os.O_RDWR)
+
+
+def wait_until_parent_gone(
+    parent_fd: int, *, poll_interval: float = PARENT_DEATH_POLL_INTERVAL_S
+) -> str:
+    if _parent_fd_is_usable(parent_fd):
+        while True:
+            try:
+                data = os.read(parent_fd, 4096)
+            except OSError:
+                return "fd-error"
+            if data == b"":
+                return "eof"
+
+    while True:
+        if os.getppid() == 1:
+            return "orphaned"
+        time.sleep(poll_interval)
+
+
+def enforce_parent_death_shutdown_deadline(
+    reason: str,
+    *,
+    ceiling: float = APP_SUPERVISED_SHUTDOWN_CEILING_S,
+    managed_procs: Iterable[RunnerManagedProcess] | None = None,
+    task_procs: Iterable[RunnerManagedProcess] | None = None,
+    sent_event: "threading.Event | None" = None,
+    kill: Callable[[int, int], None] | None = None,
+    killpg: Callable[[int, int], None] | None = None,
+    getpgid: Callable[[int], int] | None = None,
+    exit_now: Callable[[int], NoReturn] | None = None,
+    sleep: Callable[[float], None] | None = None,
+) -> None:
+    del reason
+    own_pid = os.getpid()
+    own_pgid = os.getpgrp()
+    kill_fn = kill or os.kill
+    killpg_fn = killpg or os.killpg
+    getpgid_fn = getpgid or os.getpgid
+    exit_now_fn = exit_now or os._exit
+    sleep_fn = sleep or time.sleep
+    sigterm_sent = sent_event if sent_event is not None else _parent_death_sigterm_sent
+
+    if not sigterm_sent.is_set():
+        sigterm_sent.set()
+        kill_fn(own_pid, signal.SIGTERM)
+
+    sleep_fn(ceiling)
+
+    procs = managed_procs if managed_procs is not None else _managed_procs
+    if task_procs is not None:
+        task_snapshot = task_procs
+    elif _task_queue is not None:
+        with _task_queue._lock:
+            task_snapshot = list(_task_queue._active.values())
+    else:
+        task_snapshot = []
+
+    def _kill_group(managed: RunnerManagedProcess) -> None:
+        if not managed.is_running():
+            return
+        try:
+            pgid = getpgid_fn(managed.process.pid)
+        except (ProcessLookupError, OSError):
+            logger.exception(
+                "parent-death backstop: could not resolve pgid for %s",
+                managed.name,
+            )
+            return
+
+        if pgid == own_pgid or pgid == own_pid:
+            logger.warning(
+                "parent-death backstop: refusing to signal supervisor's own "
+                "group (pgid=%s) for %s",
+                pgid,
+                managed.name,
+            )
+            return
+
+        try:
+            killpg_fn(pgid, signal.SIGKILL)
+        except Exception:
+            logger.exception(
+                "parent-death backstop: SIGKILL failed for %s", managed.name
+            )
+
+    for managed in procs:
+        try:
+            _kill_group(managed)
+        except Exception:
+            logger.exception(
+                "parent-death backstop: unexpected failure for %s",
+                getattr(managed, "name", managed),
+            )
+    for managed in task_snapshot:
+        try:
+            _kill_group(managed)
+        except Exception:
+            logger.exception(
+                "parent-death backstop: unexpected failure for %s",
+                getattr(managed, "name", managed),
+            )
+
+    exit_now_fn(1)
+
+
+def _parent_death_watcher_main(
+    parent_fd: int,
+    *,
+    poll_interval: float = PARENT_DEATH_POLL_INTERVAL_S,
+    ceiling: float = APP_SUPERVISED_SHUTDOWN_CEILING_S,
+) -> None:
+    reason = wait_until_parent_gone(parent_fd, poll_interval=poll_interval)
+    logger.warning(
+        "parent-death detected (%s); converging to graceful shutdown", reason
+    )
+    enforce_parent_death_shutdown_deadline(reason, ceiling=ceiling)
+
+
+def start_parent_death_watcher(
+    parent_fd: int | None = None,
+    *,
+    poll_interval: float = PARENT_DEATH_POLL_INTERVAL_S,
+    ceiling: float = APP_SUPERVISED_SHUTDOWN_CEILING_S,
+) -> threading.Thread:
+    fd = parent_fd if parent_fd is not None else resolve_parent_fd()
+    thread = threading.Thread(
+        target=_parent_death_watcher_main,
+        args=(fd,),
+        kwargs={"poll_interval": poll_interval, "ceiling": ceiling},
+        name="parent-death-watcher",
+        daemon=True,
+    )
+    thread.start()
+    return thread
 
 
 def _candidate_journal(proc: "psutil.Process") -> Path | None:
@@ -120,12 +302,12 @@ def _candidate_journal(proc: "psutil.Process") -> Path | None:
         return None
 
 
-# The long-lived managed-service proctitles set by setproctitle at
-# sol_cli.py (f"{binary}:{cmd}"). setproctitle is in-process and persists
-# until the process exits, so an orphaned service still reports its title
-# via proc.name() after the supervisor dies — which is what lets the sweep
-# find it. The supervisor-owned `llama-server` reports its own bare binary
-# name (no colon prefix) and is included here so the sweep reaps it too.
+# The long-lived journal proctitles set by setproctitle at sol_cli.py
+# (f"{binary}:{cmd}"). setproctitle is in-process and persists until the
+# process exits, so an orphaned service or task child still reports its title
+# via proc.name() after the supervisor dies, which is what lets the sweep find
+# it. The supervisor-owned `llama-server` reports its own bare binary name (no
+# colon prefix) and is included here so the sweep reaps it too.
 # The mlx-vlm server is a Python process, but our launcher sets the same
 # managed proctitle so proc.name() is stable for orphan sweeping.
 _LOCAL_SERVER_PROCTITLES = frozenset(
@@ -134,17 +316,18 @@ _LOCAL_SERVER_PROCTITLES = frozenset(
         MLX_SERVER_PROCESS_NAME,
     }
 )
-_MANAGED_SERVICE_PROCTITLES = (
-    frozenset(
-        {
-            "journal:sense",
-            "journal:cortex",
-            "journal:convey",
-            "journal:spl",
-        }
-    )
-    | _LOCAL_SERVER_PROCTITLES
-)
+
+
+def _is_sweepable_orphan_name(name: str) -> bool:
+    """True if proc.name() identifies a sweepable orphan of this install.
+
+    Any `journal:*` proctitle - managed service or task-queue child - plus the
+    bare local-server binary names. A PPID-1, same-journal `journal:*` process
+    is by definition an orphan of a dead supervisor. `solstone:*`/`sol:*` and a
+    bare `journal` (no colon) are deliberately not matched because they cannot
+    be positively classified as a sub-command of this install.
+    """
+    return name.startswith("journal:") or name in _LOCAL_SERVER_PROCTITLES
 
 
 def _sweep_orphaned_sol_processes(journal: Path, grace: float = 5.0) -> int:
@@ -154,7 +337,7 @@ def _sweep_orphaned_sol_processes(journal: Path, grace: float = 5.0) -> int:
     targets: list[int] = []
     for proc in psutil.process_iter(["name", "ppid", "username", "pid"]):
         try:
-            if proc.name() not in _MANAGED_SERVICE_PROCTITLES:
+            if not _is_sweepable_orphan_name(proc.name()):
                 continue
             if proc.ppid() != 1:
                 continue
@@ -767,7 +950,6 @@ _callosum_thread: threading.Thread | None = None
 
 # Track whether running in remote mode (upload-only, no local processing)
 _is_remote_mode: bool = False
-_digest_submitted_this_boot = False
 
 # State for daily processing (tracks day boundary for midnight think trigger)
 _daily_state = {
@@ -777,6 +959,14 @@ _daily_state = {
 # State for local provider recovery nudges
 _recovery_state = {
     "local_server_down": False,
+}
+
+# State for local provider wedge detection
+_wedge_state: dict[str, Any] = {
+    "providers": OrderedDict(),
+    "failures": set(),
+    "cooldown_until": 0.0,
+    "awaiting_recovery": False,
 }
 
 # Timeout before flushing stale segments (seconds)
@@ -879,6 +1069,7 @@ def _launch_process(
     restart: bool = False,
     shutdown_timeout: int = 15,
     ref: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> RunnerManagedProcess:
     # NOTE: All child processes should include -v for verbose logging by default.
     # This ensures their output is captured in logs for debugging.
@@ -893,7 +1084,7 @@ def _launch_process(
     # Use unified runner to spawn process (share supervisor's callosum)
     try:
         managed = RunnerManagedProcess.spawn(
-            cmd, ref=ref, callosum=_supervisor_callosum
+            cmd, ref=ref, callosum=_supervisor_callosum, env=env
         )
     except RuntimeError as exc:
         logging.error(str(exc))
@@ -959,8 +1150,12 @@ def _start_termination_thread(
         thread.start()
 
 
-def _stop_process(managed: RunnerManagedProcess) -> None:
+def _stop_process(
+    managed: RunnerManagedProcess, *, timeout_cap: float | None = None
+) -> None:
     timeout = _SERVICE_STATE.get(managed.name, {}).get("shutdown_timeout", 15)
+    if timeout_cap is not None:
+        timeout = min(timeout, timeout_cap)
     _terminate_managed(managed, timeout, reason="shutdown")
     managed.cleanup()
 
@@ -1043,23 +1238,6 @@ def _emit_queue_event(cmd_name: str, running_ref: str, queue: list) -> None:
         queued=len(queue),
         queue=queue,
     )
-
-
-def _maybe_submit_startup_digest(*, no_cortex: bool) -> None:
-    """Submit the startup digest once when a local cortex substrate exists."""
-    global _digest_submitted_this_boot
-
-    if (
-        _digest_submitted_this_boot
-        or no_cortex
-        or _is_remote_mode
-        or _task_queue is None
-    ):
-        return
-
-    _task_queue.submit(["journal", "identity", "digest"])
-    _digest_submitted_this_boot = True
-    logging.info("startup: submitted identity digest")
 
 
 def _handle_task_request(message: dict) -> None:
@@ -1162,6 +1340,107 @@ def _handle_supervisor_drain(message: dict) -> None:
         run_catchup_drain(force_days={day})
     else:
         run_catchup_drain()
+
+
+def _handle_supervisor_start_local(message: dict) -> None:
+    """Handle incoming local server start requests."""
+    if message.get("tract") != "supervisor" or message.get("event") != "start_local":
+        return
+    if _is_remote_mode:
+        return
+
+    for proc in _managed_procs:
+        if proc.name in _LOCAL_SERVER_PROCTITLES and proc.is_running():
+            logging.info("local server already running; ignoring start_local request")
+            return
+
+    proc = start_local_server()
+    if proc is not None:
+        _managed_procs.append(proc)
+        logging.info("started local server from start_local request")
+
+
+def _handle_cortex_outcome(message: dict) -> None:
+    """Recycle a wedged local model server after sustained generation failures."""
+    if message.get("tract") != "cortex":
+        return
+    event = message.get("event")
+    if event not in {"start", "finish", "error"}:
+        return
+    if _is_remote_mode:
+        return
+
+    use_id = message.get("use_id")
+    if not use_id:
+        return
+
+    if event == "start":
+        providers = _wedge_state["providers"]
+        providers[use_id] = message.get("provider")
+        while len(providers) > LOCAL_WEDGE_PROVIDER_MAP_CAP:
+            providers.popitem(last=False)
+        return
+
+    provider = _wedge_state["providers"].get(use_id)
+    if provider != "local":
+        return
+
+    if time.monotonic() < _wedge_state["cooldown_until"]:
+        return
+
+    failures = _wedge_state["failures"]
+    if event == "finish":
+        if _wedge_state["awaiting_recovery"]:
+            logging.info("local server wedge: recovered after recycle")
+            _wedge_state["awaiting_recovery"] = False
+        failures.clear()
+        return
+
+    if message.get("reason_code") != "provider_unavailable":
+        return
+
+    failures.add(use_id)
+    if len(failures) < LOCAL_WEDGE_THRESHOLD:
+        return
+
+    logging.warning(
+        "local server wedge: declared after %d local provider_unavailable failures "
+        "(use_ids=%s)",
+        len(failures),
+        sorted(failures),
+    )
+    port = read_service_port("local")
+    if port is None:
+        logging.warning(
+            "local server wedge: recycle deferred; local service port unavailable"
+        )
+        failures.clear()
+        return
+
+    from solstone.think.providers import local_server
+
+    state, _ = local_server._probe_health(port)
+    if state != local_server.STATE_READY:
+        logging.warning(
+            "local server wedge: recycle deferred; health state=%s",
+            state,
+        )
+        failures.clear()
+        return
+
+    proctitle = (
+        MLX_SERVER_PROCESS_NAME
+        if sys.platform == "darwin"
+        else LOCAL_SERVER_PROCESS_NAME
+    )
+    if _restart_service(proctitle):
+        logging.warning("local server wedge: recycling %s", proctitle)
+        failures.clear()
+        _wedge_state["awaiting_recovery"] = True
+        _wedge_state["cooldown_until"] = time.monotonic() + LOCAL_WEDGE_RECYCLE_GRACE_S
+    else:
+        logging.warning("local server wedge: recycle deferred; service not running")
+        failures.clear()
 
 
 def get_task_status(ref: str) -> dict:
@@ -1309,12 +1588,32 @@ def _start_mlx_local_server() -> RunnerManagedProcess | None:
     return managed
 
 
+def _format_vulkan_devices(devices: list[Any], local_vulkan: Any) -> str:
+    if not devices:
+        return "none"
+    return "; ".join(
+        (
+            f"raw_index={device.index} name={device.name!r} "
+            f"type={local_vulkan.classify(device)} vram_mib={device.vram_mib}"
+        )
+        for device in devices
+    )
+
+
+def _gpu_unavailable_reason(devices: list[Any], override: int | None) -> str:
+    if not devices:
+        return "no Vulkan devices enumerated"
+    if override is not None:
+        return f"Vulkan override raw index {override} is not an available hardware GPU"
+    return "only non-hardware or software Vulkan devices were enumerated"
+
+
 def start_local_server() -> RunnerManagedProcess | None:
     """Launch the supervisor-owned local llama-server when artifacts are present."""
     if sys.platform == "darwin":
         return _start_mlx_local_server()
 
-    from solstone.think.providers import local_install, local_server
+    from solstone.think.providers import local_install, local_server, local_vulkan
 
     try:
         binary_path, gguf_path, mmproj_path = local_install.ensure_artifacts_installed(
@@ -1337,6 +1636,24 @@ def start_local_server() -> RunnerManagedProcess | None:
         logging.info("Local model not ready; skipping llama-server startup: %s", exc)
         return None
 
+    devices = local_vulkan.detect_gpus()
+    override = local_install.gpu_device_override()
+    selected = local_vulkan.select_device(devices, override_index=override)
+    logging.info(
+        "Vulkan GPU probe: devices=%s; selected=%s",
+        _format_vulkan_devices(devices, local_vulkan),
+        (
+            f"raw_index={selected.index} name={selected.name!r} "
+            f"type={local_vulkan.classify(selected)}"
+            if selected is not None
+            else "none"
+        ),
+    )
+    if selected is None:
+        reason = _gpu_unavailable_reason(devices, override)
+        logging.info("gpu_unavailable: skipping llama-server startup: %s", reason)
+        return None
+
     port = find_available_port()
     write_service_port("local", port)
     cmd = [
@@ -1350,25 +1667,59 @@ def start_local_server() -> RunnerManagedProcess | None:
         "--port",
         str(port),
         "--jinja",
+        "--n-gpu-layers",
+        "999",
+        "-c",
+        "16384",
+        "--device",
+        "Vulkan0",
     ]
     if mmproj_path is not None:
         cmd.extend(["--mmproj", str(mmproj_path)])
     if "0.0.0.0" in cmd:
         raise RuntimeError("Local server may not bind 0.0.0.0.")
 
-    managed = _launch_process(LOCAL_SERVER_PROCESS_NAME, cmd, restart=True)
+    env = os.environ | {"GGML_VK_VISIBLE_DEVICES": str(selected.index)}
+    vram_before_mib = local_vulkan.device_local_used_mib(selected.index)
+    managed = _launch_process(LOCAL_SERVER_PROCESS_NAME, cmd, restart=True, env=env)
     print(f"  {LOCAL_MODEL_WARMING_UP_COPY}", flush=True)
+
+    def fail_local_server_launch(reason: str) -> None:
+        logging.warning("local server launch failed: %s", reason)
+        timeout = _SERVICE_STATE.get(managed.name, {}).get("shutdown_timeout", 15)
+        _SERVICE_STATE.pop(managed.name, None)
+        _terminate_managed(
+            managed,
+            timeout,
+            reason="local server launch failed",
+        )
+        managed.cleanup()
 
     deadline = time.monotonic() + LOCAL_SERVER_READY_TIMEOUT_S
     while time.monotonic() < deadline:
         if managed.process.poll() is not None:
-            logging.warning(
-                "llama-server exited during warmup with code %s",
-                managed.process.returncode,
+            fail_local_server_launch(
+                f"llama-server exited during warmup with code "
+                f"{managed.process.returncode}"
             )
-            return managed
+            return None
         state, error = local_server._probe_health(port)
         if state == local_server.STATE_READY:
+            vram_after_mib = local_vulkan.device_local_used_mib(selected.index)
+            if vram_before_mib is not None and vram_after_mib is not None:
+                logging.info(
+                    "local GPU: %s — VRAM used %+d MiB after model load (%d -> %d MiB)",
+                    selected.name,
+                    vram_after_mib - vram_before_mib,
+                    vram_before_mib,
+                    vram_after_mib,
+                )
+            else:
+                logging.info(
+                    "local GPU: %s — VRAM-usage delta unavailable "
+                    "(VK_EXT_memory_budget not reported)",
+                    selected.name,
+                )
             logging.info("llama-server ready on port %s", port)
             return managed
         if state == local_server.STATE_FAILED and error:
@@ -1445,7 +1796,7 @@ def wait_for_convey_ready(
     return False
 
 
-def stop_callosum_in_process() -> None:
+def stop_callosum_in_process(join_timeout: float = 5.0) -> None:
     """Stop the in-process Callosum server."""
     global _callosum_server, _callosum_thread
 
@@ -1454,7 +1805,7 @@ def stop_callosum_in_process() -> None:
         _callosum_server.stop()
 
     if _callosum_thread:
-        _callosum_thread.join(timeout=5)
+        _callosum_thread.join(timeout=join_timeout)
         if _callosum_thread.is_alive():
             logging.warning("Callosum server thread did not stop cleanly")
 
@@ -1904,10 +2255,12 @@ def _handle_callosum_message(message: dict) -> None:
     _handle_task_request(message)
     _handle_supervisor_request(message)
     _handle_supervisor_drain(message)
+    _handle_supervisor_start_local(message)
     _handle_segment_observed(message)
     _handle_activity_recorded(message)
     _handle_think_daily_complete(message)
     _handle_segment_event_log(message)
+    _handle_cortex_outcome(message)
 
 
 def _run_sync_tick(now: float) -> bool:
@@ -2018,7 +2371,6 @@ async def supervise(
             # Check periodic task schedules (non-blocking, submits via callosum)
             if schedule:
                 scheduler.check()
-                routines.check()
 
             # Sleep 1 second before next iteration (responsive to shutdown)
             await asyncio.sleep(1)
@@ -2070,6 +2422,14 @@ def parse_args() -> argparse.ArgumentParser:
         help="Disable periodic task scheduler",
     )
     parser.add_argument(
+        FLAG,
+        action="store_true",
+        help=(
+            "App-supervised mode: skip all service-unit work and self-exit when "
+            "the parent process dies (used by the macOS app)."
+        ),
+    )
+    parser.add_argument(
         "--remote",
         type=str,
         help="Remote mode: URL for segment transfer (not yet implemented)",
@@ -2092,7 +2452,7 @@ def handle_shutdown(signum, frame):
                 except Exception:
                     logger.exception("shutdown: terminate failed for %s", managed.name)
 
-            deadline = time.monotonic() + 3.0
+            deadline = time.monotonic() + HANDLE_SHUTDOWN_REAP_S
             while time.monotonic() < deadline:
                 if all(not managed.is_running() for managed in live):
                     break
@@ -2140,10 +2500,12 @@ def _ensure_venv_bin_on_path() -> None:
 def main() -> None:
     parser = parse_args()
 
-    # Capture journal info BEFORE setup_cli() loads .env and pollutes os.environ
+    # Capture journal info before setup_cli() hydrates os.environ from journal
+    # config and strips shell-only managed provider keys.
     journal_info = get_journal_info()
 
     args = setup_cli(parser)
+    app_supervised = is_app_supervised(sys.argv)
     _ensure_venv_bin_on_path()
 
     journal_path = _get_journal_path()
@@ -2171,7 +2533,6 @@ def main() -> None:
     health_dir = journal_path / "health"
     lock_path = health_dir / "supervisor.lock"
     pid_path = health_dir / "supervisor.pid"
-    import fcntl
 
     lock_fd = open(lock_path, "w")
     try:
@@ -2237,14 +2598,12 @@ def main() -> None:
     logging.info("Supervisor starting...")
 
     global _managed_procs, _supervisor_callosum, _is_remote_mode
-    global _digest_submitted_this_boot
     global _task_queue
     procs: list[RunnerManagedProcess] = []
     convey_port = None
 
     # Remote mode: run sync instead of local processing
     _is_remote_mode = bool(args.remote)
-    _digest_submitted_this_boot = False
 
     # Run pending journal-maintenance tasks before spawning any writer children.
     # Callosum isn't up yet (emit_fn=None); migrations log through supervisor's logger only.
@@ -2347,6 +2706,10 @@ def main() -> None:
     # Initialize periodic task scheduler
     schedule_enabled = not args.no_schedule and not _is_remote_mode
     if schedule_enabled and _supervisor_callosum:
+        try:
+            maintenance.register_maintenance_schedules()
+        except Exception:
+            logging.error("Failed to register maintenance schedules", exc_info=True)
         scheduler.init(_supervisor_callosum)
         scheduler.register_defaults()
         if _task_queue:
@@ -2358,11 +2721,9 @@ def main() -> None:
                     cmd_name,
                     seconds,
                 )
-        routines.init(_supervisor_callosum)
 
     if _task_queue:
         _task_queue.set_ready()
-        _maybe_submit_startup_digest(no_cortex=args.no_cortex)
 
     # Show Convey URL if running
     if convey_port:
@@ -2385,6 +2746,8 @@ def main() -> None:
         print("  Supervisor ready", flush=True)
         _sd_notify("READY=1")
         signal_ready()
+        if app_supervised:
+            start_parent_death_watcher()
         asyncio.run(
             supervise(
                 daily=daily_enabled,
@@ -2409,17 +2772,13 @@ def main() -> None:
         print("\nShutting down gracefully (this may take a moment)...", flush=True)
 
         if _task_queue:
-            _task_queue.shutdown(timeout=10)
+            task_drain_timeout = APP_SUPERVISED_TASK_DRAIN_S if app_supervised else 10
+            _task_queue.shutdown(timeout=task_drain_timeout)
 
         # Stop services in reverse order
+        child_stop_timeout = APP_SUPERVISED_CHILD_STOP_S if app_supervised else None
         for managed in reversed(procs):
-            _stop_process(managed)
-
-        if schedule_enabled:
-            try:
-                routines.save_state()
-            except Exception as exc:
-                logging.warning("Failed to save routines state on shutdown: %s", exc)
+            _stop_process(managed, timeout_cap=child_stop_timeout)
 
         # Disconnect supervisor's Callosum connection
         if _supervisor_callosum:
@@ -2427,7 +2786,10 @@ def main() -> None:
             logging.info("Supervisor disconnected from Callosum")
 
         # Stop in-process Callosum server last
-        stop_callosum_in_process()
+        callosum_join_timeout = (
+            APP_SUPERVISED_CALLOSUM_JOIN_S if app_supervised else 5.0
+        )
+        stop_callosum_in_process(join_timeout=callosum_join_timeout)
 
         logging.info("Supervisor shutdown complete.")
         print("Shutdown complete.", flush=True)

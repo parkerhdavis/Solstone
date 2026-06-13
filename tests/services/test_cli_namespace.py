@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import ssl
 import stat
 import urllib.error
@@ -48,6 +49,10 @@ def _payload(suffix: str = "one") -> dict[str, str]:
 
 def _payload_body(suffix: str = "one") -> bytes:
     return json.dumps(_payload(suffix)).encode("utf-8")
+
+
+def _state_payload_body(payload: dict[str, Any]) -> bytes:
+    return json.dumps(payload).encode("utf-8")
 
 
 def _http_error(code: int) -> urllib.error.HTTPError:
@@ -94,52 +99,9 @@ def _set_posture(journal_copy, posture: str) -> None:
     write_journal_config(config)
 
 
-def test_mint_device_code_posts_empty_body_and_returns_success(monkeypatch) -> None:
-    calls = _install_urlopen(
-        monkeypatch,
-        [
-            FakeResponse(
-                200,
-                json.dumps(
-                    {
-                        "nonce": "A" * 52,
-                        "code": "SCOUT-2345-6789",
-                        "expires_in": 900,
-                    }
-                ).encode("utf-8"),
-            )
-        ],
-    )
-
-    outcome = portal_client.mint_device_code("https://services.example")
-
-    assert outcome == portal_client.DeviceCodeOutcome(
-        kind="success",
-        nonce="A" * 52,
-        code="SCOUT-2345-6789",
-        expires_in=900,
-    )
-    request, timeout = calls[0]
-    assert request.full_url == "https://services.example/enable/scout/code"
-    assert request.data == b""
-    assert request.get_method() == "POST"
-    assert request.headers["User-agent"].startswith("solstone-cli/")
-    assert timeout == portal_client.POLL_TIMEOUT_SECONDS
-
-
-def test_mint_device_code_429_maps_rate_limited(monkeypatch) -> None:
-    _install_urlopen(monkeypatch, [_http_error(429)])
-
-    outcome = portal_client.mint_device_code("https://services.example")
-
-    assert outcome.kind == "failed"
-    assert outcome.reason == "rate_limited"
-
-
 @pytest.fixture
 def browser_ready(monkeypatch):
     opened = []
-    monkeypatch.setattr(cli, "_is_headless", lambda: False)
     monkeypatch.setattr(cli, "_open_browser", lambda url: opened.append(url) or True)
     monkeypatch.delenv("SERVICES_PORTAL_URL", raising=False)
     return opened
@@ -166,6 +128,7 @@ def test_enable_scout_help_lists_flags(capsys) -> None:
     out = capsys.readouterr().out
     assert "--force" in out
     assert "--wait" in out
+    assert "--verbose" in out
 
 
 def test_unknown_service_exits_2(capsys) -> None:
@@ -291,7 +254,8 @@ def test_happy_path_writes_handoff(journal_copy, browser_ready, monkeypatch, cap
 
     captured = capsys.readouterr()
     assert captured.err == ""
-    assert cli.STDOUT_OPENING in captured.out
+    assert "https://services.solstone.app/enable/scout?nonce=" in captured.out
+    assert cli.STDOUT_OPENED_BROWSER in captured.out
     assert cli.STDOUT_WAITING in captured.out
     assert cli.STDOUT_SUCCESS in captured.out
     assert browser_ready[0].startswith("https://services.solstone.app/enable/scout?")
@@ -303,6 +267,333 @@ def test_happy_path_writes_handoff(journal_copy, browser_ready, monkeypatch, cap
     config = json.loads((journal_copy / "config" / "journal.json").read_text())
     assert config["env"]["GOOGLE_API_KEY"] == "google-one"
     assert config["services"]["scout"]["account_id"] == "acct-one"
+
+
+def test_enable_pending_stores_marker_no_key(
+    journal_copy, browser_ready, monkeypatch, capsys
+) -> None:
+    _install_urlopen(
+        monkeypatch,
+        [
+            FakeResponse(
+                200,
+                _state_payload_body(
+                    {
+                        "state": "pending",
+                        "account_id": "acct-p",
+                        "since": 1_700_000_000_000,
+                    }
+                ),
+            )
+        ],
+    )
+
+    assert cli.main(["enable", "scout"]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert "pending review" in captured.out
+    config = json.loads((journal_copy / "config" / "journal.json").read_text())
+    assert config["services"]["scout"]["state"] == "pending"
+    assert "GOOGLE_API_KEY" not in config.get("env", {})
+
+
+def test_enable_approved_stores_key(
+    journal_copy, browser_ready, monkeypatch, capsys
+) -> None:
+    _install_urlopen(
+        monkeypatch,
+        [
+            FakeResponse(
+                200,
+                _state_payload_body({"state": "approved", **_payload("approved")}),
+            )
+        ],
+    )
+
+    assert cli.main(["enable", "scout"]) == 0
+
+    captured = capsys.readouterr()
+    assert cli.STDOUT_SUCCESS in captured.out
+    config = json.loads((journal_copy / "config" / "journal.json").read_text())
+    assert config["env"]["GOOGLE_API_KEY"] == "google-approved"
+    assert config["services"]["scout"]["account_id"] == "acct-approved"
+
+
+def test_enable_approved_missing_key_emits_server_bad_payload(
+    journal_copy, browser_ready, monkeypatch, capsys
+) -> None:
+    _install_urlopen(
+        monkeypatch,
+        [
+            FakeResponse(
+                200,
+                _state_payload_body(
+                    {
+                        "state": "approved",
+                        "dispatch_token": "d",
+                        "account_id": "a",
+                        "created_at": "t",
+                    }
+                ),
+            )
+        ],
+    )
+
+    assert cli.main(["enable", "scout"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.err.startswith("scout_server_bad_payload: ")
+    config = json.loads((journal_copy / "config" / "journal.json").read_text())
+    assert "GOOGLE_API_KEY" not in config.get("env", {})
+
+
+def test_enable_revoked_clears_provisioned_key(
+    journal_copy, browser_ready, monkeypatch, capsys
+) -> None:
+    cli.scout.provision_scout_handoff(_payload("rev"))
+    _install_urlopen(
+        monkeypatch,
+        [
+            FakeResponse(
+                200,
+                _state_payload_body({"state": "revoked", "account_id": "a"}),
+            )
+        ],
+    )
+
+    assert cli.main(["enable", "scout", "--force"]) == 0
+
+    captured = capsys.readouterr()
+    assert "access has ended" in captured.out
+    config = json.loads((journal_copy / "config" / "journal.json").read_text())
+    assert "GOOGLE_API_KEY" not in config.get("env", {})
+
+
+def test_enable_revoked_preserves_manual_replaced_key(
+    journal_copy, browser_ready, monkeypatch, capsys
+) -> None:
+    cli.scout.provision_scout_handoff(_payload("manual"))
+    config = json.loads((journal_copy / "config" / "journal.json").read_text())
+    config["env"]["GOOGLE_API_KEY"] = "manual-replacement"
+    write_journal_config(config)
+    _install_urlopen(
+        monkeypatch,
+        [
+            FakeResponse(
+                200,
+                _state_payload_body({"state": "revoked", "account_id": "a"}),
+            )
+        ],
+    )
+
+    assert cli.main(["enable", "scout", "--force"]) == 0
+
+    captured = capsys.readouterr()
+    assert "preserved" in captured.out
+    saved = json.loads((journal_copy / "config" / "journal.json").read_text())
+    assert saved["env"]["GOOGLE_API_KEY"] == "manual-replacement"
+
+
+def test_enable_no_state_no_key_clean_error(
+    journal_copy, browser_ready, monkeypatch, capsys
+) -> None:
+    _install_urlopen(
+        monkeypatch,
+        [FakeResponse(200, _state_payload_body({"account_id": "a"}))],
+    )
+
+    assert cli.main(["enable", "scout"]) == 1
+
+    assert capsys.readouterr().err.startswith("unexpected_payload: ")
+
+
+def test_refresh_scout_help_lists_wait(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["refresh", "scout", "--help"])
+
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "--wait" in out
+    assert "--force" not in out
+
+
+def test_refresh_unknown_service_exits_2(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["refresh", "bad"])
+
+    assert exc.value.code == 2
+    assert capsys.readouterr().err.startswith("unknown_service: ")
+
+
+def test_refresh_pending_records_marker(
+    journal_copy, browser_ready, monkeypatch, capsys
+) -> None:
+    _install_urlopen(
+        monkeypatch,
+        [
+            FakeResponse(
+                200,
+                _state_payload_body(
+                    {
+                        "state": "pending",
+                        "account_id": "acct-p",
+                        "since": 1_700_000_000_000,
+                    }
+                ),
+            )
+        ],
+    )
+
+    assert cli.main(["refresh", "scout"]) == 0
+
+    captured = capsys.readouterr()
+    assert cli.STDOUT_REFRESH in captured.out
+    assert "pending review" in captured.out
+    config = json.loads((journal_copy / "config" / "journal.json").read_text())
+    assert config["services"]["scout"]["state"] == "pending"
+
+
+def test_refresh_approved_overwrites_key(
+    journal_copy, browser_ready, monkeypatch, capsys
+) -> None:
+    cli.scout.provision_scout_handoff(_payload("old"))
+    _install_urlopen(
+        monkeypatch,
+        [
+            FakeResponse(
+                200,
+                _state_payload_body({"state": "approved", **_payload("new")}),
+            )
+        ],
+    )
+
+    assert cli.main(["refresh", "scout"]) == 0
+
+    captured = capsys.readouterr()
+    assert cli.STDOUT_REFRESH in captured.out
+    assert cli.STDOUT_SUCCESS in captured.out
+    config = json.loads((journal_copy / "config" / "journal.json").read_text())
+    assert config["env"]["GOOGLE_API_KEY"] == "google-new"
+
+
+def test_refresh_revoked_clears_key(
+    journal_copy, browser_ready, monkeypatch, capsys
+) -> None:
+    cli.scout.provision_scout_handoff(_payload("rev"))
+    _install_urlopen(
+        monkeypatch,
+        [
+            FakeResponse(
+                200,
+                _state_payload_body({"state": "revoked", "account_id": "a"}),
+            )
+        ],
+    )
+
+    assert cli.main(["refresh", "scout"]) == 0
+
+    captured = capsys.readouterr()
+    assert cli.STDOUT_REFRESH in captured.out
+    assert "access has ended" in captured.out
+    config = json.loads((journal_copy / "config" / "journal.json").read_text())
+    assert "GOOGLE_API_KEY" not in config.get("env", {})
+
+
+def test_refresh_bypasses_already_enabled_guard(
+    journal_copy, browser_ready, monkeypatch, capsys
+) -> None:
+    cli.scout.provision_scout_handoff(_payload("old"))
+    _install_urlopen(
+        monkeypatch,
+        [
+            FakeResponse(
+                200,
+                _state_payload_body({"state": "approved", **_payload("new")}),
+            )
+        ],
+    )
+
+    assert cli.main(["refresh", "scout"]) == 0
+
+    assert "already_enabled" not in capsys.readouterr().err
+    config = json.loads((journal_copy / "config" / "journal.json").read_text())
+    assert config["env"]["GOOGLE_API_KEY"] == "google-new"
+
+
+def test_refresh_bypasses_manual_key_guard(
+    journal_copy, browser_ready, monkeypatch, capsys
+) -> None:
+    config = json.loads((journal_copy / "config" / "journal.json").read_text())
+    config.setdefault("env", {})["GOOGLE_API_KEY"] = "manual"
+    config.pop("services", None)
+    write_journal_config(config)
+    _install_urlopen(
+        monkeypatch,
+        [
+            FakeResponse(
+                200,
+                _state_payload_body(
+                    {
+                        "state": "pending",
+                        "account_id": "acct-p",
+                        "since": 1_700_000_000_000,
+                    }
+                ),
+            )
+        ],
+    )
+
+    assert cli.main(["refresh", "scout"]) == 0
+
+    assert "manual_key_present" not in capsys.readouterr().err
+    saved = json.loads((journal_copy / "config" / "journal.json").read_text())
+    assert saved["services"]["scout"]["state"] == "pending"
+    assert saved["env"]["GOOGLE_API_KEY"] == "manual"
+
+
+def test_refresh_timeout_leaves_state_untouched(
+    journal_copy, browser_ready, monkeypatch, capsys
+) -> None:
+    cli.scout.provision_scout_handoff(_payload("old"))
+    before = json.loads((journal_copy / "config" / "journal.json").read_text())
+    monkeypatch.setattr(cli, "_wait_seconds", lambda _value: 0)
+    _install_urlopen(monkeypatch, [FakeResponse(204)])
+
+    assert cli.main(["refresh", "scout", "--wait", "1"]) == 1
+
+    assert capsys.readouterr().err.startswith("consent_timeout: ")
+    after = json.loads((journal_copy / "config" / "journal.json").read_text())
+    assert after["env"]["GOOGLE_API_KEY"] == before["env"]["GOOGLE_API_KEY"]
+    assert after["services"]["scout"] == before["services"]["scout"]
+
+
+def test_enable_while_pending_repolls(
+    journal_copy, browser_ready, monkeypatch, capsys
+) -> None:
+    cli.scout.record_scout_pending("acct-p", 123)
+    _install_urlopen(
+        monkeypatch,
+        [
+            FakeResponse(
+                200,
+                _state_payload_body(
+                    {
+                        "state": "pending",
+                        "account_id": "acct-p2",
+                        "since": 456,
+                    }
+                ),
+            )
+        ],
+    )
+
+    assert cli.main(["enable", "scout"]) == 0
+
+    assert "pending review" in capsys.readouterr().out
+    saved = json.loads((journal_copy / "config" / "journal.json").read_text())
+    assert saved["services"]["scout"]["account_id"] == "acct-p2"
+    assert saved["services"]["scout"]["since"] == 456
 
 
 @pytest.mark.parametrize(
@@ -328,6 +619,41 @@ def test_error_paths_emit_canonical_tokens(
     assert cli.main(["enable", "scout"]) == 1
 
     assert capsys.readouterr().err.startswith(f"{token}: ")
+
+
+def test_unexpected_payload_names_offending_field(
+    journal_copy, browser_ready, monkeypatch, capsys
+) -> None:
+    _install_urlopen(
+        monkeypatch,
+        [FakeResponse(200, json.dumps({"google_api_key": "only"}).encode())],
+    )
+
+    assert cli.main(["enable", "scout"]) == 1
+
+    err = capsys.readouterr().err
+    assert err.startswith("unexpected_payload: ")
+    assert "dispatch_token" in err
+    assert "(malformed handoff payload" in err
+
+
+def test_enable_scout_verbose_parses_and_redacts(
+    journal_copy, browser_ready, monkeypatch, caplog
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    _install_urlopen(monkeypatch, [FakeResponse(200, _payload_body())])
+
+    assert cli.main(["enable", "scout", "-v"]) == 0
+
+    assert "***redacted***" in caplog.text
+    assert "google-one" not in caplog.text
+    assert "dispatch-one" not in caplog.text
+    assert "acct-one" in caplog.text
+
+
+def test_services_top_level_verbose_parses(capsys) -> None:
+    assert cli.main(["-v"]) == 0
+    assert "Manage optional solstone services." in capsys.readouterr().out
 
 
 def test_204_sequence_then_200_succeeds(
@@ -417,89 +743,27 @@ def test_force_bypasses_manual_key_detection(
     assert saved["env"]["GOOGLE_API_KEY"] == "google-force"
 
 
-def test_headless_mints_device_code_and_polls(
+def test_open_browser_false_still_prints_link_and_polls(
     journal_copy, monkeypatch, capsys
 ) -> None:
-    monkeypatch.setattr(cli, "_is_headless", lambda: True)
-    monkeypatch.setattr(
-        portal_client,
-        "mint_device_code",
-        lambda _base_url: portal_client.DeviceCodeOutcome(
-            kind="success",
-            nonce="A" * 52,
-            code="SCOUT-2345-6789",
-            expires_in=900,
-        ),
-    )
-    monkeypatch.setattr(
-        portal_client,
-        "poll_handoff_once",
-        lambda _base_url, _nonce, *, timeout: portal_client.PollOutcome(
-            kind="success",
-            payload=_payload(),
-        ),
+    monkeypatch.setattr(cli, "_open_browser", lambda _url: False)
+    monkeypatch.delenv("SERVICES_PORTAL_URL", raising=False)
+    calls = _install_urlopen(
+        monkeypatch,
+        [FakeResponse(200, _payload_body("fallback"))],
     )
 
     assert cli.main(["enable", "scout"]) == 0
 
     captured = capsys.readouterr()
-    assert "https://services.solstone.app/enable/scout" in captured.out
-    assert "?nonce=" not in captured.out
-    assert "SCOUT-2345-6789" in captured.out
+    assert "https://services.solstone.app/enable/scout?nonce=" in captured.out
+    assert cli.STDOUT_OPENED_BROWSER not in captured.out
     assert cli.STDOUT_SUCCESS in captured.out
     assert captured.err == ""
-
-
-def test_open_browser_false_falls_back_to_device_code(
-    journal_copy, monkeypatch, capsys
-) -> None:
-    monkeypatch.setattr(cli, "_is_headless", lambda: False)
-    monkeypatch.setattr(cli, "_open_browser", lambda _url: False)
-    monkeypatch.setattr(
-        portal_client,
-        "mint_device_code",
-        lambda _base_url: portal_client.DeviceCodeOutcome(
-            kind="success",
-            nonce="B" * 52,
-            code="SCOUT-9876-ZYXW",
-            expires_in=900,
-        ),
+    assert all("/enable/scout/code" not in req.full_url for req, _timeout in calls)
+    assert calls[0][0].full_url.startswith(
+        "https://services.solstone.app/handoff/scout?"
     )
-    monkeypatch.setattr(
-        portal_client,
-        "poll_handoff_once",
-        lambda _base_url, _nonce, *, timeout: portal_client.PollOutcome(
-            kind="success",
-            payload=_payload("fallback"),
-        ),
-    )
-
-    assert cli.main(["enable", "scout"]) == 0
-
-    captured = capsys.readouterr()
-    assert cli.STDOUT_OPENING in captured.out
-    assert "https://services.solstone.app/enable/scout" in captured.out
-    assert "?nonce=" not in captured.out
-    assert "SCOUT-9876-ZYXW" in captured.out
-    assert captured.err == ""
-
-
-def test_mint_device_code_rate_limited(journal_copy, monkeypatch, capsys) -> None:
-    monkeypatch.setattr(cli, "_is_headless", lambda: True)
-    monkeypatch.setattr(
-        portal_client,
-        "mint_device_code",
-        lambda _base_url: portal_client.DeviceCodeOutcome(
-            kind="failed",
-            reason="rate_limited",
-        ),
-    )
-
-    assert cli.main(["enable", "scout"]) == 1
-
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert captured.err.startswith("rate_limited: ")
 
 
 def test_disable_scout_when_enabled_clears_block_and_env_key(

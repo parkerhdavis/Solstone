@@ -12,7 +12,7 @@ import urllib.error
 import pytest
 
 from solstone.think.journal_config import write_journal_config
-from solstone.think.services import cli, portal_client
+from solstone.think.services import cli, outcomes, portal_client, status
 
 BLOCKED_COPY_RE = re.compile(
     r"sign(?:ed)?\s+in|signing\s+in|log(?:ged)?\s+in|your\s+account|"
@@ -23,15 +23,34 @@ BLOCKED_COPY_RE = re.compile(
 
 def test_services_cli_copy_avoids_blocked_brand_terms() -> None:
     strings = [
-        cli.STDOUT_OPENING,
+        cli.STDOUT_LINK_TEMPLATE,
+        cli.STDOUT_OPENED_BROWSER,
         cli.STDOUT_WAITING,
         cli.STDOUT_SUCCESS,
+        cli.STDOUT_PENDING,
+        cli.STDOUT_REVOKED,
+        cli.STDOUT_REVOKED_PRESERVED_MANUAL_KEY,
+        cli.STDOUT_REFRESH,
         cli.STDOUT_SPL_SUCCESS,
         cli.STDOUT_SPL_DISABLE_SUCCESS,
         *cli.ERROR_MESSAGES.values(),
     ]
 
     assert all(not BLOCKED_COPY_RE.search(value) for value in strings)
+
+
+def test_new_switchboard_guidance_avoids_blocked_brand_terms() -> None:
+    strings = [
+        *(value or "" for value in outcomes.GUIDANCE.values()),
+        status.SCOUT_MANUAL_KEY_GUIDANCE,
+        status.SCOUT_PENDING_GUIDANCE,
+        status.SCOUT_DISABLED_GUIDANCE,
+        status.SPL_NOT_ENABLED_GUIDANCE,
+        status.SPL_INCONSISTENT_GUIDANCE,
+    ]
+
+    assert all(not BLOCKED_COPY_RE.search(value) for value in strings)
+    assert all("sol private link" not in value.lower() for value in strings)
 
 
 class FakeResponse:
@@ -63,6 +82,10 @@ def _payload_body() -> bytes:
     ).encode("utf-8")
 
 
+def _state_payload_body(payload: dict[str, object]) -> bytes:
+    return json.dumps(payload).encode("utf-8")
+
+
 def _http_error(code: int) -> urllib.error.HTTPError:
     return urllib.error.HTTPError(
         "https://services.solstone.app/handoff/scout",
@@ -89,6 +112,14 @@ def _install_urlopen(monkeypatch: pytest.MonkeyPatch, items: list[object]) -> No
     "branch",
     [
         "happy",
+        "pending",
+        "revoked",
+        "legacy_approved",
+        "approved_bad_payload",
+        "refresh_pending",
+        "refresh_approved",
+        "refresh_revoked",
+        "no_state_no_key",
         "consent_link_expired",
         "consent_timeout",
         "portal_unreachable",
@@ -98,10 +129,6 @@ def _install_urlopen(monkeypatch: pytest.MonkeyPatch, items: list[object]) -> No
         "write_failed",
         "already_enabled",
         "manual_key_present",
-        "device_code_happy",
-        "device_code_rate_limited",
-        "device_code_portal_unreachable",
-        "device_code_unexpected_payload",
         "disable_happy",
         "disable_already_disabled",
         "disable_manual_preserved",
@@ -117,12 +144,125 @@ def test_cli_branch_output_avoids_blocked_brand_terms(
     tmp_path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setattr(cli, "_is_headless", lambda: False)
     monkeypatch.setattr(cli, "_open_browser", lambda _url: True)
 
     argv = ["enable", "scout"]
     if branch == "happy":
         _install_urlopen(monkeypatch, [FakeResponse(200, _payload_body())])
+    elif branch == "pending":
+        _install_urlopen(
+            monkeypatch,
+            [
+                FakeResponse(
+                    200,
+                    _state_payload_body(
+                        {
+                            "state": "pending",
+                            "account_id": "acct-p",
+                            "since": 1_700_000_000_000,
+                        }
+                    ),
+                )
+            ],
+        )
+    elif branch == "revoked":
+        cli.scout.provision_scout_handoff(
+            {
+                "google_api_key": "google-revoked",
+                "dispatch_token": "dispatch-revoked",
+                "account_id": "acct-revoked",
+                "created_at": "2026-05-24T00:00:00Z",
+            }
+        )
+        _install_urlopen(
+            monkeypatch,
+            [
+                FakeResponse(
+                    200,
+                    _state_payload_body({"state": "revoked", "account_id": "acct-r"}),
+                )
+            ],
+        )
+        argv = ["enable", "scout", "--force"]
+    elif branch == "legacy_approved":
+        _install_urlopen(monkeypatch, [FakeResponse(200, _payload_body())])
+    elif branch == "approved_bad_payload":
+        _install_urlopen(
+            monkeypatch,
+            [
+                FakeResponse(
+                    200,
+                    _state_payload_body(
+                        {
+                            "state": "approved",
+                            "dispatch_token": "d",
+                            "account_id": "a",
+                            "created_at": "t",
+                        }
+                    ),
+                )
+            ],
+        )
+    elif branch == "refresh_pending":
+        _install_urlopen(
+            monkeypatch,
+            [
+                FakeResponse(
+                    200,
+                    _state_payload_body(
+                        {
+                            "state": "pending",
+                            "account_id": "acct-p",
+                            "since": 1_700_000_000_000,
+                        }
+                    ),
+                )
+            ],
+        )
+        argv = ["refresh", "scout"]
+    elif branch == "refresh_approved":
+        _install_urlopen(
+            monkeypatch,
+            [
+                FakeResponse(
+                    200,
+                    _state_payload_body(
+                        {
+                            "state": "approved",
+                            "google_api_key": "google-refresh",
+                            "dispatch_token": "dispatch-refresh",
+                            "account_id": "acct-refresh",
+                            "created_at": "2026-05-24T00:00:00Z",
+                        }
+                    ),
+                )
+            ],
+        )
+        argv = ["refresh", "scout"]
+    elif branch == "refresh_revoked":
+        cli.scout.provision_scout_handoff(
+            {
+                "google_api_key": "google-refresh-revoked",
+                "dispatch_token": "dispatch-refresh-revoked",
+                "account_id": "acct-refresh-revoked",
+                "created_at": "2026-05-24T00:00:00Z",
+            }
+        )
+        _install_urlopen(
+            monkeypatch,
+            [
+                FakeResponse(
+                    200,
+                    _state_payload_body({"state": "revoked", "account_id": "acct-r"}),
+                )
+            ],
+        )
+        argv = ["refresh", "scout"]
+    elif branch == "no_state_no_key":
+        _install_urlopen(
+            monkeypatch,
+            [FakeResponse(200, _state_payload_body({"account_id": "a"}))],
+        )
     elif branch == "consent_link_expired":
         _install_urlopen(monkeypatch, [_http_error(410)])
     elif branch == "consent_timeout":
@@ -154,62 +294,6 @@ def test_cli_branch_output_avoids_blocked_brand_terms(
         config.setdefault("env", {})["GOOGLE_API_KEY"] = "manual"
         config.pop("services", None)
         write_journal_config(config)
-    elif branch == "device_code_happy":
-        monkeypatch.setattr(cli, "_is_headless", lambda: True)
-        monkeypatch.setattr(
-            portal_client,
-            "mint_device_code",
-            lambda _base_url: portal_client.DeviceCodeOutcome(
-                kind="success",
-                nonce="A" * 52,
-                code="SCOUT-2345-6789",
-                expires_in=900,
-            ),
-        )
-        monkeypatch.setattr(
-            portal_client,
-            "poll_handoff_once",
-            lambda *_args, **_kwargs: portal_client.PollOutcome(
-                kind="success",
-                payload={
-                    "google_api_key": "google-device",
-                    "dispatch_token": "dispatch-device",
-                    "account_id": "acct-device",
-                    "created_at": "2026-05-24T00:00:00Z",
-                },
-            ),
-        )
-        monkeypatch.setattr(cli.scout, "provision_scout_handoff", lambda _payload: None)
-    elif branch == "device_code_rate_limited":
-        monkeypatch.setattr(cli, "_is_headless", lambda: True)
-        monkeypatch.setattr(
-            portal_client,
-            "mint_device_code",
-            lambda _base_url: portal_client.DeviceCodeOutcome(
-                kind="failed",
-                reason="rate_limited",
-            ),
-        )
-    elif branch == "device_code_portal_unreachable":
-        monkeypatch.setattr(cli, "_is_headless", lambda: True)
-        monkeypatch.setattr(
-            portal_client,
-            "mint_device_code",
-            lambda _base_url: portal_client.DeviceCodeOutcome(
-                kind="failed",
-                reason="portal_unreachable",
-            ),
-        )
-    elif branch == "device_code_unexpected_payload":
-        monkeypatch.setattr(cli, "_is_headless", lambda: True)
-        monkeypatch.setattr(
-            portal_client,
-            "mint_device_code",
-            lambda _base_url: portal_client.DeviceCodeOutcome(
-                kind="failed",
-                reason="unexpected_payload",
-            ),
-        )
     elif branch == "disable_happy":
         cli.scout.provision_scout_handoff(
             {

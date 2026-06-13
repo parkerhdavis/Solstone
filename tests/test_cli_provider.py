@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from solstone.think.cogitate_contract import COGITATE_RUNTIME_PREAMBLE
 from solstone.think.providers.cli import (
     CLIRunner,
     QuotaExhaustedError,
@@ -85,8 +86,14 @@ class TestAssemblePrompt:
 
         assert body == "hello"
         assert system is not None
-        assert system.startswith("Base system")
+        assert system.startswith(COGITATE_RUNTIME_PREAMBLE)
+        assert "Base system" in system
         assert "through the `Bash` tool" in system
+        assert (
+            system.index(COGITATE_RUNTIME_PREAMBLE.rstrip("\n"))
+            < system.index("Base system")
+            < system.index("through the `Bash` tool")
+        )
 
     def test_assemble_prompt_does_not_append_hint_when_not_provided(self):
         body, system = assemble_prompt(
@@ -109,8 +116,13 @@ class TestAssemblePrompt:
 
         assert body == "hello"
         assert system is not None
+        assert system.startswith(COGITATE_RUNTIME_PREAMBLE)
+        assert "Base system" in system
         assert "through the `run_shell_command` tool" in system
         assert "Limit filesystem reads to today's segment dir" in system
+        assert system.index("through the `run_shell_command` tool") < system.index(
+            "Limit filesystem reads to today's segment dir"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -583,7 +595,7 @@ class TestCLIRunnerExitCode:
                 "tool": "read_file",
                 "budget": 200,
                 "count": 201,
-                "read_tools": ["read_file", "glob", "list_directory", "grep_search"],
+                "read_tools": ["read_file", "list_directory", "glob", "grep_search"],
                 "ts": exhausted[0]["ts"],
             }
         ]

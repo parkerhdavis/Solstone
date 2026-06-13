@@ -36,6 +36,9 @@ from solstone.think.utils import is_source_checkout as source_checkout
 
 TOTAL_STEPS = 7
 MANIFEST_SCHEMA_VERSION = 1
+# doctor is examine-only and must complete near-instantly; 30s is a generous
+# backstop, not a work budget. If doctor approaches it, the cause is a layer
+# leak (a heavy import) to fix at the source — do not raise this number.
 DOCTOR_TIMEOUT_SECONDS = 30
 DOCTOR_JSONL_EVENTS = frozenset(
     {"doctor.started", "check.completed", "doctor.completed"}
@@ -1159,9 +1162,9 @@ def step_install_models(ctx: SetupContext, step_index: int) -> StepResult:
 
 def skills_user_paths() -> list[Path]:
     return [
-        Path.home() / ".claude" / "skills" / "solstone" / "SKILL.md",
-        Path.home() / ".codex" / "skills" / "solstone" / "SKILL.md",
-        Path.home() / ".gemini" / "skills" / "solstone" / "SKILL.md",
+        Path.home() / ".claude" / "skills" / "sol" / "SKILL.md",
+        Path.home() / ".codex" / "skills" / "sol" / "SKILL.md",
+        Path.home() / ".gemini" / "skills" / "sol" / "SKILL.md",
     ]
 
 
@@ -1234,6 +1237,8 @@ def step_skills_journal(ctx: SetupContext, step_index: int) -> StepResult:
     return step_result("skills_journal", "ok", paths, started_at)
 
 
+# OWNS alias repair (the mutation) via install_guard.provision_wrappers; doctor
+# only reports stale aliases.
 def step_wrapper(ctx: SetupContext, step_index: int) -> StepResult:
     from solstone.think import install_guard
 
@@ -1297,7 +1302,7 @@ def step_service(ctx: SetupContext, step_index: int) -> StepResult:
     from solstone.think.service import _up
 
     narrate(ctx, f"[step {step_index}/{TOTAL_STEPS}] running service up...")
-    up_rc = int(_up(port=ctx.port))
+    up_rc = int(_up())
     if up_rc != 0:
         return step_result(
             "service",
@@ -1631,7 +1636,7 @@ def print_plan(ctx: SetupContext, *, dry_run: bool) -> None:
         narrate(ctx, f"  would run: {format_command(install_models_command(ctx))}")
     narrate(
         ctx,
-        f"[step 4/7] {_STEP_NAME[step_skills_user]} - installs solstone bundle for claude / codex / gemini",
+        f"[step 4/7] {_STEP_NAME[step_skills_user]} - installs the sol skill for claude / codex / gemini",
     )
     if ctx.skip_skills:
         narrate(ctx, "  skipped: --skip-skills")
@@ -1652,7 +1657,7 @@ def print_plan(ctx: SetupContext, *, dry_run: bool) -> None:
         narrate(ctx, "  skipped: --skip-service")
     else:
         narrate(ctx, f"  would run: {format_command(service_install_command(ctx))}")
-        narrate(ctx, f"  would call: solstone.think.service._up(port={ctx.port})")
+        narrate(ctx, "  would call: solstone.think.service._up()")
 
 
 def print_failure(ctx: SetupContext, result: StepResult) -> None:

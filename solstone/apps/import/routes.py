@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from flask import Blueprint, abort, g, jsonify, render_template, request
+from flask import Blueprint, g, jsonify, render_template, request
 from werkzeug.utils import secure_filename
 
 from solstone.apps.utils import log_app_action
@@ -25,13 +25,19 @@ from solstone.convey.reasons import (
     JOURNAL_SOURCE_PROBLEM,
     MISSING_REQUIRED_FIELD,
 )
-from solstone.convey.utils import error_response
+from solstone.convey.utils import (
+    error_response,
+    load_json,
+    respond_collection,
+    success_response,
+)
 from solstone.think.detect_created import detect_created
 from solstone.think.importers.utils import (
     build_import_info,
     generate_content_manifest,
     get_import_details,
     list_import_timestamps,
+    move_import,
     read_import_metadata,
     save_import_file,
     save_import_text,
@@ -52,6 +58,14 @@ from .journal_sources import (
     list_journal_sources,
     require_journal_source,
     save_journal_source,
+)
+from .resolve import (
+    ResolveInvalid,
+    ResolveNotFound,
+    resolve_config,
+    resolve_config_all,
+    resolve_entity,
+    resolve_staged_facet,
 )
 
 import_bp = Blueprint(
@@ -786,28 +800,24 @@ def import_start() -> Any:
     is_local_path = not str(file_path).startswith(str(imports_dir))
     original_timestamp = file_path.parent.name if not is_local_path else ts
 
-    # If timestamp changed, rename the import directory
+    # If timestamp changed, move the import directory through the imports/ owner
     if not is_local_path and original_timestamp != ts:
-        old_import_dir = journal_root / "imports" / original_timestamp
-        new_import_dir = journal_root / "imports" / ts
-
-        # Check if old directory exists
-        if not old_import_dir.exists():
+        try:
+            new_import_dir = move_import(
+                journal_root=journal_root,
+                old_timestamp=original_timestamp,
+                new_timestamp=ts,
+            )
+        except FileNotFoundError:
             return error_response(
                 IMPORT_NOT_FOUND,
                 detail=f"Import directory not found for {original_timestamp}",
             )
-
-        # Check if target directory already exists
-        if new_import_dir.exists():
+        except FileExistsError:
             return error_response(
                 IMPORT_CONFLICT,
                 detail=f"Import already exists for timestamp {ts}",
             )
-
-        # Rename the directory
-        try:
-            old_import_dir.rename(new_import_dir)
         except Exception as e:
             return error_response(
                 IMPORT_METADATA_FAILED,
@@ -945,7 +955,7 @@ def api_journal_source_list() -> Any:
                 "created_at": s.get("created_at"),
             }
         )
-    return jsonify(result)
+    return respond_collection(result)
 
 
 @import_bp.route("/api/journal-sources/<name>/revoke", methods=["POST"])
@@ -1004,16 +1014,172 @@ def api_journal_source_status(name: str) -> Any:
     )
 
 
+@import_bp.route("/api/journal-sources/<name>/staged")
+def api_journal_source_staged(name: str) -> Any:
+    source = find_journal_source_by_name(name)
+    if not source:
+        return error_response(
+            JOURNAL_SOURCE_PROBLEM,
+            status=404,
+            detail=f"Journal source '{name}' not found",
+        )
+    area = request.args.get("area")
+    if area is not None and area not in {"entities", "facets", "config"}:
+        return error_response(
+            INVALID_REQUEST_VALUE,
+            status=400,
+            detail="Area must be one of: entities, facets, config",
+        )
+    # Mirrors api_journal_source_status: a registry-returned record always has a
+    # valid prefix, so call journal_source_state_prefix directly (no try/except).
+    state_dir = get_state_directory(journal_source_state_prefix(source))
+    items: list[dict[str, Any]] = []
+
+    if area in {None, "entities"}:
+        staged_dir = state_dir / "entities" / "staged"
+        for staged_path in sorted(staged_dir.glob("*.json")):
+            payload = load_json(staged_path)
+            if not isinstance(payload, dict):
+                continue
+            items.append(
+                {
+                    "area": "entities",
+                    "source_id": staged_path.stem,
+                    "reason": payload.get("reason"),
+                    "source_entity": payload.get("source_entity"),
+                    "match_candidates": payload.get("match_candidates"),
+                    "staged_at": payload.get("staged_at"),
+                }
+            )
+
+    if area in {None, "facets"}:
+        staged_dir = state_dir / "facets" / "staged"
+        for staged_path in sorted(staged_dir.glob("**/*.staged.json")):
+            payload = load_json(staged_path)
+            if not isinstance(payload, dict):
+                continue
+            relative_path = staged_path.relative_to(staged_dir)
+            parts = relative_path.parts
+            if len(parts) < 3:
+                continue
+            line = {
+                "area": "facets",
+                "staged_file": relative_path.as_posix(),
+                "facet": parts[0],
+                "file_type": parts[1],
+            }
+            line.update(payload)
+            items.append(line)
+
+    if area in {None, "config"}:
+        diff = load_json(state_dir / "config" / "diff.json")
+        # Config-parity decision: include the config item iff diff.json exists
+        # AND loads as a dict. A missing / unreadable / non-dict diff is omitted
+        # (still HTTP 200) — never a 500, never an empty-diff placeholder.
+        if isinstance(diff, dict):
+            items.append({"area": "config", "diff": diff})
+
+    return respond_collection(items)
+
+
+@import_bp.route("/api/journal-sources/<name>/resolve-entity", methods=["POST"])
+def api_journal_source_resolve_entity(name: str) -> Any:
+    source = find_journal_source_by_name(name)
+    if not source:
+        return error_response(
+            JOURNAL_SOURCE_PROBLEM,
+            status=404,
+            detail=f"Journal source '{name}' not found",
+        )
+    state_dir = get_state_directory(journal_source_state_prefix(source))
+    data = request.get_json(force=True)
+
+    try:
+        result = resolve_entity(
+            state_dir,
+            data["source_id"],
+            data["action"],
+            data.get("target"),
+        )
+    except ResolveNotFound as exc:
+        return error_response(IMPORT_NOT_FOUND, detail=str(exc))
+    except ResolveInvalid as exc:
+        return error_response(INVALID_REQUEST_VALUE, detail=str(exc))
+    return jsonify(result)
+
+
+@import_bp.route("/api/journal-sources/<name>/resolve-facet", methods=["POST"])
+def api_journal_source_resolve_facet(name: str) -> Any:
+    source = find_journal_source_by_name(name)
+    if not source:
+        return error_response(
+            JOURNAL_SOURCE_PROBLEM,
+            status=404,
+            detail=f"Journal source '{name}' not found",
+        )
+    state_dir = get_state_directory(journal_source_state_prefix(source))
+    data = request.get_json(force=True)
+
+    try:
+        resolve_staged_facet(state_dir, data["staged_file"], data["mode"])
+    except ResolveNotFound as exc:
+        return error_response(IMPORT_NOT_FOUND, detail=str(exc))
+    except (ResolveInvalid, ValueError) as exc:
+        return error_response(INVALID_REQUEST_VALUE, detail=str(exc))
+    return success_response()
+
+
+@import_bp.route("/api/journal-sources/<name>/resolve-config", methods=["POST"])
+def api_journal_source_resolve_config(name: str) -> Any:
+    source = find_journal_source_by_name(name)
+    if not source:
+        return error_response(
+            JOURNAL_SOURCE_PROBLEM,
+            status=404,
+            detail=f"Journal source '{name}' not found",
+        )
+    state_dir = get_state_directory(journal_source_state_prefix(source))
+    data = request.get_json(force=True)
+
+    try:
+        resolve_config(state_dir, data["field"], data["action"])
+    except ResolveNotFound as exc:
+        return error_response(IMPORT_NOT_FOUND, detail=str(exc))
+    except ResolveInvalid as exc:
+        return error_response(INVALID_REQUEST_VALUE, detail=str(exc))
+    return success_response()
+
+
+@import_bp.route("/api/journal-sources/<name>/resolve-config-all", methods=["POST"])
+def api_journal_source_resolve_config_all(name: str) -> Any:
+    source = find_journal_source_by_name(name)
+    if not source:
+        return error_response(
+            JOURNAL_SOURCE_PROBLEM,
+            status=404,
+            detail=f"Journal source '{name}' not found",
+        )
+    state_dir = get_state_directory(journal_source_state_prefix(source))
+    data = request.get_json(force=True)
+
+    try:
+        count = resolve_config_all(state_dir, data["category"])
+    except ResolveNotFound as exc:
+        return error_response(IMPORT_NOT_FOUND, detail=str(exc))
+    except ResolveInvalid as exc:
+        return error_response(INVALID_REQUEST_VALUE, detail=str(exc))
+    return jsonify({"count": count})
+
+
 @import_bp.route("/journal/<key_prefix>/manifest/<area>")
 @require_journal_source
 def journal_source_manifest(key_prefix: str, area: str) -> Any:
-    if journal_source_state_prefix(g.journal_source) != key_prefix:
-        # PROTOCOL-ONLY: journal-source key mismatch from non-owner clients.
-        abort(403, description="Key prefix mismatch")
     if area not in STATE_AREAS:
         # PROTOCOL-ONLY: journal-source manifest area from non-owner clients.
-        abort(404, description="Unknown manifest area")
-    state_path = get_state_directory(key_prefix) / area / "state.json"
+        return error_response(
+            INVALID_REQUEST_VALUE, status=404, detail="Unknown manifest area"
+        )
+    state_path = get_state_directory(g.derived_prefix) / area / "state.json"
     try:
         data = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):

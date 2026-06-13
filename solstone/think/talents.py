@@ -489,6 +489,11 @@ def prepare_config(request: dict) -> dict:
 
     # Load complete talent config
     config = get_talent(name, facet=facet, analysis_day=day)
+    if "outbound_approval" in config:
+        raise ValueError(
+            f"talent {name!r} declares 'outbound_approval' in frontmatter; "
+            "this field is launch-config-only and may not come from a talent definition"
+        )
 
     # Config now contains all frontmatter fields plus:
     # - path: Path to the .md file
@@ -1059,6 +1064,8 @@ async def _execute_generate(
             json_output=is_json_output,
             json_schema=runtime_json_schema,
             timeout_s=timeout_s,
+            provider=config.get("provider"),
+            model=config.get("model"),
         )
     except Exception as exc:
         provider = config.get("provider", "google")
@@ -1170,6 +1177,10 @@ async def _run_talent(
     is_cogitate = config["type"] == "cogitate"
     refresh = config.get("refresh", False)
     output_path = Path(config["output_path"]) if config.get("output_path") else None
+
+    # Expose dry-run to hooks so a pre-hook can skip side effects (e.g. steward's
+    # deterministic health.md write) during model-free dry runs.
+    config["dry_run"] = dry_run
 
     # Emit start event
     start_event: dict[str, Any] = {

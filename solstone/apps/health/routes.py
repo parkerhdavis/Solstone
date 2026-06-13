@@ -13,6 +13,10 @@ from flask import Blueprint, jsonify, render_template, request
 from solstone.apps.health import copy as health_copy
 from solstone.convey import backlog_copy, state
 from solstone.convey.backlog_view import stuck_rows, verdict
+from solstone.convey.readiness_snapshot import (
+    build_readiness_snapshot,
+    unavailable_snapshot,
+)
 from solstone.convey.reasons import (
     FILE_NOT_FOUND,
     FILE_READ_FAILED,
@@ -34,6 +38,7 @@ from solstone.think.reprocess import (
     reprocess_day,
 )
 from solstone.think.streams import stream_name
+from solstone.think.talent_runs import AgentFailureScan, read_unresolved_agent_failures
 
 logger = logging.getLogger(__name__)
 
@@ -70,13 +75,52 @@ def _load_backlog() -> dict | None:
     return backlog if isinstance(backlog, dict) else None
 
 
+def _safe_readiness_snapshot() -> dict:
+    try:
+        return build_readiness_snapshot()
+    except Exception:
+        logger.exception("Failed to build health readiness snapshot")
+        return unavailable_snapshot()
+
+
+def _build_agent_error_seed(scan: AgentFailureScan) -> list[dict]:
+    return [
+        {
+            "type": "agent",
+            "id": failure.use_id,
+            "name": failure.name,
+            "ts": failure.ts,
+            "service": "cortex",
+            "error": "talent error",
+            "reason_code": failure.reason_code,
+            "provider": failure.provider,
+            "model": failure.model,
+        }
+        for failure in scan.failures
+    ]
+
+
+def _errors_today_label(count: int | None) -> str:
+    return "error today" if count == 1 else "errors today"
+
+
 @health_bp.route("/")
 def index():
     backlog = _load_backlog()
+    agent_failure_scan = read_unresolved_agent_failures()
+    agent_error_seed = _build_agent_error_seed(agent_failure_scan)
+    agent_error_count = len(agent_error_seed)
     return render_template(
         "app.html",
         health_backlog_verdict=verdict(backlog),
         health_stuck_rows=stuck_rows(backlog),
+        health_readiness=_safe_readiness_snapshot(),
+        health_agent_errors=agent_error_seed,
+        health_agent_errors_ok=agent_failure_scan.ok,
+        health_agent_errors_count=agent_error_count,
+        health_agent_errors_label=_errors_today_label(
+            agent_error_count if agent_failure_scan.ok else None
+        ),
     )
 
 
@@ -112,7 +156,12 @@ def get_log():
 
 @health_bp.route("/api/info")
 def api_info():
-    return jsonify({"hostname": stream_name(host=socket.gethostname())})
+    return jsonify(
+        {
+            "hostname": stream_name(host=socket.gethostname()),
+            "readiness": _safe_readiness_snapshot(),
+        }
+    )
 
 
 @health_bp.post("/api/retry-import")

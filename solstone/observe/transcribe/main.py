@@ -6,7 +6,7 @@
 Transcription pipeline:
 1. VAD stage: Run Silero VAD to detect speech and filter silent files early
 2. Audio reduction: Trim long silence gaps for faster processing
-3. Transcription: Dispatch to the configured STT backend (default: parakeet)
+3. Transcription: Dispatch to the configured or resource-aware STT backend
 4. Enrichment: Extract topics, setting, emotions, and warnings via LLM (optional)
 5. Embeddings: Generate voice embeddings for each sentence using wespeaker-resnet34
 6. Output: JSONL format compatible with format_audio() in observe/hear.py
@@ -16,7 +16,7 @@ Output files:
 - <stem>.npz: Sentence-level voice embeddings indexed by statement id
 
 Configuration (journal config transcribe section):
-- transcribe.backend: STT backend ("parakeet", "whisper", "revai", "gemini"). Default: "parakeet"
+- transcribe.backend: STT backend ("parakeet", "whisper", "revai", "gemini"). If unset, auto-selected by free memory.
 - transcribe.enrich: Enable/disable LLM enrichment (default: true)
 - transcribe.preserve_all: Keep audio files even when no speech detected (default: false)
 - transcribe.min_speech_seconds: Minimum speech duration to proceed. Default: 1.0
@@ -63,6 +63,14 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from solstone.apps.settings.install_copy import (
+    STT_DETECTED_MEMORY_TEMPLATE,
+    STT_DETECTED_MEMORY_UNKNOWN,
+    STT_EXPLICIT_LOCAL_LOW_TEMPLATE,
+    STT_LOCAL_REQUIREMENTS_TEMPLATE,
+    STT_LOCAL_UNSUPPORTED,
+    STT_NO_KEY_RECOVERY,
+)
 from solstone.apps.speakers.encoder_config import (
     OVERLAP_DETECTOR_ID,
     OVERLAP_DETECTOR_SHA256,
@@ -72,7 +80,13 @@ from solstone.observe.transcribe import (
     get_backend,
 )
 from solstone.observe.transcribe import transcribe as stt_transcribe
-from solstone.observe.transcribe.overlap import compute_overlap_fraction
+from solstone.observe.transcribe.overlap import compute_overlap_and_logprobs
+from solstone.observe.transcribe.resource import (
+    STT_SURFACE,
+    local_stt_backend,
+    select_stt_backend,
+    stt_local_floor_bytes,
+)
 from solstone.observe.transcribe.whisper import (
     DEFAULT_COMPUTE,
     DEFAULT_DEVICE,
@@ -87,7 +101,10 @@ from solstone.observe.vad import (
     run_vad,
 )
 from solstone.think.callosum import callosum_send
+from solstone.think.journal_io import write_text
+from solstone.think.journal_io.npz import write_npz
 from solstone.think.media import AUDIO_EXTENSIONS as SUPPORTED_AUDIO_FORMATS
+from solstone.think.providers.memory import gb, read_available_bytes
 from solstone.think.utils import (
     day_dirs,
     day_from_path,
@@ -135,6 +152,67 @@ ENTITY_NAMES_LIMIT = 40
 
 # Module-level embedder cache
 _embedder_session: ort.InferenceSession | None = None
+
+
+def resolve_default_backend(args: argparse.Namespace, transcribe_config: dict) -> str:
+    """Resolve the effective default STT backend once, from a single free-RAM read.
+
+    Honors explicit CLI/config choices, warns on an explicit local choice below
+    the platform floor, and raises SystemExit(1) with a clear requirement when
+    there is no viable backend.
+    """
+    available_bytes = read_available_bytes()
+    floor_bytes = stt_local_floor_bytes()
+    local_backend = local_stt_backend()
+    google_key_present = bool(os.getenv("GOOGLE_API_KEY"))
+    configured_backend = transcribe_config.get("backend")
+    if args.backend or configured_backend:
+        _warn_if_local_below_floor(
+            args.backend or configured_backend, available_bytes, floor_bytes
+        )
+        return configured_backend or DEFAULT_BACKEND
+    backend = select_stt_backend(
+        available_bytes,
+        google_key_present=google_key_present,
+        floor_bytes=floor_bytes,
+        local_backend=local_backend,
+    )
+    if backend == STT_SURFACE:
+        _surface_stt_requirement(available_bytes, floor_bytes)
+        raise SystemExit(1)
+    return backend
+
+
+def _warn_if_local_below_floor(
+    backend: str, available_bytes: int | None, floor_bytes: int | None
+) -> None:
+    if (
+        backend in {"parakeet", "whisper"}
+        and floor_bytes is not None
+        and available_bytes is not None
+        and available_bytes < floor_bytes
+    ):
+        logging.warning(
+            STT_EXPLICIT_LOCAL_LOW_TEMPLATE.format(ram_gb=floor_bytes // 1024**3)
+        )
+
+
+def _surface_stt_requirement(
+    available_bytes: int | None, floor_bytes: int | None
+) -> None:
+    if floor_bytes is None:
+        requirement = STT_LOCAL_UNSUPPORTED
+    else:
+        requirement = STT_LOCAL_REQUIREMENTS_TEMPLATE.format(
+            ram_gb=floor_bytes // 1024**3
+        )
+    available_gb = gb(available_bytes)
+    detected = (
+        STT_DETECTED_MEMORY_UNKNOWN
+        if available_gb is None
+        else STT_DETECTED_MEMORY_TEMPLATE.format(available_gb=available_gb)
+    )
+    logging.error("%s %s %s", requirement, detected, STT_NO_KEY_RECOVERY)
 
 
 def _select_onnx_providers() -> list[str]:
@@ -645,7 +723,9 @@ def process_audio(
         # Generate embeddings before timestamp restoration
         # Use reduced audio buffer if available for consistent timestamps
         embeddings_data = _embed_statements(stt_buffer, statements, SAMPLE_RATE)
-        overlap_fraction_value = compute_overlap_fraction(audio_buffer)
+        overlap_fraction_value, pyannote_logprobs = compute_overlap_and_logprobs(
+            audio_buffer
+        )
 
         # Restore original timestamps if audio was reduced (non-Gemini backends only)
         # Gemini with chunks already has timestamps in original audio time
@@ -655,6 +735,44 @@ def process_audio(
                 f"  Restored timestamps from reduced audio "
                 f"({reduction.reduced_duration:.1f}s -> {reduction.original_duration:.1f}s)"
             )
+
+        # Local speaker diarization for backends that produce no speaker labels.
+        # Skip when overlap is near zero — the recording is effectively solo
+        # speech and diarization adds no value.  Otherwise reuse the pyannote
+        # log-probs computed above so the diarizer skips its own pyannote pass.
+        _DIARIZE_MIN_OVERLAP = 0.05
+        if resolved_backend in {"parakeet", "whisper"}:
+            if overlap_fraction_value < _DIARIZE_MIN_OVERLAP:
+                logging.info(
+                    "  Skipping diarization: overlap=%.2f (threshold %.2f)",
+                    overlap_fraction_value,
+                    _DIARIZE_MIN_OVERLAP,
+                )
+            else:
+                try:
+                    from solstone.observe.transcribe.diarize import diarize_auto_k
+
+                    labels = diarize_auto_k(
+                        raw_path,
+                        statements,
+                        avg_log_probs=pyannote_logprobs,
+                        audio=audio_buffer,
+                    )
+                    assigned = 0
+                    for stmt, lbl in zip(statements, labels):
+                        if lbl is not None:
+                            stmt["speaker"] = lbl
+                            assigned += 1
+                    logging.info(
+                        "  Local diarization: %d/%d sentences labeled (overlap=%.2f)",
+                        assigned,
+                        len(statements),
+                        overlap_fraction_value,
+                    )
+                except Exception:
+                    logging.exception(
+                        "Local diarization failed; speaker labels will be absent"
+                    )
 
         # Convert to JSONL format (now with original timestamps)
         raw_filename = f"{raw_path.stem}{raw_path.suffix}"
@@ -674,14 +792,38 @@ def process_audio(
         )
 
         # Write JSONL
-        jsonl_path.write_text("\n".join(jsonl_lines) + "\n")
+        write_text(jsonl_path, "\n".join(jsonl_lines) + "\n")
         logging.info(f"Transcribed {raw_path} -> {jsonl_path}")
 
         # Save embeddings
         if embeddings_data:
             embeddings_path = _get_embeddings_path(raw_path)
-            np.savez_compressed(embeddings_path, **embeddings_data)
+            write_npz(
+                embeddings_path,
+                embeddings_data,
+                expected_keys=tuple(embeddings_data.keys()),
+            )
             logging.info(f"Saved embeddings: {embeddings_path}")
+            try:
+                from solstone.apps.speakers.candidate_tracker import CandidateTracker
+
+                tracker_day = day or day_from_path(raw_path)
+                tracker_segment = segment or get_segment_key(raw_path)
+                tracker_stream = raw_path.parent.parent.name
+                if tracker_day and tracker_segment and tracker_stream:
+                    CandidateTracker().process_segment(
+                        day=tracker_day,
+                        segment_key=tracker_segment,
+                        stream=tracker_stream,
+                        source=raw_path.stem,
+                        seg_dir=raw_path.parent,
+                    )
+            except Exception:
+                logging.warning(
+                    "Speaker candidate tracking failed for %s",
+                    raw_path,
+                    exc_info=True,
+                )
         else:
             logging.warning(f"No embeddings generated for {raw_path}")
 
@@ -698,6 +840,14 @@ def process_audio(
 
     except Exception as e:
         logging.error(f"Failed to transcribe {raw_path}: {e}", exc_info=True)
+        try:
+            event = _build_base_event(raw_path, vad_result, segment, observer)
+            event["outcome"] = "failed"
+            event["backend"] = resolved_backend
+            event["error"] = f"{type(e).__name__}: {e}"
+            callosum_send("observe", "transcribed", **event)
+        except Exception:
+            logging.exception("Failed to emit transcription failure event")
         from solstone.think.models import IncompleteJSONError
 
         if isinstance(e, IncompleteJSONError) and e.partial_text:
@@ -711,6 +861,7 @@ def _process_one(
     audio_path: Path,
     args: argparse.Namespace,
     transcribe_config: dict,
+    default_backend: str,
     entity_names: list[str],
 ) -> None:
     """Run the full transcription pipeline for a single audio file."""
@@ -765,8 +916,8 @@ def _process_one(
         reduced_audio, reduction = reduce_audio(audio_buffer, vad_result)
 
     # Stage 3: Determine backend and build backend config
-    # CLI --backend flag overrides config, otherwise use config or default
-    backend = args.backend or transcribe_config.get("backend", DEFAULT_BACKEND)
+    # CLI --backend flag overrides the invocation-level default
+    backend = args.backend or default_backend
 
     # Check for noise upgrade: auto-switch to Rev.ai for noisy recordings
     # Only applies when:
@@ -901,7 +1052,7 @@ def main():
         "--backend",
         type=str,
         choices=list(BACKEND_REGISTRY.keys()),
-        help=f"STT backend to use (overrides config, default: {DEFAULT_BACKEND})",
+        help="STT backend to use (overrides config and resource-aware auto default)",
     )
     args = setup_cli(parser)
     require_solstone()
@@ -913,6 +1064,7 @@ def main():
 
     config = get_config()
     transcribe_config = config.get("transcribe", {})
+    default_backend = resolve_default_backend(args, transcribe_config)
 
     from solstone.think.entities import load_recent_entity_names
 
@@ -937,7 +1089,13 @@ def main():
                         continue
                     try:
                         logging.info(f"Transcribing: {audio_file}")
-                        _process_one(audio_file, args, transcribe_config, entity_names)
+                        _process_one(
+                            audio_file,
+                            args,
+                            transcribe_config,
+                            default_backend,
+                            entity_names,
+                        )
                         processed += 1
                     except Exception:
                         logging.error(
@@ -979,7 +1137,7 @@ def main():
             f"but parent is: {audio_path.parent.name}"
         )
 
-    _process_one(audio_path, args, transcribe_config, entity_names)
+    _process_one(audio_path, args, transcribe_config, default_backend, entity_names)
 
 
 if __name__ == "__main__":

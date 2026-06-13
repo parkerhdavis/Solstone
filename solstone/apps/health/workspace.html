@@ -510,6 +510,16 @@
   display: none;
 }
 
+.observe-source-note {
+  color: #92400e;
+  font-size: 0.82em;
+  margin: -0.45em 0 0.85em;
+}
+
+.observe-source-note.hidden {
+  display: none;
+}
+
 .observe-section {
   display: flex;
   flex-direction: column;
@@ -854,6 +864,16 @@
 }
 
 .logs-error-badge.hidden {
+  display: none;
+}
+
+.logs-connection-note {
+  color: #d97706;
+  font-size: 0.85em;
+  font-weight: 500;
+}
+
+.logs-connection-note.hidden {
   display: none;
 }
 
@@ -1353,11 +1373,11 @@
       </a>
       <div class="glance-metric glance-metric-activity" id="glanceActivity">
         <span class="glance-metric-value" id="glanceActivityValue">0</span>
-        <span class="glance-metric-label">last hour</span>
+        <span class="glance-metric-label">events last hour</span>
       </div>
       <a class="glance-metric glance-metric-errors" href="#focus=recent-errors" id="glanceErrors">
-        <span class="glance-metric-value" id="glanceErrorsValue">0</span>
-        <span class="glance-metric-label">errors today</span>
+        <span class="glance-metric-value" id="glanceErrorsValue">{{ health_agent_errors_count if health_agent_errors_ok else "—" }}</span>
+        <span class="glance-metric-label" id="glanceErrorsLabel">{{ health_agent_errors_label }}</span>
       </a>
     </div>
   </div>
@@ -1387,8 +1407,8 @@
           </div>
         </div>
       </div>
-      <div class="vitals-section" role="group" aria-label="Agents: 0 running">
-        <div class="vitals-label" aria-hidden="true">agents</div>
+      <div class="vitals-section" role="group" aria-label="Talents: 0 running">
+        <div class="vitals-label" aria-hidden="true">talents</div>
         <div class="vitals-value" id="agentsValue" aria-hidden="true">
           <span>0 running</span>
         </div>
@@ -1434,6 +1454,7 @@
         <span id="observeModeLabel">waiting...</span>
       </div>
     </div>
+    <div class="observe-source-note hidden" id="observeSourceNote"></div>
     <div id="observeEmpty">
       <div class="surface-state surface-state--empty">
         <h2 class="surface-state-heading">no observations active</h2>
@@ -1502,6 +1523,14 @@
           <span class="backlog-row-day">{{ row.day }}</span>
           <span class="backlog-badge">{{ backlog_copy.BACKLOG_DAY_BADGE }}</span>
           <span class="backlog-row-reason">{{ row.reason }}</span>
+          {% if row.reason_code or row.provider or row.model %}
+          <details class="backlog-row-details">
+            <summary>details</summary>
+            {% if row.reason_code %}<span>reason_code={{ row.reason_code }}</span>{% endif %}
+            {% if row.provider %}<span>provider={{ row.provider }}</span>{% endif %}
+            {% if row.model %}<span>model={{ row.model }}</span>{% endif %}
+          </details>
+          {% endif %}
         </div>
         {% if row.depth %}<span class="backlog-depth">{{ row.depth }}</span>{% endif %}
         <div class="backlog-row-actions">
@@ -1520,7 +1549,7 @@
     <!-- Cortex Agents -->
     <div class="dashboard-card activity-section hidden" id="cortexSection">
       <div class="activity-section-header">
-        Active agents
+        Active talents
       </div>
       <div class="activity-grid" id="cortexGrid"></div>
     </div>
@@ -1565,6 +1594,7 @@
       <div class="logs-title">service logs</div>
       <span class="logs-summary-badge" id="logsSummaryBadge" aria-live="polite"></span>
       <span class="logs-error-badge hidden" id="logErrorBadge"></span>
+      <span class="logs-connection-note hidden" id="logsConnectionNote"></span>
       <span class="logs-collapse-indicator" id="logsCollapseIndicator">▶ show</span>
       <div class="logs-controls">
         <label for="logServiceFilter">{{ health_copy.LOGS_SERVICE_FILTER_LABEL }}</label>
@@ -1609,16 +1639,28 @@
         HEALTH_GLANCE_CATCHING_UP: {{ health_copy.HEALTH_GLANCE_CATCHING_UP | tojson }},
         HEALTH_GLANCE_OBSERVER_SILENT: {{ health_copy.HEALTH_GLANCE_OBSERVER_SILENT | tojson }},
         HEALTH_GLANCE_SERVICES_UNREACHABLE: {{ health_copy.HEALTH_GLANCE_SERVICES_UNREACHABLE | tojson }},
+        HEALTH_GLANCE_READINESS_BLOCKED: {{ health_copy.HEALTH_GLANCE_READINESS_BLOCKED | tojson }},
+        HEALTH_GLANCE_READINESS_UNKNOWN: {{ health_copy.HEALTH_GLANCE_READINESS_UNKNOWN | tojson }},
       };
+      window.HEALTH_READINESS = {{ health_readiness | tojson }};
+      window.HEALTH_AGENT_ERRORS = {{ health_agent_errors | tojson }};
+      window.HEALTH_AGENT_ERRORS_OK = {{ health_agent_errors_ok | tojson }};
     </script>
   </div>
 </div>
 
 <script>
 (function(){
+  let providerReadiness = window.HEALTH_READINESS || null;
+
   fetch('/app/health/api/info')
     .then(r => r.json())
-    .then(info => { state.localHost = info.hostname; updateObserve(); })
+    .then(info => {
+      state.localHost = info.hostname;
+      providerReadiness = info.readiness || providerReadiness;
+      updateObserve();
+      updateStatusSummary();
+    })
     .catch(() => {
       if (!state.connected) {
         connectError = true;
@@ -1674,6 +1716,7 @@
     todayCostUSD: null,
     observers: new Map(),       // keyed by stream name
     recentErrors: [],
+    agentErrorsOk: window.HEALTH_AGENT_ERRORS_OK !== false,
     recentErrorsFilter: null,
     pendingRecentErrorsFocus: false,
     pendingLogAnchor: null,
@@ -1689,6 +1732,7 @@
     glanceCostValue: document.getElementById('glanceCostValue'),
     glanceActivityValue: document.getElementById('glanceActivityValue'),
     glanceErrorsValue: document.getElementById('glanceErrorsValue'),
+    glanceErrorsLabel: document.getElementById('glanceErrorsLabel'),
     serviceDots: document.getElementById('serviceDots'),
     agentsValue: document.getElementById('agentsValue'),
     tasksValue: document.getElementById('tasksValue'),
@@ -1708,6 +1752,7 @@
     describeDetail: document.getElementById('describeDetail'),
     transcribeStatus: document.getElementById('transcribeStatus'),
     transcribeDetail: document.getElementById('transcribeDetail'),
+    observeSourceNote: document.getElementById('observeSourceNote'),
     observersCard: document.getElementById('observersCard'),
     observersGrid: document.getElementById('observersGrid'),
     registeredObserversCard: document.getElementById('registeredObserversCard'),
@@ -1739,6 +1784,7 @@
     logFollowBtn: document.getElementById('logFollowBtn'),
     logClearBtn: document.getElementById('logClearBtn'),
     logErrorBadge: document.getElementById('logErrorBadge'),
+    logsConnectionNote: document.getElementById('logsConnectionNote'),
     logsSummaryBadge: document.getElementById('logsSummaryBadge'),
     logsAnnouncer: document.getElementById('logsAnnouncer'),
     logsCollapseIndicator: document.getElementById('logsCollapseIndicator'),
@@ -1750,6 +1796,7 @@
   };
 
   let timeoutFired = false;
+  let programmaticScroll = false;
   const STALE_MS = 30000;
   const HEALTH_GLANCE_COPY = window.HEALTH_GLANCE_COPY;
   const BACKLOG_QUEUED_FEEDBACK = {{ backlog_copy.BACKLOG_QUEUED_FEEDBACK | tojson }};
@@ -1802,6 +1849,18 @@
     return formatElapsed(Math.floor(ms / 1000));
   }
 
+  function relativeTime(ms) {
+    let seconds = Math.floor(ms / 1000);
+    if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h`;
+    const days = Math.floor(hours / 24);
+    return `${days}d`;
+  }
+
 	  function truncate(str, len) {
 	    if (!str) return '';
 	    return str.length > len ? str.substring(0, len) + '...' : str;
@@ -1833,6 +1892,64 @@
 	    if (filter.talent && entry.name !== filter.talent) return false;
 	    return true;
 	  }
+
+  const READINESS_SEVERITY_RANK = {
+    ok: 0,
+    neutral: 1,
+    attention: 2,
+    blocker: 3,
+  };
+  const PROVIDER_LEVEL_REASON_CODES = new Set([
+    'provider_key_missing',
+    'provider_key_invalid',
+    'provider_quota_exceeded',
+    'provider_unavailable',
+    'network_unreachable',
+    'chat_timeout',
+    'chat_pipeline_unavailable',
+    'unknown',
+    'no_output',
+  ]);
+
+  function readinessSeverity(value) {
+    return Object.hasOwn(READINESS_SEVERITY_RANK, value) ? value : 'neutral';
+  }
+
+  function semanticKey(reasonCode, provider, model) {
+    const code = reasonCode || '';
+    const providerName = provider || '';
+    const modelPart = PROVIDER_LEVEL_REASON_CODES.has(code) ? '' : (model || '');
+    return `${code}:${providerName}:${modelPart}`;
+  }
+
+  function topReadinessGroup(snapshot) {
+    const groups = Array.isArray(snapshot?.groups) ? snapshot.groups : [];
+    return groups
+      .filter(group => group && typeof group.summary === 'string')
+      .sort((a, b) => (
+        (READINESS_SEVERITY_RANK[readinessSeverity(b.severity)] || 0)
+        - (READINESS_SEVERITY_RANK[readinessSeverity(a.severity)] || 0)
+      ))[0] || null;
+  }
+
+  function readinessGlance(snapshot = providerReadiness) {
+    if (!snapshot || snapshot.unavailable) {
+      return { severity: 'neutral', unavailable: true, summary: '' };
+    }
+    const severity = readinessSeverity(snapshot.summary?.severity);
+    const group = ['blocker', 'attention'].includes(severity)
+      ? topReadinessGroup(snapshot)
+      : null;
+    return {
+      severity,
+      unavailable: false,
+      summary: group?.summary || '',
+      reason_code: group?.reason_code || null,
+      provider: group?.provider || null,
+      model: group?.model || null,
+      detail: group?.detail || '',
+    };
+  }
 
   function getAgentId(id) {
     return String(id).slice(-4);
@@ -1894,6 +2011,14 @@
       };
     }
 
+    const readiness = readinessGlance(providerReadiness);
+    if (['blocker', 'attention'].includes(readiness.severity) && readiness.summary) {
+      return {
+        key: 'HEALTH_GLANCE_READINESS_BLOCKED',
+        vars: { summary: readiness.summary },
+      };
+    }
+
     const observers = Array.from(state.observers.values());
     if (observers.length > 0 && observers.every(observer => (now - observer.lastSeen) >= STALE_MS)) {
       const ageMs = Math.min(...observers.map(observer => now - observer.lastSeen));
@@ -1914,6 +2039,9 @@
     }
 
     if (state.services.size > 0 || state.crashed.size > 0) {
+      if (readiness.unavailable) {
+        return { key: 'HEALTH_GLANCE_READINESS_UNKNOWN', vars: {} };
+      }
       return {
         key: 'HEALTH_GLANCE_OK',
         vars: { age: relativeTime(now - (state.lastEventTs || now)) },
@@ -1945,8 +2073,14 @@
     elements.glanceActivityValue.textContent = String(recentActivity);
 
     const today = todayKey();
-    const errorsToday = state.recentErrors.filter(error => dayKeyFromTimestamp(error.ts) === today).length;
-    elements.glanceErrorsValue.textContent = String(errorsToday);
+    if (!state.agentErrorsOk) {
+      elements.glanceErrorsValue.textContent = '—';
+      elements.glanceErrorsLabel.textContent = 'errors today';
+    } else {
+      const errorsToday = state.recentErrors.filter(error => dayKeyFromTimestamp(error.ts) === today).length;
+      elements.glanceErrorsValue.textContent = String(errorsToday);
+      elements.glanceErrorsLabel.textContent = (errorsToday === 1 ? 'error today' : 'errors today');
+    }
   }
 
   function updateAllQuiet() {
@@ -1975,13 +2109,16 @@
     if (state.lastAgentFinishTs) {
       const ago = relativeTime(Date.now() - state.lastAgentFinishTs);
       const el = ensureChild(idx++);
-      el.textContent = 'last agent finished ' + ago + ' ago';
+      el.textContent = 'last talent finished ' + ago + ' ago';
       el.style.color = '';
     }
 
     const errCount = state.recentErrors.length;
     const errEl = ensureChild(idx++);
-    if (errCount > 0) {
+    if (!state.agentErrorsOk) {
+      errEl.textContent = "couldn't check talent errors today.";
+      errEl.style.color = '#92400e';
+    } else if (errCount > 0) {
       errEl.textContent = errCount + ' recent error' + (errCount !== 1 ? 's' : '');
       errEl.style.color = '#dc2626';
     } else {
@@ -2018,26 +2155,109 @@
   }
   updateLogsBadge();
 
-	  function updateErrorSummary() {
-	    if (state.recentErrors.length === 0 && !state.recentErrorsFilter) {
-	      elements.errorSummary.classList.add('hidden');
-	      return;
-	    }
+  function isAtBottom(viewport, tol = 50) {
+    return viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= tol;
+  }
 
-	    elements.errorSummary.classList.remove('hidden');
-	    const container = elements.errorSummaryContent;
-	    const recent = state.recentErrors
-	      .map((e, idx) => ({ e, realIdx: idx }))
-	      .filter(({ e }) => recentErrorMatchesFilter(e))
-	      .slice(-10)
-	      .reverse();
+  function scrollLogsToBottom(viewport = elements.logsViewport) {
+    programmaticScroll = true;
+    viewport.scrollTop = viewport.scrollHeight;
+    requestAnimationFrame(() => {
+      programmaticScroll = false;
+    });
+  }
 
-	    const newKeys = new Set();
-	    const entries = recent.map(({ e, realIdx }) => {
-	      const key = realIdx + ':' + e.ts + ':' + e.type;
-	      newKeys.add(key);
-	      return { e, realIdx, key };
-	    });
+  function recentErrorGroupKey(entry) {
+    if (entry.key) return entry.key;
+    if (entry.reason_code) {
+      return semanticKey(entry.reason_code, entry.provider, entry.model);
+    }
+    return [
+      'fallback',
+      entry.type || '',
+      entry.service || '',
+      entry.name || '',
+      entry.stage || '',
+      entry.error || '',
+    ].join(':');
+  }
+
+  function recentErrorOwnerMessage(entry) {
+    if (entry.summary) return entry.summary;
+    if (entry.reason_code && window.renderChatReason) {
+      return window.renderChatReason(entry.reason_code, entry.provider || '').message;
+    }
+    return entry.error || 'Unknown error';
+  }
+
+  function recentErrorDetailText(entry) {
+    const parts = [];
+    if (entry.reason_code) parts.push(`reason_code=${entry.reason_code}`);
+    if (entry.provider) parts.push(`provider=${entry.provider}`);
+    if (entry.model) parts.push(`model=${entry.model}`);
+    if (entry.service) parts.push(`service=${entry.service}`);
+    if (entry.stage) parts.push(`stage=${entry.stage}`);
+    return parts.join(' · ');
+  }
+
+  function groupedRecentErrors() {
+    const groups = new Map();
+    state.recentErrors.forEach((entry, realIdx) => {
+      if (!recentErrorMatchesFilter(entry)) return;
+      const key = recentErrorGroupKey(entry);
+      const existing = groups.get(key);
+      if (!existing) {
+        groups.set(key, {
+          key,
+          e: entry,
+          realIdx,
+          count: 1,
+          lastTs: entry.ts || 0,
+        });
+        return;
+      }
+      existing.count += 1;
+      if ((entry.ts || 0) >= existing.lastTs) {
+        existing.e = entry;
+        existing.realIdx = realIdx;
+        existing.lastTs = entry.ts || 0;
+      }
+    });
+    return Array.from(groups.values()).sort((a, b) => a.lastTs - b.lastTs);
+  }
+
+  function appendRecentError(entry) {
+    if (entry?.id) {
+      const dedupeIdx = state.recentErrors.findIndex(existing =>
+        existing?.id === entry.id && (existing.type || '') === (entry.type || '')
+      );
+      if (dedupeIdx !== -1) {
+        state.recentErrors[dedupeIdx] = { ...state.recentErrors[dedupeIdx], ...entry };
+        updateErrorSummary();
+        return;
+      }
+    }
+    state.recentErrors.push(entry);
+    if (state.recentErrors.length > 50) state.recentErrors.shift();
+    updateErrorSummary();
+  }
+
+  function updateErrorSummary() {
+    if (state.recentErrors.length === 0 && !state.recentErrorsFilter && state.agentErrorsOk) {
+      elements.errorSummary.classList.add('hidden');
+      return;
+    }
+
+    elements.errorSummary.classList.remove('hidden');
+    const container = elements.errorSummaryContent;
+    const recent = groupedRecentErrors().slice(-10).reverse();
+
+    const newKeys = new Set();
+    const entries = recent.map(group => {
+      const { e, realIdx, key, count } = group;
+      newKeys.add(key);
+      return { e, realIdx, key, count };
+    });
 
     const existingByKey = new Map();
     for (const child of Array.from(container.children)) {
@@ -2049,41 +2269,50 @@
       if (!newKeys.has(k)) container.removeChild(child);
     }
 
-	    for (const child of Array.from(container.children)) {
-	      if (!child.getAttribute('data-key')) container.removeChild(child);
-	    }
+    for (const child of Array.from(container.children)) {
+      if (!child.getAttribute('data-key')) container.removeChild(child);
+    }
 
-	    if (state.recentErrorsFilter) {
-	      const filter = state.recentErrorsFilter;
-	      const label = document.createElement('div');
-	      label.style.cssText = 'padding: 0.2em 0 0.45em; font-size: 0.8em; color: #6b7280; display: flex; gap: 0.5em; align-items: center;';
-	      const dayText = filter.day === 'today' ? "today's" : filter.day;
-	      label.appendChild(document.createTextNode(`showing ${dayText} errors`));
-	      if (filter.talent) {
-	        label.appendChild(document.createTextNode(` for ${filter.talent}`));
-	      }
-	      const clearBtn = document.createElement('button');
-	      clearBtn.type = 'button';
-	      clearBtn.setAttribute('data-action', 'clear-error-filter');
-	      clearBtn.className = 'error-advice-link';
-	      clearBtn.textContent = 'clear';
-	      label.appendChild(clearBtn);
-	      container.appendChild(label);
-	    }
+    if (!state.agentErrorsOk && entries.length > 0) {
+      const degraded = document.createElement('div');
+      degraded.style.cssText = 'padding: 0.3em 0; font-size: 0.85em; color: #92400e;';
+      degraded.textContent = "couldn't check talent errors today.";
+      container.appendChild(degraded);
+    }
 
-	    if (entries.length === 0) {
-	      const empty = document.createElement('div');
-	      empty.style.cssText = 'padding: 0.3em 0; font-size: 0.85em; color: #6b7280;';
-	      empty.textContent = state.recentErrorsFilter ? 'no matching recent errors yet.' : 'no recent errors.';
-	      container.appendChild(empty);
-	      if (state.pendingRecentErrorsFocus) {
-	        state.pendingRecentErrorsFocus = false;
-	        requestAnimationFrame(() => elements.errorSummary.scrollIntoView({ behavior: 'smooth', block: 'start' }));
-	      }
-	      return;
-	    }
+    if (state.recentErrorsFilter) {
+      const filter = state.recentErrorsFilter;
+      const label = document.createElement('div');
+      label.style.cssText = 'padding: 0.2em 0 0.45em; font-size: 0.8em; color: #6b7280; display: flex; gap: 0.5em; align-items: center;';
+      const dayText = filter.day === 'today' ? "today's" : filter.day;
+      label.appendChild(document.createTextNode(`showing ${dayText} errors`));
+      if (filter.talent) {
+        label.appendChild(document.createTextNode(` for ${filter.talent}`));
+      }
+      const clearBtn = document.createElement('button');
+      clearBtn.type = 'button';
+      clearBtn.setAttribute('data-action', 'clear-error-filter');
+      clearBtn.className = 'error-advice-link';
+      clearBtn.textContent = 'clear';
+      label.appendChild(clearBtn);
+      container.appendChild(label);
+    }
 
-	    for (const { e, realIdx, key } of entries) {
+    if (entries.length === 0) {
+      const empty = document.createElement('div');
+      empty.style.cssText = 'padding: 0.3em 0; font-size: 0.85em; color: #6b7280;';
+      empty.textContent = !state.agentErrorsOk
+        ? "couldn't check talent errors today."
+        : (state.recentErrorsFilter ? 'no matching recent errors yet.' : 'no recent errors.');
+      container.appendChild(empty);
+      if (state.pendingRecentErrorsFocus) {
+        state.pendingRecentErrorsFocus = false;
+        requestAnimationFrame(() => elements.errorSummary.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+      }
+      return;
+    }
+
+    for (const { e, realIdx, key, count } of entries) {
       let row = existingByKey.get(key);
       if (!row) {
         row = document.createElement('div');
@@ -2109,18 +2338,44 @@
       }
 
       const icon = e.type === 'agent' ? '⚙' : e.type === 'import' ? '↓' : '⚠';
-      const ago = relativeTime(Date.now() - e.ts);
+      const ago = relativeTime(Date.now() - (e.ts || Date.now()));
       const info = row.children[0];
       info.textContent = '';
       info.appendChild(document.createTextNode(icon + ' '));
       const strong = document.createElement('strong');
       strong.textContent = e.name;
       info.appendChild(strong);
-      info.appendChild(document.createTextNode(' — ' + truncate(e.error, 60) + ' '));
+      info.appendChild(document.createTextNode(' — ' + truncate(recentErrorOwnerMessage(e), 70) + ' '));
+      if (count > 1) {
+        const countSpan = document.createElement('span');
+        countSpan.style.cssText = 'color: #6b7280; font-size: 0.85em; font-weight: 600;';
+        countSpan.textContent = `×${count} `;
+        info.appendChild(countSpan);
+      }
       const timeSpan = document.createElement('span');
       timeSpan.style.cssText = 'color: #9ca3af; font-size: 0.85em;';
       timeSpan.textContent = ago + ' ago';
       info.appendChild(timeSpan);
+
+      let detail = row.querySelector('[data-error-detail]');
+      const detailText = recentErrorDetailText(e);
+      if (detailText) {
+        if (!detail) {
+          detail = document.createElement('details');
+          detail.setAttribute('data-error-detail', 'true');
+          detail.style.cssText = 'font-size: 0.8em; color: #6b7280;';
+          const summary = document.createElement('summary');
+          summary.textContent = 'details';
+          detail.appendChild(summary);
+          const body = document.createElement('span');
+          body.setAttribute('data-error-detail-body', 'true');
+          detail.appendChild(body);
+          row.insertBefore(detail, row.querySelector('[data-action="view-logs"]').parentElement);
+        }
+        detail.querySelector('[data-error-detail-body]').textContent = detailText;
+      } else if (detail) {
+        detail.remove();
+      }
 
       const viewBtn = row.querySelector('[data-action="view-logs"]');
       viewBtn.setAttribute('data-error-index', realIdx);
@@ -2128,19 +2383,19 @@
       dismissBtn.setAttribute('data-error-index', realIdx);
 
       container.appendChild(row);
-	    }
+    }
 
-	    if (state.pendingRecentErrorsFocus) {
-	      state.pendingRecentErrorsFocus = false;
-	      requestAnimationFrame(() => elements.errorSummary.scrollIntoView({ behavior: 'smooth', block: 'start' }));
-	    }
+    if (state.pendingRecentErrorsFocus) {
+      state.pendingRecentErrorsFocus = false;
+      requestAnimationFrame(() => elements.errorSummary.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+    }
 
-	    // Error-type-specific advice templates
-	    const types = new Set(recent.map(({ e }) => e.type));
+    // Error-type-specific advice templates
+    const types = new Set(recent.map(({ e }) => e.type));
     if (types.has('agent')) {
       const advice = document.createElement('div');
       advice.style.cssText = 'padding: 0.25em 0; font-size: 0.8em; color: #9ca3af;';
-      advice.appendChild(document.createTextNode('Agent errors usually resolve on the next run. '));
+      advice.appendChild(document.createTextNode('Talent errors usually resolve on the next run. '));
       const btn = document.createElement('button');
       btn.setAttribute('data-action', 'view-logs');
       btn.setAttribute('data-service', 'cortex');
@@ -2150,8 +2405,8 @@
       advice.appendChild(document.createTextNode(' for details.'));
       container.appendChild(advice);
     }
-	    if (types.has('import')) {
-	      const importErr = recent.find(({ e }) => e.type === 'import')?.e;
+    if (types.has('import')) {
+      const importErr = recent.find(({ e }) => e.type === 'import')?.e;
       const stageText = importErr?.stage && importErr.stage !== 'unknown' ? ' at ' + importErr.stage : '';
       const advice = document.createElement('div');
       advice.style.cssText = 'padding: 0.25em 0; font-size: 0.8em; color: #9ca3af;';
@@ -2299,7 +2554,7 @@
     if (crashedCount > 0) serviceParts.push(crashedCount + ' needs attention');
     sections[0]?.setAttribute('aria-label', 'Services: ' + (serviceParts.join(', ') || 'none'));
 
-    sections[1]?.setAttribute('aria-label', 'Agents: ' + state.agentCount + ' running');
+    sections[1]?.setAttribute('aria-label', 'Talents: ' + state.agentCount + ' running');
     sections[2]?.setAttribute('aria-label', 'Tasks: ' + state.tasks.length + ' active');
 
     const staleCount = state.health?.stale_heartbeats?.length || 0;
@@ -2556,14 +2811,14 @@
   }
 
   // Update observe mode badge
-  function updateObserveMode() {
+  function updateObserveMode(displayedObserver = null) {
     if (state.observers.size === 0) {
       elements.observeModeBadge.className = 'health-badge idle';
       elements.observeModeLabel.textContent = 'idle';
       return;
     }
 
-    const mode = state.observers.get(state.localHost)?.mode;
+    const mode = (displayedObserver || state.observers.get(state.localHost))?.mode;
     const badge = elements.observeModeBadge;
     const label = elements.observeModeLabel;
 
@@ -2578,7 +2833,7 @@
       label.textContent = 'idle';
     } else {
       badge.className = 'health-badge idle';
-      label.textContent = 'waiting...';
+      label.textContent = 'idle';
     }
   }
 
@@ -2587,6 +2842,8 @@
     if (state.observers.size === 0) {
       elements.observeEmpty.classList.remove('hidden');
       elements.observeContent.classList.add('hidden');
+      elements.observeSourceNote.classList.add('hidden');
+      elements.observeSourceNote.textContent = '';
       updateObserveMode();
       updateStatusSummary();
       return;
@@ -2594,15 +2851,30 @@
     elements.observeEmpty.classList.add('hidden');
     elements.observeContent.classList.remove('hidden');
 
-    const primary = state.localHost ? state.observers.get(state.localHost) : null;
-    const tmux = state.localHost ? state.observers.get(state.localHost + '.tmux') : null;
+    const confirmedPrimary = state.localHost ? state.observers.get(state.localHost) : null;
+    const fallbackEntry = Array.from(state.observers.entries())
+      .filter(([stream]) => !stream.endsWith('.tmux'))
+      .sort((a, b) => (b[1].lastSeen || 0) - (a[1].lastSeen || 0))[0] || null;
+    const displayedStream = confirmedPrimary ? state.localHost : (fallbackEntry ? fallbackEntry[0] : null);
+    const primary = confirmedPrimary || (fallbackEntry ? fallbackEntry[1] : null);
+    const tmux = displayedStream ? state.observers.get(displayedStream + '.tmux') : null;
+    const confirmedLocal = Boolean(state.localHost && confirmedPrimary && displayedStream === state.localHost);
+    if (!confirmedLocal && displayedStream) {
+      elements.observeSourceNote.textContent = state.localHost
+        ? `this host's stream isn't reporting yet — showing ${displayedStream}`
+        : `this host is unknown — showing ${displayedStream}`;
+      elements.observeSourceNote.classList.remove('hidden');
+    } else {
+      elements.observeSourceNote.textContent = '';
+      elements.observeSourceNote.classList.add('hidden');
+    }
     const channels = [
       {
         statusEl: elements.screencastStatus,
         detailEl: elements.screencastDetail,
         idleText: 'Not recording',
         extract: () => {
-          if (!primary.screencast) return null;
+          if (!primary?.screencast) return null;
           const recording = primary.screencast.recording;
           if (!recording) return { status: 'Not recording' };
           const streams = primary.screencast.streams || [];
@@ -2640,7 +2912,7 @@
         detailEl: elements.audioDetail,
         idleText: 'Listening (quiet)',
         extract: () => {
-          if (!primary.audio) return null;
+          if (!primary?.audio) return null;
           const hits = primary.audio.threshold_hits || 0;
           const willSave = primary.audio.will_save ? ' · saving' : '';
           return {
@@ -2655,7 +2927,7 @@
         detailEl: elements.activityDetail,
         idleText: 'idle',
         extract: () => {
-          if (!primary.activity) return null;
+          if (!primary?.activity) return null;
           const idleMs = primary.activity.idle_time_ms || 0;
           if (primary.activity.power_save) return { status: 'Power saving' };
           if (primary.activity.screen_locked) return { status: 'Screen locked' };
@@ -2668,7 +2940,7 @@
         detailEl: elements.describeDetail,
         idleText: 'idle',
         extract: () => {
-          if (!primary.describe) return null;
+          if (!primary?.describe) return null;
           return { processor: primary.describe };
         },
       },
@@ -2677,23 +2949,13 @@
         detailEl: elements.transcribeDetail,
         idleText: 'idle',
         extract: () => {
-          if (!primary.transcribe) return null;
+          if (!primary?.transcribe) return null;
           return { processor: primary.transcribe };
         },
       },
     ];
 
-    updateObserveMode();
-
-    if (!state.localHost || !primary) {
-      channels.forEach(ch => {
-        ch.statusEl.textContent = 'waiting...';
-        ch.statusEl.classList.remove('idle');
-        ch.detailEl.textContent = '';
-      });
-      updateStatusSummary();
-      return;
-    }
+    updateObserveMode(primary);
 
     channels.forEach(ch => {
       const result = ch.extract();
@@ -3157,7 +3419,7 @@
     // Progress bars
     const progressItems = [];
     if (d.agents_total > 0) {
-      progressItems.push({ label: 'Agents: ' + (d.agents_completed || 0) + ' / ' + d.agents_total, pct: Math.round((d.agents_completed || 0) / d.agents_total * 100) });
+      progressItems.push({ label: 'Talents: ' + (d.agents_completed || 0) + ' / ' + d.agents_total, pct: Math.round((d.agents_completed || 0) / d.agents_total * 100) });
     }
     if (d.segments_total > 0) {
       progressItems.push({ label: 'Segments: ' + (d.segments_completed || 0) + ' / ' + d.segments_total, pct: Math.round((d.segments_completed || 0) / d.segments_total * 100) });
@@ -3428,9 +3690,10 @@
     const serviceFilter = elements.logServiceFilter.value;
     const viewport = elements.logsViewport;
     const filterKey = serviceFilter + ':' + elements.logStreamFilter.value + ':' + state.logLevelFilter;
+    const atBottom = isAtBottom(viewport);
 
     // Incremental append: when following, filters unchanged, and we have a new record
-    if (newRecord && state.logFollow && state.lastLogFilter === filterKey && viewport.children.length > 0) {
+    if (newRecord && state.lastLogFilter === filterKey && viewport.children.length > 0) {
       const serviceMatch = serviceFilter === 'all' || serviceFilter === newService;
       const streamMatch = elements.logStreamFilter.value === 'all' || elements.logStreamFilter.value === newRecord.stream;
       const levelMatch = logLevelMatchesFilter(classifyLogLevel(newRecord.stream, newRecord.line));
@@ -3443,7 +3706,9 @@
           viewport.appendChild(makeLogServiceHeader(newService, filteredLogRecords(state.serviceLogs.get(newService) || [])));
         }
         appendLogLine(viewport, newService, newRecord);
-        viewport.scrollTop = viewport.scrollHeight;
+        if (state.logFollow && atBottom) {
+          scrollLogsToBottom(viewport);
+        }
         return;
       }
     }
@@ -3451,7 +3716,7 @@
     state.lastLogFilter = filterKey;
 
     // Check if user has scrolled away from bottom before updating
-    const wasAtBottom = state.logFollow && (viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 50);
+    const wasAtBottom = isAtBottom(viewport);
 
     const fragment = document.createDocumentFragment();
     const services = serviceFilter === 'all'
@@ -3474,8 +3739,8 @@
     viewport.appendChild(fragment);
 
     // Auto-scroll if following
-    if (wasAtBottom || state.logFollow) {
-      viewport.scrollTop = viewport.scrollHeight;
+    if (state.logFollow && wasAtBottom) {
+      scrollLogsToBottom(viewport);
     }
     applyPendingLogAnchor();
   }
@@ -3570,6 +3835,7 @@
       use_id: agentId,
       name: msg.name || existing.name,
       provider: msg.provider || existing.provider,
+      model: msg.model || existing.model,
       event: msg.event,
       ts: msg.ts,
       startTs: startTs
@@ -3584,15 +3850,19 @@
     if (msg.event === 'finish' || msg.event === 'error') {
       state.lastAgentFinishTs = msg.ts || Date.now();
       if (msg.event === 'error') {
-        state.recentErrors.push({
+        appendRecentError({
           type: 'agent',
           id: agentId,
           name: msg.name || existing.name || 'unknown',
           error: msg.error || 'Unknown error',
+          summary: msg.summary || msg.message || null,
+          key: msg.key || msg.semantic_key || null,
+          reason_code: msg.reason_code || null,
+          provider: msg.provider || existing.provider || null,
+          model: msg.model || existing.model || null,
+          service: 'cortex',
           ts: Date.now()
         });
-        if (state.recentErrors.length > 50) state.recentErrors.shift();
-        updateErrorSummary();
       }
       setTimeout(() => {
         state.agents.delete(agentId);
@@ -3655,16 +3925,20 @@
         lastSeen: Date.now()
       });
 
-      state.recentErrors.push({
+      appendRecentError({
         type: 'import',
         id: importId,
         name: msg.input_file || existing.input_file || 'unknown',
         error: msg.error || 'Unknown error',
+        summary: msg.summary || msg.message || null,
+        key: msg.key || msg.semantic_key || null,
+        reason_code: msg.reason_code || null,
+        provider: msg.provider || null,
+        model: msg.model || null,
+        service: 'importer',
         stage: existing.stage || msg.stage || 'unknown',
         ts: Date.now()
       });
-      if (state.recentErrors.length > 50) state.recentErrors.shift();
-      updateErrorSummary();
 
       // Keep error visible longer
       setTimeout(() => {
@@ -3708,6 +3982,13 @@
   elements.logStreamFilter.addEventListener('change', () => {
     renderLogs();
   });
+  elements.logsViewport.addEventListener('scroll', () => {
+    if (programmaticScroll) return;
+    if (!isAtBottom(elements.logsViewport)) {
+      state.logFollow = false;
+      elements.logFollowBtn.classList.remove('active');
+    }
+  });
   function toggleLogsCollapse() {
     state.logsCollapsed = !state.logsCollapsed;
     const card = document.querySelector('.logs-card');
@@ -3732,7 +4013,7 @@
     state.logFollow = !state.logFollow;
     elements.logFollowBtn.classList.toggle('active', state.logFollow);
     if (state.logFollow) {
-      elements.logsViewport.scrollTop = elements.logsViewport.scrollHeight;
+      scrollLogsToBottom(elements.logsViewport);
     }
   });
   elements.logClearBtn.addEventListener('click', () => {
@@ -3755,7 +4036,9 @@
       .then(r => r.json())
       .then(info => {
         state.localHost = info.hostname;
+        providerReadiness = info.readiness || providerReadiness;
         updateObserve();
+        updateStatusSummary();
         elements.vitalsCheckBtn.textContent = 'check now';
         elements.vitalsCheckBtn.disabled = false;
       })
@@ -3862,6 +4145,13 @@
 	    state.pendingRecentErrorsFocus = true;
 	    updateErrorSummary();
 	  }
+	  function seedAgentErrors() {
+	    const seed = Array.isArray(window.HEALTH_AGENT_ERRORS) ? window.HEALTH_AGENT_ERRORS : [];
+	    seed.forEach(entry => appendRecentError(entry));
+	    if (seed.length === 0) updateErrorSummary();
+	    updateStatusSummary();
+	  }
+	  seedAgentErrors();
 	  focusRecentErrors();
 	  window.addEventListener('hashchange', focusRecentErrors);
 
@@ -3907,6 +4197,8 @@
     if (!state.lastEventTs) {
       el.textContent = '';
       el.className = 'connection-indicator';
+      elements.logsConnectionNote.textContent = '';
+      elements.logsConnectionNote.classList.add('hidden');
       return;
     }
     const ago = Math.floor((Date.now() - state.lastEventTs) / 1000);
@@ -3914,12 +4206,18 @@
     if (ago >= 60) {
       el.textContent = `⚠ Disconnected (${agoText})`;
       el.className = 'connection-indicator disconnected';
+      elements.logsConnectionNote.textContent = 'log updates may be delayed';
+      elements.logsConnectionNote.classList.remove('hidden');
     } else if (ago >= 30) {
       el.textContent = `Stale (${agoText})`;
       el.className = 'connection-indicator stale';
+      elements.logsConnectionNote.textContent = 'log updates may be delayed';
+      elements.logsConnectionNote.classList.remove('hidden');
     } else {
       el.textContent = `Updated ${agoText} ago`;
       el.className = 'connection-indicator';
+      elements.logsConnectionNote.textContent = '';
+      elements.logsConnectionNote.classList.add('hidden');
     }
   }
 

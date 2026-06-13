@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import calendar
-from collections import deque
 from datetime import date, datetime
 from typing import Any
 
@@ -15,12 +14,10 @@ from solstone.apps.chat.config import load_chat_config
 from solstone.convey.chat_stream import read_chat_events
 from solstone.convey.reasons import INVALID_MONTH
 from solstone.convey.sol_initiated import copy as sol_voice_copy
-from solstone.convey.sol_initiated import record_owner_chat_open
 from solstone.convey.sol_initiated.copy import (
     KIND_OWNER_CHAT_OPEN,
     KIND_SOL_CHAT_REQUEST,
     KIND_SOL_CHAT_REQUEST_SUPERSEDED,
-    SURFACE_CONVEY,
 )
 from solstone.convey.sol_initiated.state import latest_unresolved_sol_chat_request
 from solstone.convey.utils import DATE_RE, error_response
@@ -48,26 +45,20 @@ def day(day: str) -> str:
     owner_name, agent_name = _resolve_identity()
     events = read_chat_events(day)
     chat_config = load_chat_config()
+    sol_open_request_id = None
     if day == today_day:
         # Page loads are engagement signals in Lode 2, so prior open facts do not
         # suppress another page-load open. Dismiss and supersede facts still do.
+        # The open itself is now recorded by a front-end POST-on-load
+        # (POST /api/chat/sol_chat_request/open); the GET only computes which
+        # request is unresolved and renders it for the client to act on.
         openable_events = [
             event for event in events if event.get("kind") != KIND_OWNER_CHAT_OPEN
         ]
         unresolved_request = latest_unresolved_sol_chat_request(openable_events)
         if unresolved_request is not None:
-            record_owner_chat_open(
-                unresolved_request["request_id"],
-                surface=SURFACE_CONVEY,
-            )
+            sol_open_request_id = unresolved_request["request_id"]
     sol_message_origins = _build_sol_message_origins(events)
-    retry_texts = _build_chat_error_retry_texts(events)
-    events = [
-        {**event, "retry_text": retry_texts[index]}
-        if event.get("kind") == "chat_error" and index in retry_texts
-        else event
-        for index, event in enumerate(events)
-    ]
 
     return render_template(
         "app.html",
@@ -81,6 +72,7 @@ def day(day: str) -> str:
         thinking_surfaces=chat_config["thinking_surfaces"],
         chat_copy=chat_copy,
         sol_voice_copy=sol_voice_copy,
+        sol_open_request_id=sol_open_request_id,
     )
 
 
@@ -169,29 +161,6 @@ def _build_sol_message_origins(
                 origin["superseded_time"] = _format_origin_time(event.get("ts"))
 
     return origins
-
-
-def _build_chat_error_retry_texts(
-    events: list[dict[str, Any]],
-) -> dict[int, str]:
-    """Map chat_error event index -> originating owner_message text.
-
-    Walks events forward, maintaining a FIFO of pending owner texts.
-    Pops on sol_message and chat_error to mirror the placeholder lifecycle.
-    """
-    retry_texts: dict[int, str] = {}
-    pending: deque[str] = deque()
-    for index, event in enumerate(events):
-        kind = event.get("kind")
-        if kind == "owner_message":
-            pending.append(str(event.get("text") or ""))
-        elif kind == "sol_message":
-            if pending:
-                pending.popleft()
-        elif kind == "chat_error":
-            if pending:
-                retry_texts[index] = pending.popleft()
-    return retry_texts
 
 
 def _format_origin_time(raw_ts: object) -> str:

@@ -9,14 +9,6 @@
       "title": "Entity Observer"
     },
     {
-      "app": "skills",
-      "description": "Writes or refreshes one skill profile per day from observer-flagged patterns or chat edit requests.",
-      "disabled": false,
-      "key": "skills:skill_editor",
-      "source": "app",
-      "title": "Skill Editor"
-    },
-    {
       "app": null,
       "description": "Analyzes activity patterns to identify optimal times for scheduled maintenance tasks.",
       "disabled": false,
@@ -26,11 +18,27 @@
     },
     {
       "app": null,
+      "description": "Creates comprehensive daily newsletters for each facet, capturing activities, progress, and insights",
+      "disabled": false,
+      "key": "facet_newsletter",
+      "source": "system",
+      "title": "Facet Newsletter Generator"
+    },
+    {
+      "app": null,
       "description": "Extracts future scheduled items from screen and transcript content into anticipated activity records. Captures dates, times, participants, and cancellation state.",
       "disabled": false,
       "key": "schedule",
       "source": "system",
       "title": "Upcoming Schedule"
+    },
+    {
+      "app": null,
+      "description": "Synthesizes all daily agent outputs into a structured five-section morning briefing",
+      "disabled": false,
+      "key": "morning_briefing",
+      "source": "system",
+      "title": "Morning Briefing"
     }
   ],
   "segment": [

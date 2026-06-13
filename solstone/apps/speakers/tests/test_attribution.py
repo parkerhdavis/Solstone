@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from solstone.apps.speakers.encoder_config import OVERLAP_DETECTOR_ID
+from solstone.apps.speakers.encoder_config import ENCODER_ID, OVERLAP_DETECTOR_ID
 from solstone.apps.speakers.owner import OWNER_THRESHOLD
 
 # Test stream name (matches conftest.STREAM)
@@ -50,6 +50,63 @@ def _write_controlled_segment(
         [source],
         stream=STREAM,
         embeddings=embeddings,
+    )
+
+
+def _write_labeled_controlled_segment(
+    env,
+    day: str,
+    segment_key: str,
+    embeddings: np.ndarray,
+    speaker_labels: list[int | None],
+    source: str = "mic_audio",
+) -> Path:
+    """Write a controlled segment with integer JSONL speaker labels."""
+    seg_dir = _write_controlled_segment(env, day, segment_key, embeddings, source)
+    jsonl_path = seg_dir / f"{source}.jsonl"
+    lines = jsonl_path.read_text(encoding="utf-8").splitlines()
+    updated = [lines[0]]
+    for line, speaker_label in zip(lines[1:], speaker_labels):
+        row = json.loads(line)
+        if speaker_label is not None:
+            row["speaker"] = speaker_label
+        updated.append(json.dumps(row))
+    jsonl_path.write_text("\n".join(updated) + "\n", encoding="utf-8")
+    np.savez_compressed(
+        seg_dir / f"{source}.npz",
+        embeddings=embeddings.astype(np.float32),
+        statement_ids=np.arange(1, len(embeddings) + 1, dtype=np.int32),
+        durations_s=np.full(len(embeddings), 3.0, dtype=np.float32),
+        encoder=np.array(ENCODER_ID),
+    )
+    return seg_dir
+
+
+def _write_entity_voiceprints(
+    entity_dir: Path,
+    embeddings: list[np.ndarray],
+    *,
+    stream: str = STREAM,
+) -> None:
+    np.savez_compressed(
+        entity_dir / "voiceprints.npz",
+        embeddings=np.vstack(embeddings).astype(np.float32),
+        metadata=np.array(
+            [
+                json.dumps(
+                    {
+                        "day": "20240101",
+                        "segment_key": f"09{i:02d}00_300",
+                        "source": "mic_audio",
+                        "sentence_id": 1,
+                        "stream": stream,
+                        "added_at": 1700000000000,
+                    }
+                )
+                for i in range(len(embeddings))
+            ],
+            dtype=str,
+        ),
     )
 
 
@@ -261,6 +318,98 @@ def test_layer3_acoustic_matching(speakers_env):
     )
 
 
+def test_layer3_hybrid_engages_and_assigns_clusters_one_to_one(speakers_env):
+    from solstone.apps.speakers.attribution import attribute_segment
+
+    env = speakers_env()
+    _setup_owner(env)
+
+    alice_emb = _normalized([0.0, 1.0])
+    bob_emb = _normalized([0.0, 0.0, 1.0])
+    alice_dir = env.create_entity("Alice Test")
+    bob_dir = env.create_entity("Bob Smith")
+    _write_entity_voiceprints(alice_dir, [alice_emb] * 6)
+    _write_entity_voiceprints(bob_dir, [bob_emb] * 6)
+
+    embeddings = np.vstack([alice_emb, alice_emb, bob_emb, bob_emb])
+    _write_labeled_controlled_segment(
+        env,
+        "20240101",
+        "091000_300",
+        embeddings,
+        [1, 1, 2, 2],
+    )
+
+    result = attribute_segment("20240101", STREAM, "091000_300")
+    labels = result["labels"]
+
+    assert [label["method"] for label in labels] == ["acoustic_cluster"] * 4
+    assert [label["confidence"] for label in labels] == ["high"] * 4
+    assert [label["speaker"] for label in labels[:2]] == ["alice_test"] * 2
+    assert [label["speaker"] for label in labels[2:]] == ["bob_smith"] * 2
+    assert labels[0]["speaker"] != labels[2]["speaker"]
+    assert result["unmatched"] == []
+
+
+def test_layer3_hybrid_abandons_on_low_confidence(speakers_env):
+    from solstone.apps.speakers.attribution import attribute_segment
+
+    env = speakers_env()
+    _setup_owner(env)
+
+    alice_emb = _normalized([0.0, 1.0])
+    bob_emb = _normalized([0.0, 0.0, 1.0])
+    unknown_emb = _normalized([0.0, 0.0, 0.0, 1.0])
+    alice_dir = env.create_entity("Alice Test")
+    bob_dir = env.create_entity("Bob Smith")
+    _write_entity_voiceprints(alice_dir, [alice_emb] * 6)
+    _write_entity_voiceprints(bob_dir, [bob_emb] * 6)
+
+    embeddings = np.vstack([unknown_emb, unknown_emb])
+    _write_labeled_controlled_segment(
+        env,
+        "20240101",
+        "092000_300",
+        embeddings,
+        [1, 1],
+    )
+    _write_controlled_segment(env, "20240101", "092500_300", embeddings)
+
+    labeled_result = attribute_segment("20240101", STREAM, "092000_300")
+    fallback_result = attribute_segment("20240101", STREAM, "092500_300")
+
+    assert all(
+        label["method"] != "acoustic_cluster" for label in labeled_result["labels"]
+    )
+    assert labeled_result["labels"] == fallback_result["labels"]
+    assert labeled_result["unmatched"] == fallback_result["unmatched"] == [1, 2]
+
+
+def test_layer3_hybrid_skips_label_less_segment(speakers_env):
+    from solstone.apps.speakers.attribution import attribute_segment
+
+    env = speakers_env()
+    _setup_owner(env)
+
+    alice_emb = _normalized([0.0, 1.0])
+    alice_dir = env.create_entity("Alice Test")
+    _write_entity_voiceprints(alice_dir, [alice_emb] * 6)
+    _write_controlled_segment(
+        env,
+        "20240101",
+        "093000_300",
+        np.vstack([alice_emb]),
+    )
+
+    result = attribute_segment("20240101", STREAM, "093000_300")
+    label = result["labels"][0]
+
+    assert label["speaker"] == "alice_test"
+    assert label["method"] == "acoustic"
+    assert label["confidence"] == "high"
+    assert result["unmatched"] == []
+
+
 # ---------------------------------------------------------------------------
 # Graceful degradation: unmatched → null
 # ---------------------------------------------------------------------------
@@ -292,7 +441,7 @@ def test_unmatched_sentences_get_null(speakers_env):
 # ---------------------------------------------------------------------------
 
 
-def test_save_speaker_labels(tmp_path):
+def test_public_speaker_labels_save(tmp_path):
     from solstone.apps.speakers.attribution import save_speaker_labels
 
     labels = [
@@ -321,6 +470,135 @@ def test_save_speaker_labels(tmp_path):
     assert len(data["labels"]) == 2
     assert data["owner_centroid_last_refreshed_at"] == "2026-03-15T12:00:00"
     assert data["voiceprint_versions"]["alice"] == 10
+
+
+def test_public_labels_save_preserves_current_user_labels(tmp_path):
+    from solstone.apps.speakers.attribution import save_speaker_labels
+
+    existing = {
+        "labels": [
+            {
+                "sentence_id": 1,
+                "speaker": "old_pipeline",
+                "confidence": "high",
+                "method": "acoustic",
+            },
+            {
+                "sentence_id": 2,
+                "speaker": "user_choice",
+                "confidence": "high",
+                "method": "user_corrected",
+            },
+            {
+                "sentence_id": 3,
+                "speaker": "user_only",
+                "confidence": "high",
+                "method": "user_assigned",
+            },
+        ],
+        "owner_centroid_last_refreshed_at": None,
+        "voiceprint_versions": {},
+    }
+    talents_dir = tmp_path / "talents"
+    talents_dir.mkdir()
+    labels_path = talents_dir / "speaker_labels.json"
+    labels_path.write_text(json.dumps(existing), encoding="utf-8")
+
+    labels = [
+        {
+            "sentence_id": 1,
+            "speaker": "fresh_pipeline",
+            "confidence": "high",
+            "method": "acoustic",
+        },
+        {
+            "sentence_id": 2,
+            "speaker": "fresh_pipeline",
+            "confidence": "high",
+            "method": "acoustic",
+        },
+    ]
+
+    save_speaker_labels(tmp_path, labels, {})
+
+    data = json.loads(labels_path.read_text(encoding="utf-8"))
+    by_sid = {label["sentence_id"]: label for label in data["labels"]}
+    assert by_sid[1]["speaker"] == "fresh_pipeline"
+    assert by_sid[2]["speaker"] == "user_choice"
+    assert by_sid[2]["method"] == "user_corrected"
+    assert by_sid[3]["speaker"] == "user_only"
+    assert by_sid[3]["method"] == "user_assigned"
+
+
+def test_public_labels_save_keeps_corrections_overlay(tmp_path):
+    from solstone.apps.speakers.attribution import save_speaker_labels
+
+    talents_dir = tmp_path / "talents"
+    talents_dir.mkdir()
+    (talents_dir / "speaker_corrections.json").write_text(
+        json.dumps(
+            {
+                "corrections": [
+                    {
+                        "sentence_id": 1,
+                        "original_speaker": "alice",
+                        "corrected_speaker": "bob",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    labels = [
+        {
+            "sentence_id": 1,
+            "speaker": "alice",
+            "confidence": "high",
+            "method": "acoustic",
+        }
+    ]
+
+    save_speaker_labels(tmp_path, labels, {})
+
+    data = json.loads((talents_dir / "speaker_labels.json").read_text())
+    assert data["labels"][0]["speaker"] == "bob"
+    assert data["labels"][0]["method"] == "user_corrected"
+    assert labels[0]["speaker"] == "bob"
+
+
+def test_owner_correction_output_preserves_public_label_overlay(tmp_path):
+    from solstone.apps.speakers.attribution import (
+        append_speaker_correction,
+        save_speaker_labels,
+    )
+
+    append_speaker_correction(
+        tmp_path,
+        {
+            "sentence_id": 1,
+            "original_speaker": "alice",
+            "corrected_speaker": "bob",
+            "original_method": "acoustic",
+            "timestamp": 0,
+        },
+    )
+
+    save_speaker_labels(
+        tmp_path,
+        [
+            {
+                "sentence_id": 1,
+                "speaker": "alice",
+                "confidence": "high",
+                "method": "acoustic",
+            }
+        ],
+        {},
+    )
+
+    data = json.loads((tmp_path / "talents" / "speaker_labels.json").read_text())
+    assert data["labels"][0]["speaker"] == "bob"
+    assert data["labels"][0]["method"] == "user_corrected"
 
 
 # ---------------------------------------------------------------------------

@@ -235,6 +235,30 @@ def _patch_prepare_config_dependencies(monkeypatch):
         "solstone.think.models.resolve_provider",
         lambda _context, _type: ("google", "gemini-3-flash-preview"),
     )
+    monkeypatch.setattr("solstone.think.models.get_context_registry", lambda: {})
+
+
+def test_prepare_config_rejects_frontmatter_outbound_approval(tmp_path, monkeypatch):
+    import solstone.think.talent as talent_module
+    from solstone.think.talents import prepare_config
+
+    monkeypatch.setattr(talent_module, "TALENT_DIR", tmp_path)
+    (tmp_path / "approval_static.md").write_text(
+        "{\n"
+        '  "type": "cogitate",\n'
+        '  "outbound_approval": "static-template-value"\n'
+        "}\n\n"
+        "Prompt body\n"
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "declares 'outbound_approval' in frontmatter; "
+            "this field is launch-config-only"
+        ),
+    ):
+        prepare_config({"name": "approval_static", "prompt": "hello"})
 
 
 def test_preflight_swap_unhealthy_primary(monkeypatch):
@@ -268,6 +292,36 @@ def test_preflight_swap_unhealthy_primary(monkeypatch):
 
     assert config["provider"] == "anthropic"
     assert config["model"] == "claude-sonnet-4-5"
+    assert config["fallback_from"] == "google"
+
+
+def test_preflight_swap_reads_unified_backend(monkeypatch):
+    from solstone.think.models import CLAUDE_SONNET_4
+    from solstone.think.providers import state
+    from solstone.think.talents import prepare_config
+
+    _patch_prepare_config_dependencies(monkeypatch)
+    monkeypatch.setattr(
+        state,
+        "read_health_status",
+        lambda: {
+            "results": [
+                {
+                    "provider": "google",
+                    "model": "gemini-3-flash-preview",
+                    "interface": "cogitate",
+                    "ok": False,
+                    "reason_code": "provider_unavailable",
+                }
+            ]
+        },
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    config = prepare_config({"name": "chat", "prompt": "hello"})
+
+    assert config["provider"] == "anthropic"
+    assert config["model"] == CLAUDE_SONNET_4
     assert config["fallback_from"] == "google"
 
 
@@ -555,6 +609,74 @@ def test_execute_generate_preserves_string_contents_order(monkeypatch):
 
     assert seen["contents"] == ["transcript", "instruction", "prompt"]
     assert events[-1]["event"] == "finish"
+
+
+def test_execute_generate_passes_prepared_provider_and_model(monkeypatch):
+    from solstone.think.talents import _execute_generate
+
+    events = []
+    seen = {}
+
+    def mock_generate_with_result(**kwargs):
+        seen["provider"] = kwargs.get("provider")
+        seen["model"] = kwargs.get("model")
+        return {"text": "ok", "usage": {"input_tokens": 1, "output_tokens": 1}}
+
+    monkeypatch.setattr(
+        "solstone.think.talent.key_to_context", lambda _name: "talent.system.default"
+    )
+    monkeypatch.setattr(
+        "solstone.think.models.generate_with_result", mock_generate_with_result
+    )
+
+    config = {
+        "name": "chat",
+        "provider": "google",
+        "model": "gemini-3-flash-preview",
+        "prompt": "hello",
+        "health_stale": False,
+    }
+
+    asyncio.run(_execute_generate(config, events.append))
+
+    assert seen["provider"] == "google"
+    assert seen["model"] == "gemini-3-flash-preview"
+    assert events[-1]["event"] == "finish"
+
+
+def test_execute_generate_local_failure_does_not_consult_backup(monkeypatch):
+    from solstone.think.talents import _execute_generate
+
+    events = []
+    calls = {"count": 0}
+
+    def mock_generate_with_result(**_kwargs):
+        calls["count"] += 1
+        raise RuntimeError("binary_missing")
+
+    def fail_backup(_agent_type):
+        raise AssertionError("local failure must not consult cloud backup")
+
+    monkeypatch.setattr(
+        "solstone.think.talent.key_to_context", lambda _name: "talent.system.default"
+    )
+    monkeypatch.setattr(
+        "solstone.think.models.generate_with_result", mock_generate_with_result
+    )
+    monkeypatch.setattr("solstone.think.models.get_backup_provider", fail_backup)
+
+    config = {
+        "name": "chat",
+        "provider": "local",
+        "prompt": "hello",
+        "health_stale": False,
+    }
+
+    with pytest.raises(RuntimeError, match="binary_missing"):
+        asyncio.run(_execute_generate(config, events.append))
+
+    assert calls["count"] == 1
+    assert not any(e.get("event") == "fallback" for e in events)
 
 
 def test_on_failure_retry_generate(monkeypatch):

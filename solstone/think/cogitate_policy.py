@@ -5,34 +5,97 @@ from __future__ import annotations
 
 import re
 import shlex
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from solstone.think.cogitate_contract import (
+    COGITATE_ACCESS_TIERS,
+    COGITATE_READ_TOOL_NAMES,
+    capabilities_for_access_tier,
+)
+
 MAX_TURNS = 60
+DEFAULT_RUN_COST_CAP_USD = 1.00
+COST_WARN_FRAC = 0.70
+CONTEXT_WARN_FRAC = 0.80
+CONTEXT_FINAL_FRAC = 0.88
+# Conservative fresh-token fallback when the SDK's accumulated_cost is still 0.0
+# (no response completed yet, or litellm cost calc failed). Uses Gemini Flash's
+# output rate ($2.50 / 1M tokens) for ALL fresh non-cache tokens so the estimate
+# errs high and the ceiling trips early rather than late.
+_FALLBACK_USD_PER_TOKEN = 0.0000025
+DETERMINISTIC_FAILURE_THRESHOLD = 2
 DEFAULT_READ_CALL_BUDGET = 200
+# Reason codes for content-deterministic crashes: re-dispatching a daily
+# unit that hit one of these will crash identically.
+DETERMINISTIC_FAILURE_REASON_CODES = frozenset(
+    {
+        "context_window_exceeded",
+        "max_turns_exhausted",
+        "no_output",
+        "token_budget_exceeded",
+    }
+)
 
-_SOL_INVOCATION_RE = re.compile(r"(^sol\s|\bsol call\b)")
-_JOURNAL_COMMANDS = {"identity", "routines", "health", "talent"}
-_SHELL_CONTROL_TOKENS = {";", "&&", "||", "|", ">", ">>", "<", "<<"}
+_JOURNAL_COMMANDS = {"identity", "health", "talent"}
+_SHELL_OPERATOR_CHARS = frozenset("();<>|&")
 _WRITE_TOOLS = {"write_file", "replace"}
-_READ_TOOLS = {"read_file", "glob", "list_directory", "grep_search"}
+_READ_TOOLS = frozenset(COGITATE_READ_TOOL_NAMES)
+_SUBMIT_TIERS = tuple(
+    tier for tier in COGITATE_ACCESS_TIERS if capabilities_for_access_tier(tier).submit
+)
+_SUPPORT_SEND_VERBS = {"create", "reply", "attach", "feedback"}
+
+SHELL_COMPOSITION_DENY = (
+    "policy_deny: shell composition is not available; run one `sol` or approved "
+    "`journal` command per call with no pipes, redirects, chaining, or command "
+    "substitution"
+)
+EMPTY_COMMAND_DENY = "policy_deny: empty command"
+RESTRICTED_COMMAND_DENY = (
+    "policy_deny: run_shell_command restricted to sol or approved journal invocations"
+)
 
 
-def _is_approved_journal_invocation(command: str) -> bool:
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        return False
+@dataclass(frozen=True)
+class CommandDecision:
+    allowed: bool
+    reason: str
+    argv: list[str] | None
 
-    if len(tokens) < 2 or tokens[0] != "journal" or tokens[1] not in _JOURNAL_COMMANDS:
-        return False
 
-    for token in tokens:
-        if token in _SHELL_CONTROL_TOKENS or "$(" in token or "`" in token:
-            return False
-
-    return True
+def _shell_syntax_violation(command: str) -> bool:
+    """Return True when command uses shell syntax outside quoted data."""
+    if "$(" in command or "`" in command:
+        return True
+    if "\n" in command or "\r" in command:
+        return True
+    index = 0
+    length = len(command)
+    quote: str | None = None
+    while index < length:
+        char = command[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+        elif quote == '"':
+            if char == "\\" and index + 1 < length:
+                index += 2
+                continue
+            if char == '"':
+                quote = None
+        else:
+            if char == "\\" and index + 1 < length:
+                index += 2
+                continue
+            if char in ("'", '"'):
+                quote = char
+            elif char in _SHELL_OPERATOR_CHARS:
+                return True
+        index += 1
+    return quote is not None
 
 
 class MaxTurnsExhausted(RuntimeError):
@@ -42,32 +105,82 @@ class MaxTurnsExhausted(RuntimeError):
 class CogitatePolicy:
     """In-process policy gate for cogitate tool calls."""
 
-    def __init__(self, *, allowed_roots: list[Path]) -> None:
+    def __init__(
+        self,
+        *,
+        allowed_roots: list[Path],
+        access_tier: str,
+        outbound_approval: str | None = None,
+    ) -> None:
         self.allowed_roots = [
             Path(root).expanduser().resolve() for root in allowed_roots
         ]
+        self.access_tier = access_tier
+        self.submit_allowed = capabilities_for_access_tier(access_tier).submit
+        self.outbound_approval = outbound_approval
 
     def check(self, tool: str, args: dict[str, Any]) -> tuple[bool, str]:
         if tool in _WRITE_TOOLS:
             return False, f"policy_deny: {tool} not allowed for read-only talents"
 
         if tool == "run_shell_command":
-            command = str(args.get("command", ""))
-            if not (
-                _SOL_INVOCATION_RE.search(command)
-                or _is_approved_journal_invocation(command)
-            ):
-                return (
-                    False,
-                    "policy_deny: run_shell_command restricted to sol"
-                    " or approved journal invocations",
-                )
-            return True, "ok"
+            decision = self.classify_command(str(args.get("command", "")))
+            return decision.allowed, decision.reason
 
         if tool in _READ_TOOLS:
             return True, "ok"
 
         return True, "ok"
+
+    def classify_command(self, command: str) -> CommandDecision:
+        if _shell_syntax_violation(command):
+            return CommandDecision(False, SHELL_COMPOSITION_DENY, None)
+
+        try:
+            argv = shlex.split(command, posix=True)
+        except ValueError:
+            return CommandDecision(False, SHELL_COMPOSITION_DENY, None)
+
+        if not argv:
+            return CommandDecision(False, EMPTY_COMMAND_DENY, None)
+
+        if not (
+            argv[0] == "sol"
+            or (
+                argv[0] == "journal" and len(argv) >= 2 and argv[1] in _JOURNAL_COMMANDS
+            )
+        ):
+            return CommandDecision(False, RESTRICTED_COMMAND_DENY, None)
+
+        send_verb = _support_send_verb(argv)
+        if send_verb and not self.submit_allowed:
+            required = " or ".join(_SUBMIT_TIERS)
+            return CommandDecision(
+                False,
+                f"policy_deny: 'sol call support {send_verb}' requires "
+                f"access_tier {required!r}; this run is {self.access_tier!r}",
+                None,
+            )
+
+        if send_verb and not self.outbound_approval:
+            return CommandDecision(
+                False,
+                f"policy_deny: 'sol call support {send_verb}' requires a "
+                "per-send owner approval; this run was not launched with one",
+                None,
+            )
+
+        return CommandDecision(True, "ok", argv)
+
+
+def _support_send_verb(argv: list[str]) -> str | None:
+    for index in range(len(argv) - 3):
+        if argv[index : index + 3] != ["sol", "call", "support"]:
+            continue
+        verb = argv[index + 3]
+        if verb in _SUPPORT_SEND_VERBS:
+            return verb
+    return None
 
 
 def _normalize_day(day: date | str) -> str:

@@ -32,10 +32,10 @@ def _filename_to_agent_key(filename: str) -> str:
     Reverse of get_output_name(): converts filesystem names back to agent keys.
 
     Args:
-        filename: Filename stem (e.g., "entities" or "_todos_review")
+        filename: Filename stem (e.g., "entities" or "_activities_review")
 
     Returns:
-        Agent key (e.g., "entities" or "todos:review")
+        Agent key (e.g., "entities" or "activities:review")
     """
     if filename.startswith("_"):
         # App agent: "_app_name" -> "app:name"
@@ -51,7 +51,7 @@ def _agent_matches_filter(
     """Check if an agent output file matches the filter.
 
     Args:
-        filename: Filename stem (e.g., "entities" or "_todos_review")
+        filename: Filename stem (e.g., "entities" or "_activities_review")
         agent_filter: Dict mapping agent keys to bool/"required", or None for all
 
     Returns:
@@ -254,7 +254,7 @@ def _process_segment(
                     file=sys.stderr,
                 )
 
-    # Process agent output summaries from agents/**/*.md files (with optional filtering)
+    # Process agent output summaries from talents/**/*.md files (with optional filtering)
     if agents:
         # Convert bool to filter: True -> None (all), False handled by outer if
         agent_filter = (
@@ -499,8 +499,6 @@ def _detect_data_state(seg_path: Path) -> dict[str, str]:
         _jsonl_has_marker_row(path, "start") for path in audio_jsonl_files
     ) or any(_has_nonempty_text(path) for path in audio_md_files)
     audio_has_raw = _has_raw_media(raw_media_paths, AUDIO_EXTENSIONS)
-    # Sanctioned read-path mutation (CLAUDE.md §7 L1/L6 exception, ACs 10/11/12):
-    # the shared helper may rename/unlink sidecar markers. See data_state.derive_modality_state.
     audio_state = derive_modality_state(
         seg_path,
         "audio",

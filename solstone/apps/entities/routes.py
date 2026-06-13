@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
+import json
 import logging
-import os
 import re
 import time
 import uuid
@@ -26,37 +26,75 @@ from solstone.convey.reasons import (
     AGENT_UNAVAILABLE,
     ENTITY_ALIAS_CONFLICT,
     ENTITY_ALREADY_EXISTS,
+    ENTITY_BLOCKED,
+    ENTITY_BUSY,
     ENTITY_NOT_FOUND,
     ENTITY_OPERATION_FAILED,
     INVALID_ENTITY_TYPE,
+    INVALID_REQUEST_VALUE,
     MISSING_REQUEST_BODY,
     MISSING_REQUIRED_FIELD,
     OPERATION_NO_LONGER_AVAILABLE,
     PRINCIPAL_ENTITY_PROTECTED,
     PROVIDER_KEY_MISSING,
 )
-from solstone.convey.utils import error_response
+from solstone.convey.utils import (
+    created,
+    error_response,
+    respond_collection,
+    success_response,
+)
+from solstone.think.curation import (
+    accept_entity_candidate,
+    dismiss_entity_candidate,
+    merge_preview_fields,
+)
 from solstone.think.entities import (
+    AkaConflictError,
+    EntityBlockedError,
+    EntityDict,
+    EntityExistsError,
+    EntityNotFoundError,
+    add_entity_aka,
+    add_observation,
+    attach_or_reactivate_entity,
     block_journal_entity,
     count_observations,
+    delete_detected_entity,
+    detach_facet_entity,
+    entity_last_active_day,
     entity_last_active_ts,
     entity_memory_path,
     entity_slug,
     is_valid_entity_type,
+    last_active_day_for_ts,
     load_all_facet_relationships,
     load_all_journal_entities,
     load_detected_entities_recent,
     load_entities,
     load_facet_relationship,
     load_observations,
-    rename_entity_memory,
-    save_entities,
+    merge_entity,
+    resolve_entity,
+    save_detected_entity,
     save_journal_entity,
     unblock_journal_entity,
-    validate_aka_uniqueness,
+    update_detected_entity,
+    update_facet_entity_description,
+    update_facet_entity_identity,
 )
+from solstone.think.entities.consolidation import consolidate_detected_entities
 from solstone.think.entities.journal import delete_journal_entity, load_journal_entity
-from solstone.think.facets import get_facets
+from solstone.think.entities.relationships import move_facet_entity
+from solstone.think.entities.review_candidates import (
+    load_candidates,
+)
+from solstone.think.entities.review_candidates import (
+    record_merge_candidate as record_entity_merge_candidate,
+)
+from solstone.think.facets import get_facets, log_call_action
+from solstone.think.indexer.journal import search_entities
+from solstone.think.journal_io import LockTimeout
 from solstone.think.utils import now_ms
 
 entities_bp = Blueprint(
@@ -107,11 +145,58 @@ def get_facet_entities_data(facet_name: str) -> dict:
             entity["has_voiceprint"] = metadata["has_voiceprint"]
         # Add computed activity timestamp for frontend sorting/display
         entity["last_active_ts"] = entity_last_active_ts(entity)
+        entity["last_active_day"] = entity_last_active_day(entity)
 
     # Load detected entities directly from files (excludes attached names/akas)
     detected = load_detected_entities_recent(facet_name)
 
     return {"attached": attached, "detected": detected}
+
+
+def _json_body() -> dict[str, Any]:
+    payload = request.get_json(silent=True) or {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _body_str(payload: dict[str, Any], name: str) -> str | None:
+    value = payload.get(name)
+    if value is None:
+        return None
+    return str(value)
+
+
+def _required_body_str(payload: dict[str, Any], name: str) -> tuple[str | None, Any]:
+    value = _body_str(payload, name)
+    if value is None:
+        return None, error_response(
+            MISSING_REQUIRED_FIELD,
+            detail=f"{name} is required",
+        )
+    return value, None
+
+
+def _body_bool(
+    payload: dict[str, Any],
+    name: str,
+    *,
+    default: bool = False,
+) -> bool:
+    value = payload.get(name)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() in {"1", "true", "yes", "on"}
+
+
+def _body_int_or_none(payload: dict[str, Any], name: str) -> int | None:
+    value = payload.get(name)
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 @entities_bp.route("/api/<facet_name>")
@@ -122,6 +207,557 @@ def get_entities(facet_name: str) -> Any:
         return jsonify(data)
     except Exception as e:
         return error_response(ENTITY_OPERATION_FAILED, detail=str(e))
+
+
+@entities_bp.route("/api/<facet_name>/resolve")
+def resolve_facet_entity(facet_name: str) -> Any:
+    """Resolve an entity name for the CLI without mutating state."""
+    name = request.args.get("name", "").strip()
+    if not name:
+        return error_response(MISSING_REQUIRED_FIELD, detail="name is required")
+
+    facet_exists = (Path(state.journal_root) / "facets" / facet_name).is_dir()
+    resolved, candidates = resolve_entity(facet_name, name)
+    blocked = False
+    blocked_name: str | None = None
+    if resolved is None:
+        blocked_match, _ = resolve_entity(facet_name, name, include_blocked=True)
+        if blocked_match and blocked_match.get("blocked"):
+            blocked = True
+            blocked_name = str(blocked_match.get("name") or name)
+
+    return jsonify(
+        {
+            "facet_exists": facet_exists,
+            "resolved": resolved,
+            "candidates": candidates or [],
+            "blocked": blocked,
+            "blocked_name": blocked_name,
+        }
+    )
+
+
+@entities_bp.route("/api/<facet_name>/detected", methods=["GET"])
+def get_detected_entities(facet_name: str) -> Any:
+    """Return detected entities for one facet day."""
+    day = request.args.get("day", "")
+    if not day:
+        return error_response(MISSING_REQUIRED_FIELD, detail="day is required")
+    return respond_collection(load_entities(facet_name, day))
+
+
+@entities_bp.route("/api/<facet_name>/detected", methods=["POST"])
+def detect_entity_route(facet_name: str) -> Any:
+    """Record a detected entity for the CLI."""
+    data = _json_body()
+    day, error = _required_body_str(data, "day")
+    if error is not None:
+        return error
+    type_, error = _required_body_str(data, "type")
+    if error is not None:
+        return error
+    entity, error = _required_body_str(data, "entity")
+    if error is not None:
+        return error
+    description, error = _required_body_str(data, "description")
+    if error is not None:
+        return error
+
+    assert day is not None
+    assert type_ is not None
+    assert entity is not None
+    assert description is not None
+
+    if not is_valid_entity_type(type_):
+        return error_response(
+            INVALID_ENTITY_TYPE,
+            detail=f"Invalid entity type '{type_}'",
+        )
+
+    resolved, _ = resolve_entity(facet_name, entity)
+    if resolved is None:
+        blocked_match, _ = resolve_entity(facet_name, entity, include_blocked=True)
+        if blocked_match and blocked_match.get("blocked"):
+            return error_response(
+                ENTITY_BLOCKED,
+                detail=str(blocked_match.get("name") or entity),
+            )
+    name = str(resolved.get("name", entity)) if resolved else entity
+
+    try:
+        save_detected_entity(facet_name, day, type_, name, description)
+    except ValueError as exc:
+        return error_response(INVALID_REQUEST_VALUE, detail=str(exc))
+    except LockTimeout:
+        return error_response(ENTITY_BUSY)
+
+    log_call_action(
+        facet=facet_name,
+        action="entity_detect",
+        params={
+            "type": type_,
+            "entity": entity,
+            "name": name,
+            "description": description,
+        },
+        day=day,
+    )
+    return success_response({"name": name})
+
+
+@entities_bp.route("/api/<facet_name>/attach", methods=["POST"])
+def attach_entity_for_call(facet_name: str) -> Any:
+    """Attach an entity for the CLI with call audit identity."""
+    data = _json_body()
+    if not data:
+        return error_response(MISSING_REQUEST_BODY, detail="No data provided")
+
+    type_, error = _required_body_str(data, "type")
+    if error is not None:
+        return error
+    name, error = _required_body_str(data, "name")
+    if error is not None:
+        return error
+    description = _body_str(data, "description") or ""
+    assert type_ is not None
+    assert name is not None
+
+    if not is_valid_entity_type(type_):
+        return error_response(
+            INVALID_ENTITY_TYPE,
+            detail=f"Invalid entity type '{type_}'",
+        )
+
+    try:
+        relationship, reattached = attach_or_reactivate_entity(
+            facet_name,
+            entity_type=type_,
+            name=name,
+            description=description,
+        )
+    except EntityExistsError:
+        return error_response(ENTITY_ALREADY_EXISTS)
+    except EntityBlockedError:
+        return error_response(ENTITY_BLOCKED)
+    except EntityNotFoundError:
+        return error_response(ENTITY_NOT_FOUND)
+    except LockTimeout:
+        return error_response(ENTITY_BUSY)
+
+    log_call_action(
+        facet=facet_name,
+        action="entity_attach",
+        params={
+            "type": type_,
+            "entity": name,
+            "name": name,
+            "description": description,
+        },
+    )
+    if reattached:
+        return success_response()
+    return created(
+        {
+            "id": relationship["entity_id"],
+            "name": name,
+            "type": type_,
+            "description": relationship["description"],
+            "attached_at": relationship["attached_at"],
+            "updated_at": relationship["updated_at"],
+        }
+    )
+
+
+@entities_bp.route("/api/<facet_name>/update-description", methods=["POST"])
+def update_description_for_call(facet_name: str) -> Any:
+    """Update a facet entity description for the CLI."""
+    data = _json_body()
+    entity_id, error = _required_body_str(data, "entity_id")
+    if error is not None:
+        return error
+    description, error = _required_body_str(data, "description")
+    if error is not None:
+        return error
+    assert entity_id is not None
+    assert description is not None
+
+    resolved_name = _body_str(data, "name") or entity_id
+    original_query = _body_str(data, "entity") or resolved_name
+    try:
+        relationship = update_facet_entity_description(
+            facet_name,
+            entity_id,
+            description,
+        )
+    except EntityNotFoundError:
+        return error_response(ENTITY_NOT_FOUND, detail=resolved_name)
+    except LockTimeout:
+        return error_response(ENTITY_BUSY)
+
+    log_call_action(
+        facet=facet_name,
+        action="entity_update",
+        params={
+            "entity": original_query,
+            "name": resolved_name,
+            "description": description,
+        },
+    )
+    return success_response({"entity": relationship})
+
+
+@entities_bp.route("/api/<facet_name>/update-detected", methods=["POST"])
+def update_detected_for_call(facet_name: str) -> Any:
+    """Update a detected entity description for the CLI."""
+    data = _json_body()
+    day, error = _required_body_str(data, "day")
+    if error is not None:
+        return error
+    entity, error = _required_body_str(data, "entity")
+    if error is not None:
+        return error
+    description, error = _required_body_str(data, "description")
+    if error is not None:
+        return error
+    assert day is not None
+    assert entity is not None
+    assert description is not None
+
+    try:
+        updated = update_detected_entity(facet_name, day, entity, description)
+    except ValueError as exc:
+        return error_response(INVALID_REQUEST_VALUE, detail=str(exc))
+    except LockTimeout:
+        return error_response(ENTITY_BUSY)
+
+    log_call_action(
+        facet=facet_name,
+        action="entity_update",
+        params={"entity": entity, "description": description},
+        day=day,
+    )
+    return success_response({"entity": updated})
+
+
+@entities_bp.route("/api/move", methods=["POST"])
+def move_entity_for_call() -> Any:
+    """Move a resolved entity between facets for the CLI."""
+    data = _json_body()
+    entity, error = _required_body_str(data, "entity")
+    if error is not None:
+        return error
+    from_facet, error = _required_body_str(data, "from_facet")
+    if error is not None:
+        return error
+    to_facet, error = _required_body_str(data, "to_facet")
+    if error is not None:
+        return error
+    assert entity is not None
+    assert from_facet is not None
+    assert to_facet is not None
+
+    merge = _body_bool(data, "merge")
+    consent = _body_bool(data, "consent")
+    try:
+        result = move_facet_entity(
+            entity_name=entity,
+            from_facet=from_facet,
+            to_facet=to_facet,
+            merge=merge,
+        )
+    except EntityNotFoundError:
+        return error_response(
+            ENTITY_OPERATION_FAILED,
+            detail="Entity data directory not found in source facet.",
+        )
+    except EntityExistsError:
+        return error_response(
+            ENTITY_ALREADY_EXISTS,
+            detail="Entity already exists in destination facet. Use --merge to merge.",
+        )
+
+    params: dict[str, object] = {
+        "entity": entity,
+        "moved_from": from_facet,
+        "moved_to": to_facet,
+    }
+    if merge:
+        params["merge"] = True
+    if consent:
+        params["consent"] = True
+    log_call_action(facet=from_facet, action="entity_move", params=params)
+    return success_response(
+        {
+            "entity": entity,
+            "moved_from": from_facet,
+            "moved_to": to_facet,
+            "merged": bool(result["merged"]),
+        }
+    )
+
+
+@entities_bp.route("/api/<facet_name>/aka", methods=["POST"])
+def add_aka_for_call(facet_name: str) -> Any:
+    """Add one entity alias for the CLI."""
+    data = _json_body()
+    entity_id, error = _required_body_str(data, "entity_id")
+    if error is not None:
+        return error
+    aka, error = _required_body_str(data, "aka")
+    if error is not None:
+        return error
+    exclude_name, error = _required_body_str(data, "exclude_name")
+    if error is not None:
+        return error
+    assert entity_id is not None
+    assert aka is not None
+    assert exclude_name is not None
+
+    original_query = _body_str(data, "entity") or exclude_name
+    try:
+        aka_list = add_entity_aka(
+            facet_name,
+            entity_id,
+            aka,
+            exclude_name=exclude_name,
+        )
+    except AkaConflictError as exc:
+        return error_response(
+            ENTITY_ALIAS_CONFLICT,
+            detail=f"Alias '{exc.alias}' conflicts with entity '{exc.conflict_name}'.",
+        )
+    except EntityNotFoundError:
+        return error_response(ENTITY_NOT_FOUND, detail=exclude_name)
+    except LockTimeout:
+        return error_response(ENTITY_BUSY)
+
+    log_call_action(
+        facet=facet_name,
+        action="entity_add_aka",
+        params={"entity": original_query, "name": exclude_name, "aka": aka},
+    )
+    return success_response({"aka": aka_list})
+
+
+@entities_bp.route("/api/consolidate", methods=["POST"])
+def consolidate_entities_for_call() -> Any:
+    """Consolidate detected entities for the CLI."""
+    data = _json_body()
+    full = _body_bool(data, "full")
+    try:
+        count = consolidate_detected_entities(state.journal_root, full=full)
+    except Exception as exc:
+        return error_response(ENTITY_OPERATION_FAILED, detail=str(exc))
+    return success_response({"count": count})
+
+
+@entities_bp.route("/api/record-merge-candidate", methods=["POST"])
+def record_merge_candidate_for_call() -> Any:
+    """Record or update an entity merge candidate for the CLI."""
+    data = _json_body()
+    facet, error = _required_body_str(data, "facet")
+    if error is not None:
+        return error
+    day, error = _required_body_str(data, "day")
+    if error is not None:
+        return error
+    source, error = _required_body_str(data, "source")
+    if error is not None:
+        return error
+    target, error = _required_body_str(data, "target")
+    if error is not None:
+        return error
+    evidence, error = _required_body_str(data, "evidence")
+    if error is not None:
+        return error
+    assert facet is not None
+    assert day is not None
+    assert source is not None
+    assert target is not None
+    assert evidence is not None
+
+    source_slug = entity_slug(source)
+    target_slug = entity_slug(target)
+    if source_slug == target_slug:
+        return error_response(
+            INVALID_REQUEST_VALUE,
+            detail="source and target resolve to the same entity.",
+        )
+
+    try:
+        row, created_row = record_entity_merge_candidate(
+            facet=facet,
+            day=day,
+            source=source,
+            source_slug=source_slug,
+            target=target,
+            target_slug=target_slug,
+            evidence=evidence,
+            basis=_body_str(data, "basis") or "name-variant",
+            detections=_body_int_or_none(data, "detections"),
+            needs=_body_int_or_none(data, "needs"),
+        )
+    except LockTimeout:
+        return error_response(ENTITY_BUSY)
+    return success_response({"row": row, "created": created_row})
+
+
+@entities_bp.route("/api/merge-candidates")
+def get_merge_candidates_for_call() -> Any:
+    """Return entity merge candidates for the CLI."""
+    facet = request.args.get("facet")
+    status = request.args.get("status")
+    rows = load_candidates()
+    if facet:
+        rows = [row for row in rows if row.get("facet") == facet]
+    if status:
+        rows = [row for row in rows if row.get("status") == status]
+    return respond_collection(rows)
+
+
+@entities_bp.route("/api/accept-merge-candidate", methods=["POST"])
+def accept_merge_candidate_for_call() -> Any:
+    """Preview or accept one entity merge candidate for the CLI."""
+    data = _json_body()
+    facet, error = _required_body_str(data, "facet")
+    if error is not None:
+        return error
+    source_slug, error = _required_body_str(data, "source_slug")
+    if error is not None:
+        return error
+    target_slug, error = _required_body_str(data, "target_slug")
+    if error is not None:
+        return error
+    assert facet is not None
+    assert source_slug is not None
+    assert target_slug is not None
+
+    try:
+        result = accept_entity_candidate(
+            facet,
+            source_slug,
+            target_slug,
+            commit=_body_bool(data, "commit"),
+        )
+    except LockTimeout:
+        return error_response(ENTITY_BUSY)
+    if result.get("status") == "preview":
+        fields = merge_preview_fields(result["merge"])
+        body = {
+            "status": result.get("status"),
+            "kind": result.get("kind"),
+            "key": result.get("key"),
+            "fields": fields,
+        }
+        return jsonify(body)
+    coerced = json.loads(json.dumps(result, default=str))
+    return jsonify(coerced)
+
+
+@entities_bp.route("/api/dismiss-merge-candidate", methods=["POST"])
+def dismiss_merge_candidate_for_call() -> Any:
+    """Dismiss one entity merge candidate for the CLI."""
+    data = _json_body()
+    facet, error = _required_body_str(data, "facet")
+    if error is not None:
+        return error
+    source_slug, error = _required_body_str(data, "source_slug")
+    if error is not None:
+        return error
+    target_slug, error = _required_body_str(data, "target_slug")
+    if error is not None:
+        return error
+    assert facet is not None
+    assert source_slug is not None
+    assert target_slug is not None
+
+    try:
+        result = dismiss_entity_candidate(facet, source_slug, target_slug)
+    except LockTimeout:
+        return error_response(ENTITY_BUSY)
+    coerced = json.loads(json.dumps(result, default=str))
+    return jsonify(coerced)
+
+
+@entities_bp.route("/api/merge", methods=["POST"])
+def merge_entities_for_call() -> Any:
+    """Merge two journal entities for the CLI."""
+    data = _json_body()
+    source_slug, error = _required_body_str(data, "source_slug")
+    if error is not None:
+        return error
+    target_slug, error = _required_body_str(data, "target_slug")
+    if error is not None:
+        return error
+    assert source_slug is not None
+    assert target_slug is not None
+
+    result = merge_entity(
+        source_slug,
+        target_slug,
+        keep_source_as_aka=_body_bool(data, "keep_source_as_aka", default=True),
+        commit=_body_bool(data, "commit"),
+        caller="entities.merge",
+    )
+    coerced = json.loads(json.dumps(result, default=str))
+    return jsonify(coerced)
+
+
+@entities_bp.route("/api/<facet_name>/observations")
+def get_observations_for_call(facet_name: str) -> Any:
+    """Return observations for one resolved entity name."""
+    name = request.args.get("name", "")
+    if not name:
+        return error_response(MISSING_REQUIRED_FIELD, detail="name is required")
+    return respond_collection(load_observations(facet_name, name))
+
+
+@entities_bp.route("/api/<facet_name>/observe", methods=["POST"])
+def observe_entity_for_call(facet_name: str) -> Any:
+    """Add an observation for the CLI."""
+    data = _json_body()
+    name, error = _required_body_str(data, "name")
+    if error is not None:
+        return error
+    content, error = _required_body_str(data, "content")
+    if error is not None:
+        return error
+    assert name is not None
+    assert content is not None
+
+    source_day = _body_str(data, "source_day")
+    original_query = _body_str(data, "entity") or name
+    try:
+        result = add_observation(facet_name, name, content, source_day)
+    except ValueError as exc:
+        return error_response(INVALID_REQUEST_VALUE, detail=str(exc))
+    except LockTimeout:
+        return error_response(ENTITY_BUSY)
+
+    log_call_action(
+        facet=facet_name,
+        action="entity_observe",
+        params={"entity": original_query, "name": name, "content": content},
+    )
+    return success_response({"result": result})
+
+
+@entities_bp.route("/api/search")
+def search_entities_for_call() -> Any:
+    """Search entities for the CLI."""
+    limit = 20
+    try:
+        limit = int(request.args.get("limit", "20"))
+    except ValueError:
+        limit = 20
+    results = search_entities(
+        query=request.args.get("query") or None,
+        entity_type=request.args.get("type") or None,
+        facet=request.args.get("facet") or None,
+        since=request.args.get("since") or None,
+        limit=limit,
+    )
+    return respond_collection(results)
 
 
 @entities_bp.route("/api/<facet_name>/entity/<entity_id>")
@@ -171,6 +807,7 @@ def get_entity(facet_name: str, entity_id: str) -> Any:
         entity["has_voiceprint"] = metadata["has_voiceprint"]
         # Add computed activity timestamp for frontend display
         entity["last_active_ts"] = entity_last_active_ts(entity)
+        entity["last_active_day"] = entity_last_active_day(entity)
 
         # Ensure id is set
         if "id" not in entity:
@@ -215,54 +852,25 @@ def add_entity(facet_name: str) -> Any:
         )
 
     try:
-        # Load ALL attached entities including detached ones
-        entities = load_entities(facet_name, include_detached=True)
-
-        # Check for existing entity by name (case-insensitive, active or detached)
-        name_lower = name.lower()
-        for entity in entities:
-            if entity.get("name", "").lower() == name_lower:
-                if entity.get("detached"):
-                    # Re-activate detached entity
-                    entity.pop("detached", None)
-                    entity["updated_at"] = now_ms()
-                    # Update type and description if provided
-                    entity["type"] = etype
-                    if desc:
-                        entity["description"] = desc
-                    save_entities(facet_name, entities)
-
-                    log_app_action(
-                        app="entities",
-                        facet=facet_name,
-                        action="entity_reattach",
-                        params={
-                            "type": etype,
-                            "name": name,
-                            "description": entity.get("description", ""),
-                        },
-                    )
-                    return jsonify({"success": True, "reattached": True})
-                else:
-                    return error_response(
-                        ENTITY_ALREADY_EXISTS,
-                        detail="Entity with this name already exists in facet",
-                    )
-
-        # Add new entity with timestamps (id will be generated by save_entities)
-        now = now_ms()
-        entities.append(
-            {
-                "type": etype,
-                "name": name,
-                "description": desc,
-                "attached_at": now,
-                "updated_at": now,
-            }
+        relationship, reattached = attach_or_reactivate_entity(
+            facet_name,
+            entity_type=etype,
+            name=name,
+            description=desc,
         )
 
-        # Save back
-        save_entities(facet_name, entities)
+        if reattached:
+            log_app_action(
+                app="entities",
+                facet=facet_name,
+                action="entity_reattach",
+                params={
+                    "type": etype,
+                    "name": name,
+                    "description": relationship.get("description", ""),
+                },
+            )
+            return success_response({"reattached": True})
 
         log_app_action(
             app="entities",
@@ -271,70 +879,63 @@ def add_entity(facet_name: str) -> Any:
             params={"type": etype, "name": name, "description": desc},
         )
 
-        return jsonify({"success": True})
+        return created(
+            {
+                "id": relationship["entity_id"],
+                "name": name,
+                "type": etype,
+                "description": relationship["description"],
+                "attached_at": relationship["attached_at"],
+                "updated_at": relationship["updated_at"],
+            }
+        )
 
+    except EntityBlockedError:
+        return error_response(ENTITY_BLOCKED)
+    except EntityExistsError:
+        return error_response(
+            ENTITY_ALREADY_EXISTS,
+            detail="Entity with this name already exists in facet",
+        )
+    except LockTimeout:
+        return error_response(ENTITY_BUSY)
     except Exception as e:
         return error_response(ENTITY_OPERATION_FAILED, detail=str(e))
 
 
-@entities_bp.route("/api/<facet_name>", methods=["DELETE"])
-def detach_entity(facet_name: str) -> Any:
+@entities_bp.route("/api/<facet_name>/entity/<entity_id>", methods=["DELETE"])
+def detach_entity(facet_name: str, entity_id: str) -> Any:
     """Detach an entity from a facet (soft delete).
 
     Sets detached=True instead of removing the entity, preserving
     all metadata for potential re-attachment later.
     """
-    data = request.get_json()
-    if not data:
-        return error_response(MISSING_REQUEST_BODY, detail="No data provided")
-
-    name = data.get("name", "").strip()
-
-    if not name:
-        return error_response(
-            MISSING_REQUIRED_FIELD,
-            detail="Entity name is required",
-        )
-
     try:
-        # Load ALL attached entities including detached ones
-        entities = load_entities(facet_name, include_detached=True)
-
-        # Find the entity to detach by name
-        target_entity = None
-        for e in entities:
-            if e.get("name") == name:
-                if not e.get("detached"):
-                    target_entity = e
-                break
-
-        if not target_entity:
-            return error_response(
-                ENTITY_NOT_FOUND,
-                detail="Entity not found in facet",
-            )
-
-        # Soft delete: set detached flag and update timestamp
-        target_entity["detached"] = True
-        target_entity["updated_at"] = now_ms()
-
-        # Save updated list (entity remains in file with detached=True)
-        save_entities(facet_name, entities)
+        relationship = detach_facet_entity(facet_name, entity_id)
+        journal_entity = load_journal_entity(entity_id) or {}
 
         log_app_action(
             app="entities",
             facet=facet_name,
             action="entity_detach",
             params={
-                "type": target_entity.get("type", ""),
-                "name": name,
-                "description": target_entity.get("description", ""),
-                "aka": target_entity.get("aka", []),
+                "entity_id": entity_id,
+                "type": journal_entity.get("type", ""),
+                "name": journal_entity.get("name", ""),
+                "description": relationship.get("description", ""),
+                "aka": journal_entity.get("aka", []),
             },
         )
 
-        return jsonify({"success": True})
+        return success_response()
 
+    except EntityNotFoundError:
+        return error_response(
+            ENTITY_NOT_FOUND,
+            detail="Entity not found in facet",
+        )
+    except LockTimeout:
+        return error_response(ENTITY_BUSY)
     except Exception as e:
         return error_response(ENTITY_OPERATION_FAILED, detail=str(e))
 
@@ -357,85 +958,24 @@ def update_entity(facet_name: str) -> Any:
             detail="old_name and new_name are required",
         )
 
+    # Parse comma-delimited aka list
+    if aka_list_str:
+        aka_list = [item.strip() for item in aka_list_str.split(",") if item.strip()]
+    else:
+        aka_list = []
+
     try:
-        # Parse comma-delimited aka list
-        if aka_list_str:
-            aka_list = [
-                item.strip() for item in aka_list_str.split(",") if item.strip()
-            ]
-        else:
-            aka_list = []
+        old_journal_entity = load_journal_entity(entity_slug(old_name)) or {}
+        old_aka = old_journal_entity.get("aka", [])
+        old_type = old_journal_entity.get("type", "")
 
-        # Load ALL attached entities including detached to avoid data loss on save
-        entities = load_entities(facet_name, include_detached=True)
-
-        # Find target entity by name (only search active entities)
-        target = None
-        target_index = -1
-        for i, entity in enumerate(entities):
-            if entity.get("detached"):
-                continue  # Skip detached entities
-            if entity.get("name") == old_name:
-                target = entity
-                target_index = i
-                break
-
-        if not target:
-            return error_response(ENTITY_NOT_FOUND, detail="Entity not found")
-
-        # Capture old values before modification
-        old_aka = target.get("aka", [])
-        old_type = target.get("type", "")
-
-        # Check if new name conflicts with existing active entities (excluding current)
-        # Use case-insensitive comparison to match save_entities validation
-        if new_name.lower() != old_name.lower():
-            new_name_lower = new_name.lower()
-            for i, entity in enumerate(entities):
-                if entity.get("detached"):
-                    continue  # Skip detached entities in conflict check
-                if (
-                    i != target_index
-                    and entity.get("name", "").lower() == new_name_lower
-                ):
-                    return error_response(
-                        ENTITY_ALREADY_EXISTS,
-                        detail=f"Entity '{new_name}' already exists",
-                    )
-
-        # Validate akas don't conflict with other entities
-        for aka in aka_list:
-            conflict = validate_aka_uniqueness(
-                aka, entities, exclude_entity_name=old_name
-            )
-            if conflict:
-                return error_response(
-                    ENTITY_ALIAS_CONFLICT,
-                    detail=f"Alias '{aka}' conflicts with entity '{conflict}'",
-                )
-
-        # Update entity
-        target["name"] = new_name
-        if new_type:
-            target["type"] = new_type
-        if aka_list:
-            target["aka"] = aka_list
-        else:
-            target.pop("aka", None)
-        target["updated_at"] = now_ms()
-
-        # Save updated entities (id will be regenerated by save_entities)
-        save_entities(facet_name, entities)
-
-        # Rename entity memory folder if name changed
-        if new_name != old_name:
-            try:
-                rename_entity_memory(facet_name, old_name, new_name)
-            except OSError as e:
-                # Log but don't fail - folder rename is best-effort
-                logger.warning(
-                    f"Failed to rename entity memory folder for '{old_name}' -> '{new_name}': {e}"
-                )
+        journal_entity = update_facet_entity_identity(
+            facet_name,
+            old_name=old_name,
+            new_name=new_name,
+            entity_type=new_type,
+            aka_list=aka_list,
+        )
 
         log_app_action(
             app="entities",
@@ -451,70 +991,64 @@ def update_entity(facet_name: str) -> Any:
             },
         )
 
-        return jsonify({"success": True, "entity": target})
+        return success_response({"entity": journal_entity})
 
+    except EntityNotFoundError:
+        return error_response(ENTITY_NOT_FOUND, detail="Entity not found")
+    except EntityExistsError:
+        return error_response(
+            ENTITY_ALREADY_EXISTS,
+            detail=f"Entity '{new_name}' already exists",
+        )
+    except AkaConflictError as e:
+        return error_response(
+            ENTITY_ALIAS_CONFLICT,
+            detail=f"Alias '{e.alias}' conflicts with entity '{e.conflict_name}'",
+        )
+    except LockTimeout:
+        return error_response(ENTITY_BUSY)
     except Exception as e:
         return error_response(ENTITY_OPERATION_FAILED, detail=str(e))
 
 
-@entities_bp.route("/api/<facet_name>/description", methods=["PUT"])
-def update_description(facet_name: str) -> Any:
+@entities_bp.route(
+    "/api/<facet_name>/entity/<entity_id>/description",
+    methods=["PUT"],
+)
+def update_description(facet_name: str, entity_id: str) -> Any:
     """Update an entity's description."""
     data = request.get_json()
     if not data:
         return error_response(MISSING_REQUEST_BODY, detail="No data provided")
 
-    entity_name = data.get("name", "").strip()
     new_description = data.get("description", "").strip()
 
-    if not entity_name:
-        return error_response(
-            MISSING_REQUIRED_FIELD,
-            detail="Entity name is required",
-        )
-
     try:
-        # Load ALL attached entities including detached to avoid data loss on save
-        entities = load_entities(facet_name, include_detached=True)
-
-        # Find and update the entity by name (active only), capturing old description
-        updated = False
-        old_description = ""
-        entity_type = ""
-        for entity in entities:
-            if entity.get("detached"):
-                continue  # Skip detached entities
-            if entity.get("name") == entity_name:
-                old_description = entity.get("description", "")
-                entity_type = entity.get("type", "")
-                entity["description"] = new_description
-                entity["updated_at"] = now_ms()
-                updated = True
-                break
-
-        if not updated:
-            return error_response(
-                ENTITY_NOT_FOUND,
-                detail="Entity not found in facet",
-            )
-
-        # Save updated list
-        save_entities(facet_name, entities)
+        old_relationship = load_facet_relationship(facet_name, entity_id) or {}
+        journal_entity = load_journal_entity(entity_id) or {}
+        update_facet_entity_description(facet_name, entity_id, new_description)
 
         log_app_action(
             app="entities",
             facet=facet_name,
             action="entity_update_description",
             params={
-                "type": entity_type,
-                "name": entity_name,
-                "old_description": old_description,
+                "type": journal_entity.get("type", ""),
+                "name": journal_entity.get("name", ""),
+                "old_description": old_relationship.get("description", ""),
                 "new_description": new_description,
             },
         )
 
-        return jsonify({"success": True})
+        return success_response()
 
+    except EntityNotFoundError:
+        return error_response(
+            ENTITY_NOT_FOUND,
+            detail="Entity not found in facet",
+        )
+    except LockTimeout:
+        return error_response(ENTITY_BUSY)
     except Exception as e:
         return error_response(ENTITY_OPERATION_FAILED, detail=str(e))
 
@@ -536,16 +1070,12 @@ def generate_description(facet_name: str) -> Any:
             detail="Type and name are required",
         )
 
-    # Check for Google API key
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        return error_response(
-            PROVIDER_KEY_MISSING,
-            detail="GOOGLE_API_KEY not set",
-        )
-
     try:
         from solstone.convey.utils import spawn_agent
+
+        provider_error = _entity_describe_generate_readiness_error()
+        if provider_error is not None:
+            return provider_error
 
         # Build concise prompt - agent has detailed instructions
         current_desc = current_description or "(none)"
@@ -559,7 +1089,6 @@ def generate_description(facet_name: str) -> Any:
         use_id = spawn_agent(
             prompt=prompt,
             name="entities:entity_describe",
-            provider="google",
         )
         if use_id is None:
             return error_response(
@@ -571,6 +1100,24 @@ def generate_description(facet_name: str) -> Any:
 
     except Exception as e:
         return error_response(AGENT_UNAVAILABLE, detail=str(e))
+
+
+def _entity_describe_generate_readiness_error() -> Any | None:
+    from solstone.think.models import resolve_provider
+    from solstone.think.providers.state import readiness_for_provider
+    from solstone.think.talent import key_to_context
+
+    context = key_to_context("entities:entity_describe")
+    provider, model = resolve_provider(context, "generate")
+    readiness = readiness_for_provider(provider, "generate", model)
+    if readiness.status not in {"blocked", "unhealthy"}:
+        return None
+
+    detail = readiness.message or (
+        f"{provider} generate provider is not ready"
+        + (f" ({readiness.reason_code})" if readiness.reason_code else "")
+    )
+    return error_response(PROVIDER_KEY_MISSING, detail=detail)
 
 
 @entities_bp.route("/api/<facet_name>/assist", methods=["POST"])
@@ -665,7 +1212,7 @@ def delete_detected(facet_name: str) -> Any:
     try:
         entities_dir = Path(state.journal_root) / "facets" / facet_name / "entities"
         if not entities_dir.exists():
-            return jsonify({"success": True, "days_modified": []})
+            return success_response({"days_modified": []})
 
         # Iterate through all day files and remove the entity
         days_modified = []
@@ -674,24 +1221,16 @@ def delete_detected(facet_name: str) -> Any:
             day = day_file.stem
             entities = load_entities(facet_name, day)
 
-            # Capture entities being removed before filtering
-            for e in entities:
-                if e.get("name") == entity_name:
+            if any(e.get("name") == entity_name for e in entities):
+                removed = delete_detected_entity(facet_name, day, entity_name)
+                for entity in removed:
                     deleted_entries.append(
                         {
                             "day": day,
-                            "type": e.get("type", ""),
-                            "description": e.get("description", ""),
+                            "type": entity.get("type", ""),
+                            "description": entity.get("description", ""),
                         }
                     )
-
-            # Filter out entities matching this name (any type)
-            original_count = len(entities)
-            filtered_entities = [e for e in entities if e.get("name") != entity_name]
-
-            # Only save if we actually removed something
-            if len(filtered_entities) < original_count:
-                save_entities(facet_name, filtered_entities, day)
                 days_modified.append(day)
 
         if deleted_entries:
@@ -705,8 +1244,10 @@ def delete_detected(facet_name: str) -> Any:
                 },
             )
 
-        return jsonify({"success": True, "days_modified": days_modified})
+        return success_response({"days_modified": days_modified})
 
+    except LockTimeout:
+        return error_response(ENTITY_BUSY)
     except Exception as e:
         return error_response(ENTITY_OPERATION_FAILED, detail=str(e))
 
@@ -717,7 +1258,11 @@ def delete_detected(facet_name: str) -> Any:
 
 
 def _build_facet_relationships(
-    entity_id: str, entity_name: str, facets_config: dict
+    entity_id: str,
+    entity_name: str,
+    facets_config: dict,
+    *,
+    all_relationships: dict[str, dict[str, EntityDict]] | None = None,
 ) -> tuple[list, int, int]:
     """Build facet relationships list for a journal entity.
 
@@ -734,7 +1279,10 @@ def _build_facet_relationships(
     latest_active_ts = 0
 
     for facet_name in facets_config:
-        relationship = load_facet_relationship(facet_name, entity_id)
+        if all_relationships is None:
+            relationship = load_facet_relationship(facet_name, entity_id)
+        else:
+            relationship = all_relationships.get(facet_name, {}).get(entity_id)
         if not relationship:
             continue
 
@@ -762,6 +1310,7 @@ def _build_facet_relationships(
         # Compute last_active_ts for this relationship
         rel_active_ts = entity_last_active_ts(relationship)
         facet_rel["last_active_ts"] = rel_active_ts
+        facet_rel["last_active_day"] = entity_last_active_day(relationship)
 
         # Only count observations and activity from non-detached relationships
         if not is_detached:
@@ -786,8 +1335,10 @@ def get_journal_entities_data() -> dict:
     """
     facets_config = get_facets()
     journal_entities = load_all_journal_entities()
-    for facet_name in facets_config:
-        load_all_facet_relationships(facet_name)
+    all_relationships = {
+        facet_name: load_all_facet_relationships(facet_name)
+        for facet_name in facets_config
+    }
 
     entities = []
     for entity_id, journal_entity in journal_entities.items():
@@ -795,7 +1346,12 @@ def get_journal_entities_data() -> dict:
 
         # Build facet relationships
         facet_relationships, total_observation_count, latest_active_ts = (
-            _build_facet_relationships(entity_id, entity_name, facets_config)
+            _build_facet_relationships(
+                entity_id,
+                entity_name,
+                facets_config,
+                all_relationships=all_relationships,
+            )
         )
 
         # Build enriched entity
@@ -809,6 +1365,9 @@ def get_journal_entities_data() -> dict:
             "facets": facet_relationships,
             "total_observation_count": total_observation_count,
             "last_active_ts": latest_active_ts,
+            "last_active_day": (
+                last_active_day_for_ts(latest_active_ts) if latest_active_ts else None
+            ),
         }
 
         entities.append(enriched)
@@ -868,6 +1427,9 @@ def get_journal_entity(entity_id: str) -> Any:
             "facets": facet_relationships,
             "total_observation_count": total_observation_count,
             "last_active_ts": latest_active_ts,
+            "last_active_day": (
+                last_active_day_for_ts(latest_active_ts) if latest_active_ts else None
+            ),
         }
 
         return jsonify({"entity": enriched})

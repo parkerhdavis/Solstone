@@ -5,41 +5,15 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import logging
-import os
-import tempfile
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+
+from solstone.think.journal_io import append_text, atomic_replace, hold_lock
 
 logger = logging.getLogger(__name__)
-
-_AGENCY_MD = """\
-# agency
-
-things I'm tracking, acting on, or watching. I update this as I notice things
-and resolve them. the heartbeat reviews this periodically.
-
-## curation
-[nothing yet — building initial picture of journal health]
-
-## observations
-[watching and learning]
-
-## follow-throughs
-[none yet]
-
-## system
-[monitoring]
-
-## self-improvement
-[learning what works]
-"""
-
 
 _PARTNER_MD = """\
 # partner
@@ -104,70 +78,12 @@ responses. Nothing gets sent without their review.
 [not yet observed — sol will learn as we spend time together]
 """
 
-_AWARENESS_MD = "not yet updated\n"
-_DIGEST_MD = "not yet generated\n"
-
 STEWARD_SECTION_STATUS = "## Status"
 STEWARD_SECTION_ATTENTION = "## Needs your attention"
 STEWARD_SECTION_AUTO_REPAIRS = "## Auto-repairs (last 7d)"
 STEWARD_SECTION_TRENDS = "## Trends (last 7d)"
 
-
-def _build_self_md(config: dict) -> str:
-    agent = config.get("agent", {})
-    identity = config.get("identity", {})
-
-    name_status = agent.get("name_status", "default")
-    agent_name = agent.get("name", "sol")
-    named_date = agent.get("named_date")
-    owner_name = identity.get("name", "")
-    owner_bio = identity.get("bio", "")
-
-    has_named_agent = name_status in ("chosen", "self-named")
-    has_identity = bool(owner_name)
-
-    if has_named_agent:
-        opening = (
-            f"I am {agent_name}. this is a new journal — we're just getting started."
-        )
-    else:
-        opening = "I am sol. this is a new journal — we're just getting started."
-
-    if has_named_agent:
-        if named_date:
-            name_section = f"{agent_name} (named {named_date})"
-        else:
-            name_section = agent_name
-    else:
-        name_section = "sol (default)"
-
-    if has_identity:
-        owner_section = owner_name
-        if owner_bio:
-            owner_section += f"\n{owner_bio}"
-    else:
-        owner_section = "[getting to know you]"
-
-    return f"""\
-# self
-
-{opening}
-
-## my name
-{name_section}
-
-## who I'm here for
-{owner_section}
-
-## our relationship
-[forming]
-
-## what I've noticed
-[observing]
-
-## what I find interesting
-[discovering]
-"""
+_LOCK_SENTINEL = ".identity"
 
 
 def _identity_dir() -> Path:
@@ -197,59 +113,6 @@ def _history_ts() -> str:
         .isoformat(timespec="milliseconds")
         .replace("+00:00", "Z")
     )
-
-
-@contextmanager
-def _identity_lock(identity_dir: Path) -> Iterator[None]:
-    lock_path = identity_dir / ".lock"
-    with open(lock_path, "w", encoding="utf-8") as lock_fd:
-        # Serialize the whole directory so file replacement and history ordering stay aligned.
-        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
-
-
-def _append_history_locked(identity_dir: Path, line: str) -> None:
-    fd = os.open(
-        _history_path(identity_dir),
-        os.O_APPEND | os.O_CREAT | os.O_WRONLY,
-        0o600,
-    )
-    try:
-        os.write(fd, line.encode("utf-8"))
-    finally:
-        os.close(fd)
-
-
-def _replace_file(identity_dir: Path, file_name: str, content: str) -> None:
-    fd, tmp_path = tempfile.mkstemp(
-        dir=identity_dir,
-        prefix=f".{file_name}.",
-        suffix=".tmp",
-    )
-    replaced = False
-    try:
-        os.fchmod(fd, 0o600)
-        os.write(fd, content.encode("utf-8"))
-        os.close(fd)
-        fd = -1
-        os.replace(tmp_path, identity_dir / file_name)
-        replaced = True
-    except Exception:
-        if fd != -1:
-            os.close(fd)
-        if not replaced:
-            try:
-                os.unlink(tmp_path)
-            except FileNotFoundError:
-                pass
-        raise
-
-
-def _restore_previous_content(identity_dir: Path, file_name: str, content: str) -> None:
-    _replace_file(identity_dir, file_name, content)
 
 
 def _prune_partner_getting_started(content: str) -> str:
@@ -295,21 +158,6 @@ def _replace_section(existing: str, heading: str, new_value: str) -> str | None:
     return "\n".join(new_lines)
 
 
-def _replace_self_opening(existing: str, new_value: str) -> str | None:
-    lines = existing.split("\n")
-    start = None
-    end = None
-    for index, line in enumerate(lines):
-        if line == "# self":
-            start = index
-        elif start is not None and line.startswith("## "):
-            end = index
-            break
-    if start is None or end is None:
-        return None
-    return "\n".join(lines[: start + 1] + ["", new_value, ""] + lines[end:])
-
-
 def _write_identity_locked(
     identity_dir: Path,
     file: str,
@@ -324,7 +172,7 @@ def _write_identity_locked(
     target = identity_dir / file_name
     had_existing = target.exists()
     before_content = target.read_text(encoding="utf-8") if had_existing else ""
-    _replace_file(identity_dir, file_name, content)
+    atomic_replace(target, content, mode=0o600)
     record = {
         "ts": _history_ts(),
         "file": file_name,
@@ -338,14 +186,14 @@ def _write_identity_locked(
         "bytes_after": _byte_count(content),
     }
     try:
-        _append_history_locked(
-            identity_dir,
-            json.dumps(record, separators=(",", ":")) + "\n",
+        append_text(
+            _history_path(identity_dir),
+            json.dumps(record, separators=(",", ":")),
         )
     except Exception:
         if had_existing:
             try:
-                _restore_previous_content(identity_dir, file_name, before_content)
+                atomic_replace(target, before_content, mode=0o600)
             except Exception:
                 logger.exception(
                     "Failed to restore %s after history append failure", target
@@ -374,11 +222,11 @@ def write_identity(
     `op` must be one of: `replace`, `update_section`, `update_opening`,
     `append`, or `create`. `actor` is free-text, for example
     `ensure_identity_directory`, `sol call sol set-name`, or
-    `journal identity self --write`.
+    `journal identity partner --write`.
     """
 
     identity_dir = _identity_dir()
-    with _identity_lock(identity_dir):
+    with hold_lock(identity_dir / _LOCK_SENTINEL):
         _write_identity_locked(
             identity_dir,
             file,
@@ -401,7 +249,7 @@ def update_identity_section(
     identity_dir = _identity_dir()
     file_name = Path(file).name
     target = identity_dir / file_name
-    with _identity_lock(identity_dir):
+    with hold_lock(identity_dir / _LOCK_SENTINEL):
         if not target.exists():
             return False
         existing = target.read_text(encoding="utf-8")
@@ -424,59 +272,10 @@ def update_identity_section(
         return True
 
 
-def update_self_md_section(
-    section: str,
-    new_value: str,
-    *,
-    actor: str,
-    reason: str,
-) -> bool:
-    return update_identity_section(
-        "self.md",
-        section,
-        new_value,
-        actor=actor,
-        reason=reason,
-    )
-
-
-def update_self_md_opening(
-    new_value: str,
-    *,
-    actor: str,
-    reason: str,
-) -> bool:
-    identity_dir = _identity_dir()
-    target = identity_dir / "self.md"
-    with _identity_lock(identity_dir):
-        if not target.exists():
-            return False
-        existing = target.read_text(encoding="utf-8")
-        new_content = _replace_self_opening(existing, new_value)
-        if new_content is None or new_content == existing:
-            return False
-        _write_identity_locked(
-            identity_dir,
-            "self.md",
-            new_content,
-            actor=actor,
-            op="update_opening",
-            section=None,
-            reason=reason,
-        )
-        return True
-
-
 def ensure_identity_directory() -> Path:
-    from solstone.think.utils import get_config
-
     identity_dir = _identity_dir()
     defaults = {
-        "self.md": _build_self_md(get_config()),
-        "agency.md": _AGENCY_MD,
         "partner.md": _PARTNER_MD,
-        "awareness.md": _AWARENESS_MD,
-        "digest.md": _DIGEST_MD,
         "health.md": "\n".join(
             [
                 STEWARD_SECTION_STATUS,

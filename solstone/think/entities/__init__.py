@@ -37,11 +37,21 @@ from solstone.think.entities.core import (
     ENTITY_TYPES,
     MAX_ENTITY_SLUG_LENGTH,
     EntityDict,
-    atomic_write,
+    entity_last_active_day,
     entity_last_active_ts,
     entity_slug,
     get_identity_names,
     is_valid_entity_type,
+    last_active_day_for_ts,
+)
+
+# Errors
+from solstone.think.entities.errors import (
+    AkaConflictError,
+    EntityBlockedError,
+    EntityExistsError,
+    EntityNotFoundError,
+    EntityWriteError,
 )
 
 # Formatting (for indexer)
@@ -111,16 +121,21 @@ from solstone.think.entities.relationships import (
 
 # Entity saving
 from solstone.think.entities.saving import (
+    add_entity_aka,
+    attach_or_reactivate_entity,
+    delete_detected_entity,
+    detach_facet_entity,
     save_detected_entity,
     save_entities,
     update_detected_entity,
+    update_facet_entity_description,
+    update_facet_entity_identity,
 )
 from solstone.think.entities.voiceprints import (
     load_entity_voiceprints_file,
     load_existing_voiceprint_keys,
     normalize_embedding,
     save_voiceprints_batch,
-    save_voiceprints_safely,
     voiceprint_file_path,
 )
 
@@ -130,11 +145,18 @@ __all__ = [
     "ENTITY_TYPES",
     "MAX_ENTITY_SLUG_LENGTH",
     "EntityDict",
-    "atomic_write",
+    "entity_last_active_day",
     "entity_last_active_ts",
+    "last_active_day_for_ts",
     "entity_slug",
     "get_identity_names",
     "is_valid_entity_type",
+    # Errors
+    "AkaConflictError",
+    "EntityBlockedError",
+    "EntityExistsError",
+    "EntityNotFoundError",
+    "EntityWriteError",
     # Journal
     "block_journal_entity",
     "create_journal_entity",
@@ -168,10 +190,15 @@ __all__ = [
     "merge_entity",
     "parse_entity_file",
     # Saving
+    "add_entity_aka",
+    "attach_or_reactivate_entity",
+    "delete_detected_entity",
+    "detach_facet_entity",
     "save_detected_entity",
     "save_entities",
     "save_voiceprints_batch",
-    "save_voiceprints_safely",
+    "update_facet_entity_description",
+    "update_facet_entity_identity",
     "update_detected_entity",
     "voiceprint_file_path",
     # Matching

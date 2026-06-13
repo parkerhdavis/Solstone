@@ -14,7 +14,7 @@ export TMPDIR := /var/tmp
 PYTEST_BASETEMP_INIT := BASETEMP=$$(mktemp -d /var/tmp/solstone-pytest-XXXXXX); trap 'rm -rf "$$BASETEMP"' EXIT INT TERM;
 PYTEST_BASETEMP_FLAG := --basetemp "$$BASETEMP"
 
-.PHONY: install uninstall test test-cov test-app test-only format format-check install-checks ci clean clean-install coverage watch versions update update-prices preflight pre-commit skills dev all sandbox sandbox-stop install-pinchtab install-models parakeet-helper parakeet-helper-clean wheel-macos wheel-macos-clean verify-browser update-browser-baselines review verify verify-api update-api-baselines service-logs check-layer-hygiene smoke-cogitate release release-test FORCE
+.PHONY: install uninstall test test-cov test-app test-only format format-check install-checks ci clean clean-install coverage watch versions update update-prices preflight pre-commit skills dev all sandbox sandbox-stop install-models parakeet-helper parakeet-helper-clean wheel-macos wheel-macos-clean verify verify-api update-api-baselines service-logs check-layer-hygiene check-api-conventions check-journal-io-access check-journal-io-mechanic check-call-http-only check-tools-http-only check-cogitate-prompts smoke-cogitate release release-test FORCE
 
 # Default target - install package in editable mode
 all: install
@@ -127,6 +127,7 @@ preflight:
 
 # Setup skill symlinks
 skills:
+	@$(VENV_BIN)/sol skills build
 	@$(VENV_BIN)/sol skills install --project journal --agent all
 
 # Start local dev stack against fixture journal (no observers, no daily processing)
@@ -241,15 +242,6 @@ update-api-baselines: .installed
 	fi
 
 
-# Install pinchtab browser automation tool
-install-pinchtab:
-	@if command -v pinchtab >/dev/null 2>&1; then \
-		echo "pinchtab already installed: $$(pinchtab --version 2>/dev/null || echo 'unknown')"; \
-	else \
-		echo "Installing pinchtab..."; \
-		curl -fsSL https://pinchtab.com/install.sh | bash; \
-	fi
-
 # Install and verify local ML models
 install-models:
 	@test -x "$(VENV_BIN)/sol" || { echo "missing $(VENV_BIN)/sol; run make install first" >&2; exit 1; }
@@ -278,6 +270,7 @@ wheel-macos: parakeet-helper
 	mkdir -p solstone/observe/transcribe/parakeet_helper/_bin
 	cp solstone/observe/transcribe/parakeet_helper/.build/release/parakeet-helper solstone/observe/transcribe/parakeet_helper/_bin/parakeet-helper
 	@echo "==> building macosx_14_0_arm64 platform wheel"
+	rm -rf build/ *.egg-info/
 	$(UV) build --wheel -C--build-option=--plat-name=macosx_14_0_arm64
 else
 wheel-macos:
@@ -289,72 +282,6 @@ endif
 wheel-macos-clean:
 	rm -rf solstone/observe/transcribe/parakeet_helper/_bin
 
-# Run browser scenarios against sandbox
-verify-browser: .installed
-	@echo "Running browser scenarios (sandbox)..."
-	@$(MAKE) sandbox
-	@SANDBOX_JOURNAL=$$(cat .sandbox.journal); \
-	CONVEY_PORT=$$(cat "$$SANDBOX_JOURNAL/health/convey.port"); \
-	RESULT=0; \
-	$(VENV_BIN)/python tests/verify_browser.py verify --base-url "http://localhost:$$CONVEY_PORT" || RESULT=$$?; \
-	$(MAKE) sandbox-stop; \
-	exit $$RESULT
-
-# Re-capture all browser baseline screenshots
-update-browser-baselines: .installed
-	@echo "Updating browser baselines (sandbox)..."
-	@$(MAKE) sandbox
-	@SANDBOX_JOURNAL=$$(cat .sandbox.journal); \
-	CONVEY_PORT=$$(cat "$$SANDBOX_JOURNAL/health/convey.port"); \
-	RESULT=0; \
-	$(VENV_BIN)/python tests/verify_browser.py update --base-url "http://localhost:$$CONVEY_PORT" || RESULT=$$?; \
-	$(MAKE) sandbox-stop; \
-	exit $$RESULT
-
-# Full product verification: API baselines + browser scenarios
-review: .installed
-	@command -v pinchtab >/dev/null 2>&1 || { \
-		echo "pinchtab is required for browser verification."; \
-		echo "Run 'make install-pinchtab' to install it."; \
-		exit 1; \
-	}
-	@echo "=== Starting review ==="
-	@$(MAKE) sandbox
-	@SANDBOX_JOURNAL=$$(cat .sandbox.journal); \
-	CONVEY_PORT=$$(cat "$$SANDBOX_JOURNAL/health/convey.port"); \
-	BASE_URL="http://localhost:$$CONVEY_PORT"; \
-	RESULT_API=0; \
-	RESULT_BROWSER=0; \
-	SOLSTONE_JOURNAL="$$SANDBOX_JOURNAL" $(VENV_BIN)/journal indexer --rescan-full > /dev/null; \
-	echo ""; \
-	echo "=== API baseline verification ==="; \
-	SOLSTONE_JOURNAL="$$SANDBOX_JOURNAL" $(VENV_BIN)/python tests/verify_api.py verify --base-url "$$BASE_URL" || RESULT_API=$$?; \
-	echo ""; \
-	echo "=== Browser scenario verification ==="; \
-	$(VENV_BIN)/python tests/verify_browser.py verify --base-url "$$BASE_URL" || RESULT_BROWSER=$$?; \
-	echo ""; \
-	echo "=== Stopping sandbox ==="; \
-	$(MAKE) sandbox-stop; \
-	echo ""; \
-	echo "=== Review Summary ==="; \
-	if [ $$RESULT_API -eq 0 ]; then \
-		echo "  API:     PASS"; \
-	else \
-		echo "  API:     FAIL"; \
-	fi; \
-	if [ $$RESULT_BROWSER -eq 0 ]; then \
-		echo "  Browser: PASS"; \
-	else \
-		echo "  Browser: FAIL"; \
-	fi; \
-	echo ""; \
-	if [ $$RESULT_API -eq 0 ] && [ $$RESULT_BROWSER -eq 0 ]; then \
-		echo "Review: ALL PASS"; \
-	else \
-		echo "Review: FAIL"; \
-		exit 1; \
-	fi
-
 # Test environment - use fixtures journal for all tests
 TEST_ENV = SOLSTONE_JOURNAL=tests/fixtures/journal
 
@@ -363,21 +290,26 @@ PYTEST := $(VENV_BIN)/pytest
 RUFF := $(VENV_BIN)/ruff
 MYPY := $(VENV_BIN)/mypy
 
+# Keep the default full-suite fan-out below host saturation; override with
+# `make PYTEST_MAX_WORKERS=16 test` on a dedicated box.
+PYTEST_MAX_WORKERS ?= 8
+PYTEST_XDIST_ARGS := -n auto --maxprocesses $(PYTEST_MAX_WORKERS) --dist loadgroup
+
 # Check formatting without modifying files — gates `make test`
 format-check: .installed
 	@$(RUFF) format --check . || { echo "Run 'make format' to fix formatting"; exit 1; }
 
 # Run all unit tests — core (tests/) + every app (solstone/apps/*/tests/).
-# -n auto --dist loadgroup lives here, not in pyproject addopts, so bare
-# pytest / pytest-watch / IDE runs stay serial.
+# xdist lives here, not in pyproject addopts, so bare pytest / pytest-watch /
+# IDE runs stay serial.
 test: .installed format-check
 	@echo "Running unit tests (core + apps)..."
-	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) tests/ solstone/apps/ -q -n auto --dist loadgroup
+	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) tests/ solstone/apps/ -q $(PYTEST_XDIST_ARGS)
 
 # Same suite with full-repo coverage (used by ci/verify)
 test-cov: .installed format-check
 	@echo "Running unit tests with coverage (core + apps)..."
-	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) tests/ solstone/apps/ -q --cov=. -n auto --dist loadgroup
+	$(PYTEST_BASETEMP_INIT) $(TEST_ENV) $(PYTEST) $(PYTEST_BASETEMP_FLAG) tests/ solstone/apps/ -q --cov=. $(PYTEST_XDIST_ARGS)
 
 # Run a single app's tests
 test-app: .installed
@@ -454,6 +386,27 @@ install-checks: .installed
 	@echo "=== Running layer-hygiene check ==="
 	@$(MAKE) check-layer-hygiene
 	@echo ""
+	@echo "=== Running API-conventions check ==="
+	@$(MAKE) check-api-conventions
+	@echo ""
+	@echo "=== Running journal-io access check ==="
+	@$(MAKE) check-journal-io-access
+	@echo ""
+	@echo "=== Running journal-io mechanic check ==="
+	@$(MAKE) check-journal-io-mechanic
+	@echo ""
+	@echo "=== Running call-http-only check ==="
+	@$(MAKE) check-call-http-only
+	@echo ""
+	@echo "=== Running tools-http-only check ==="
+	@$(MAKE) check-tools-http-only
+	@echo ""
+	@echo "=== Running cogitate-prompt check ==="
+	@$(MAKE) check-cogitate-prompts
+	@echo ""
+	@echo "=== Checking generated skill references ==="
+	@$(MAKE) check-skill-references
+	@echo ""
 	@echo "=== Checking extras consistency ==="
 	@$(VENV_BIN)/python scripts/check_extras_consistency.py
 	@echo ""
@@ -515,6 +468,34 @@ pre-commit: .installed
 # Low-bar layer-hygiene check (see docs/coding-standards.md § Layer Hygiene)
 check-layer-hygiene: .installed
 	$(VENV_BIN)/python scripts/check_layer_hygiene.py
+
+# HTTP API conventions check (see docs/CONVEY.md § HTTP API conventions)
+check-api-conventions: .installed
+	$(VENV_BIN)/python scripts/check_api_conventions.py
+
+# Journal-io write-primitive access check (see AGENTS.md §7 L2)
+check-journal-io-access: .installed
+	$(VENV_BIN)/python scripts/check_journal_io_access.py
+
+# Journal raw-mechanic check (see AGENTS.md §7 L2)
+check-journal-io-mechanic: .installed
+	$(VENV_BIN)/python scripts/check_journal_io_mechanic.py
+
+# sol call HTTP-only gate (call.py reaches the journal only over HTTP)
+check-call-http-only: .installed
+	$(VENV_BIN)/python scripts/check_call_http_only.py
+
+# Built-in sol call tools HTTP-only gate
+check-tools-http-only: .installed
+	$(VENV_BIN)/python scripts/check_tools_http_only.py
+
+# Cogitate-prompt static gate (prompts use only on-contract command forms)
+check-cogitate-prompts: .installed
+	$(VENV_BIN)/python scripts/check_cogitate_prompts.py
+
+# Generated router skill references gate
+check-skill-references: .installed
+	$(VENV_BIN)/sol skills build --check
 
 # Re-run the live four-backend integrated-façade cogitate smoke. Spawns the
 # archived runner (extro `vpe/workspace/archived/`) against this venv so the

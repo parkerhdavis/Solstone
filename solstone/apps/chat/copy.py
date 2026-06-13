@@ -5,12 +5,15 @@
 
 # fmt: off
 # T1.3 — owner-language talent labels (CMO subagent voice pass, 2026-05-26)
-TALENT_LABEL_EXEC_RUNNING = "Looking in your journal…"
-TALENT_LABEL_EXEC_FINISHED = "Looked in your journal"
-TALENT_LABEL_EXEC_ERRORED = "Couldn't finish looking in your journal"
-TALENT_LABEL_REFLECTION_RUNNING = "Reflecting…"
-TALENT_LABEL_REFLECTION_FINISHED = "Reflected"
-TALENT_LABEL_REFLECTION_ERRORED = "Couldn't finish reflecting"
+TALENT_LABEL_READ_RUNNING = "Reading your journal…"
+TALENT_LABEL_READ_FINISHED = "Read your journal"
+TALENT_LABEL_READ_ERRORED = "Couldn't finish reading your journal"
+TALENT_LABEL_EXEC_RUNNING = "Making that change…"
+TALENT_LABEL_EXEC_FINISHED = "Made the change"
+TALENT_LABEL_EXEC_ERRORED = "Couldn't finish the change"
+TALENT_LABEL_SUPPORT_RUNNING = "Reaching sol pbc…"
+TALENT_LABEL_SUPPORT_FINISHED = "Reached sol pbc"
+TALENT_LABEL_SUPPORT_ERRORED = "Couldn't reach sol pbc"
 
 # T1.4 — queue depth indicators (lowercase "sol" per system-anatomy canon)
 CHAT_QUEUE_INDICATOR_SINGULAR = "1 message waiting"
@@ -18,12 +21,8 @@ CHAT_QUEUE_INDICATOR_PLURAL_FORMAT = "{count} messages waiting"
 CHAT_QUEUE_DEPTH_CAP_MESSAGE = "Give sol a moment to catch up — you have 10 messages waiting."
 
 # T1.1 — liveness placeholder bubble
-CHAT_LIVENESS_THINKING = "Sol is thinking…"
+CHAT_LIVENESS_THINKING = "sol is thinking…"
 CHAT_LIVENESS_TASK_FORMAT = "{label} {task}"
-
-# T1.2 — chat error retry button
-CHAT_ERROR_RETRY_LABEL = "Try again"
-CHAT_ERROR_RETRY_ARIA_FORMAT = "Try again — re-send: {excerpt}"
 
 # T2.2 — closer framing (CPO LOCKED)
 CHAT_CLOSER_LOOP_EXHAUSTED_PREFIX = "Here's what I have so far:"
@@ -34,36 +33,27 @@ CHAT_CLOSER_TALENT_ERRORED_GENERIC = "I couldn't finish that lookup. Want to try
 # T2.4 — thinking summary surfaces (CPO LOCKED)
 CHAT_THINKING_EXPANDER_LABEL = "Show thinking"
 CHAT_THINKING_COLLAPSER_LABEL = "Hide thinking"
+CHAT_ERROR_DETAIL_EXPANDER_LABEL = "Show details"
+CHAT_ERROR_DETAIL_COLLAPSER_LABEL = "Hide details"
 CHAT_THINKING_SETTING_LABEL = "Thinking surfaces"
 CHAT_THINKING_OPT_ON_TAP = "Show on tap"
 CHAT_THINKING_OPT_ALWAYS = "Always show"
 CHAT_THINKING_OPT_NEVER = "Never show"
-CHAT_THINKING_SETTING_HELP = "Sol does some thinking before replying. Choose how much you want to see."
+CHAT_THINKING_SETTING_HELP = "sol does some thinking before replying. Choose how much you want to see."
 # fmt: on
 
 from typing import Literal
 
-_CHAT_ERROR_RETRY_EXCERPT_LIMIT = 60
-
-
-def chat_error_retry_excerpt(text: str) -> str:
-    """Truncate owner text for the retry button aria-label.
-
-    Returns up to 60 source code points; appends U+2026 when truncated.
-    """
-    source = text or ""
-    if len(source) <= _CHAT_ERROR_RETRY_EXCERPT_LIMIT:
-        return source
-    return source[:_CHAT_ERROR_RETRY_EXCERPT_LIMIT] + "…"
-
-
 _TALENT_LABELS: dict[tuple[str, str], str] = {
+    ("read", "running"): TALENT_LABEL_READ_RUNNING,
+    ("read", "finished"): TALENT_LABEL_READ_FINISHED,
+    ("read", "errored"): TALENT_LABEL_READ_ERRORED,
     ("exec", "running"): TALENT_LABEL_EXEC_RUNNING,
     ("exec", "finished"): TALENT_LABEL_EXEC_FINISHED,
     ("exec", "errored"): TALENT_LABEL_EXEC_ERRORED,
-    ("reflection", "running"): TALENT_LABEL_REFLECTION_RUNNING,
-    ("reflection", "finished"): TALENT_LABEL_REFLECTION_FINISHED,
-    ("reflection", "errored"): TALENT_LABEL_REFLECTION_ERRORED,
+    ("support", "running"): TALENT_LABEL_SUPPORT_RUNNING,
+    ("support", "finished"): TALENT_LABEL_SUPPORT_FINISHED,
+    ("support", "errored"): TALENT_LABEL_SUPPORT_ERRORED,
 }
 
 

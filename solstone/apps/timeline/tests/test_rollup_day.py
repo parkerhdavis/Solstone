@@ -8,9 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from typer.testing import CliRunner
-
-from solstone.apps.timeline.call import _rollup_day, app
+from solstone.apps.timeline.maintenance import _rollup_day, run_rollup_day
 from solstone.apps.timeline.tests.conftest import write_json
 from solstone.think.models import GEMINI_FLASH, GEMINI_LITE
 
@@ -30,22 +28,48 @@ def _write_segment(journal, day, segment, title, hour_stream="archon"):
     )
 
 
-def test_rollup_day_help_flag_matrix():
+def test_rollup_day_run_wrapper_routes_args(timeline_journal, monkeypatch):
     """AC#5."""
-    result = CliRunner().invoke(app, ["rollup-day", "--help"])
+    seen = {}
 
-    assert result.exit_code == 0
-    assert "DAY" in result.output
-    for flag in ("--top", "--force", "--jobs", "--dry-run"):
-        assert flag in result.output
+    async def fake_rollup(journal, day, top, jobs, dry_run, force):
+        seen.update(
+            {
+                "journal": journal,
+                "day": day,
+                "top": top,
+                "jobs": jobs,
+                "dry_run": dry_run,
+                "force": force,
+            }
+        )
+        return 0
+
+    monkeypatch.setattr("solstone.apps.timeline.maintenance._rollup_day", fake_rollup)
+
+    result = run_rollup_day(
+        ["20260512", "--top", "2", "--jobs", "3", "--dry-run", "--force"]
+    )
+
+    assert result == 0
+    assert seen == {
+        "journal": timeline_journal,
+        "day": DAY,
+        "top": 2,
+        "jobs": 3,
+        "dry_run": True,
+        "force": True,
+    }
 
 
 def test_rollup_day_empty_input_exits_empty_sentinel(timeline_journal):
     from solstone.think.utils import EXIT_EMPTY
 
-    result = CliRunner().invoke(app, ["rollup-day", DAY])
+    result = asyncio.run(
+        _rollup_day(timeline_journal, DAY, top=4, jobs=5, dry_run=False, force=False)
+    )
 
-    assert result.exit_code == EXIT_EMPTY
+    assert result == EXIT_EMPTY
     assert not (timeline_journal / "chronicle" / DAY / "timeline.json").exists()
 
 
@@ -64,16 +88,16 @@ def test_rollup_day_dry_run_no_llm_calls(timeline_journal, mock_agenerate):
 def test_rollup_day_writes_seed_shape(timeline_journal, mock_agenerate):
     """AC#6."""
     for i in range(5):
-        _write_segment(timeline_journal, DAY, f"12000{i}_60", f"Event {i}")
+        title = "Café Event" if i == 0 else f"Event {i}"
+        _write_segment(timeline_journal, DAY, f"12000{i}_60", title)
     mock = mock_agenerate({"picks": [0, 1, 2, 3], "rationale": "highest consequence"})
 
     asyncio.run(
         _rollup_day(timeline_journal, DAY, top=4, jobs=5, dry_run=False, force=False)
     )
 
-    payload = json.loads(
-        (timeline_journal / "chronicle" / DAY / "timeline.json").read_text()
-    )
+    timeline_path = timeline_journal / "chronicle" / DAY / "timeline.json"
+    payload = json.loads(timeline_path.read_text())
     assert payload["day"] == DAY
     assert payload["model"] == GEMINI_FLASH
     assert payload["segment_count"] == 5
@@ -81,6 +105,10 @@ def test_rollup_day_writes_seed_shape(timeline_journal, mock_agenerate):
     assert len(payload["day_top"]) == 4
     assert payload["hours"]["12"]["rationale"] == "highest consequence"
     assert mock.call_args.kwargs["model"] == GEMINI_FLASH
+    raw = timeline_path.read_bytes()
+    assert b"Caf\xc3\xa9 Event" in raw
+    assert b"\\u00e9" not in raw
+    assert raw.endswith(b"\n")
 
 
 def test_rollup_day_skip_when_exists_without_force(timeline_journal, mock_agenerate):
@@ -161,5 +189,5 @@ def test_rollup_day_final_error_skips_write_exits_zero(
         _rollup_day(timeline_journal, DAY, top=1, jobs=5, dry_run=False, force=False)
     )
 
-    assert result is None
+    assert result == 0
     assert not (timeline_journal / "chronicle" / DAY / "timeline.json").exists()

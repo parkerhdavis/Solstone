@@ -14,10 +14,11 @@ import pprint
 import re
 import threading
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from flask import Blueprint, jsonify, request
 
@@ -36,12 +37,14 @@ from solstone.convey.chat_stream import (
 from solstone.convey.reasons import (
     AGENT_UNAVAILABLE,
     CHAT_QUEUE_FULL,
+    INVALID_REQUEST_VALUE,
     MISSING_REQUIRED_FIELD,
     TALENT_NOT_FOUND,
 )
 from solstone.convey.sol_initiated import (
     record_owner_chat_dismissed,
     record_owner_chat_open,
+    start_chat,
 )
 from solstone.convey.sol_initiated.copy import KIND_SOL_CHAT_REQUEST, SURFACE_CONVEY
 from solstone.convey.utils import error_response
@@ -137,6 +140,7 @@ def post_chat() -> Any:
         "type": "owner_message",
         "message": message,
     }
+    outbound_approval = uuid4().hex
 
     with _state_lock:
         if _current_chat_use_id is not None and len(_queued_triggers) >= 10:
@@ -148,11 +152,20 @@ def post_chat() -> Any:
     with _state_lock:
         if _current_chat_use_id is None:
             logical_use_id = _reserve_use_id_locked()
-            start_info = _activate_current_locked(logical_use_id, trigger, location)
+            start_info = _activate_current_locked(
+                logical_use_id,
+                trigger,
+                location,
+                outbound_approval=outbound_approval,
+            )
             queued = False
             response_use_id = logical_use_id
         else:
-            response_use_id = _enqueue_trigger_locked(trigger, location)
+            response_use_id = _enqueue_trigger_locked(
+                trigger,
+                location,
+                outbound_approval=outbound_approval,
+            )
             queued = True
 
     if start_info is not None:
@@ -180,6 +193,25 @@ def sol_chat_request_open() -> Any:
         return error_response(MISSING_REQUIRED_FIELD, detail="request_id required")
     record_owner_chat_open(request_id, surface=SURFACE_CONVEY)
     return jsonify({"ok": True})
+
+
+@chat_bp.route("/start", methods=["POST"])
+def chat_start_request() -> Any:
+    """Start a sol-initiated chat request (CLI dispatch over start_chat)."""
+    payload = request.get_json(force=True, silent=True) or {}
+    try:
+        result = start_chat(
+            summary=payload.get("summary", ""),
+            message=payload.get("message"),
+            category=payload.get("category", ""),
+            dedupe=payload.get("dedupe", ""),
+            dedupe_window=payload.get("dedupe_window"),
+            since_ts=payload.get("since_ts", 0),
+            trigger_talent=payload.get("trigger_talent", ""),
+        )
+    except ValueError as exc:
+        return error_response(INVALID_REQUEST_VALUE, detail=str(exc))
+    return jsonify(asdict(result))
 
 
 @chat_bp.route(f"/{KIND_SOL_CHAT_REQUEST}/dismissed", methods=["POST"])
@@ -470,6 +502,9 @@ def _on_cortex_finish(message: dict[str, Any]) -> None:
                             "task": requested_task,
                             "context": parsed["talent_request"].get("context") or {},
                             "location": dict(_current_chat_state["location"]),
+                            "outbound_approval": _current_chat_state.get(
+                                "outbound_approval"
+                            ),
                         }
                 else:
                     if not message_text:
@@ -694,6 +729,12 @@ def _spawn_chat_generate(action: dict[str, Any]) -> ChatSpawnResult:
     return ChatSpawnResult(ok=True)
 
 
+DISPATCH_SPAWN_NAMES = {
+    # App talents spawn under "app:talent"; dispatch vocabulary stays bare.
+    "support": "support:support",
+}
+
+
 def _spawn_talent(action: dict[str, Any]) -> bool:
     from solstone.convey.utils import spawn_agent
 
@@ -708,11 +749,13 @@ def _spawn_talent(action: dict[str, Any]) -> bool:
         "path": action["location"]["path"],
         "facet": action["location"]["facet"],
         "chat_parent_use_id": action["logical_use_id"],
+        "outbound_approval": action.get("outbound_approval"),
     }
+    spawn_name = DISPATCH_SPAWN_NAMES.get(action["target"], action["target"])
     try:
         use_id = spawn_agent(
             prompt=prompt,
-            name=action["target"],
+            name=spawn_name,
             provider=None,
             config=config,
             use_id=action["use_id"],
@@ -857,6 +900,7 @@ def _recover_chat_if_needed() -> None:
         location = _location_for_trigger(day, unresolved)
         logical_use_id = _reserve_use_id_locked()
         trigger = _trigger_from_stream_event(unresolved)
+        # Recovered triggers are disk-derived and intentionally carry no approval.
         start_info = _activate_current_locked(logical_use_id, trigger, location)
 
     if start_info is not None:
@@ -873,6 +917,7 @@ def _activate_current_locked(
     logical_use_id: str,
     trigger: dict[str, Any],
     location: dict[str, str],
+    outbound_approval: str | None = None,
 ) -> dict[str, Any]:
     global _current_chat_use_id, _current_chat_state
 
@@ -884,6 +929,7 @@ def _activate_current_locked(
         "trigger": dict(trigger),
         "location": dict(location),
         "retry_count": 0,
+        "outbound_approval": outbound_approval,
     }
     _set_current_raw_use_locked(logical_use_id, raw_use_id)
     return _build_spawn_info_locked(logical_use_id)
@@ -900,11 +946,16 @@ def _build_spawn_info_locked(logical_use_id: str) -> dict[str, Any]:
     }
 
 
-def _enqueue_trigger_locked(trigger: dict[str, Any], location: dict[str, str]) -> str:
+def _enqueue_trigger_locked(
+    trigger: dict[str, Any],
+    location: dict[str, str],
+    outbound_approval: str | None = None,
+) -> str:
     queued = {
         "use_id": _reserve_use_id_locked(),
         "trigger": dict(trigger),
         "location": dict(location),
+        "outbound_approval": outbound_approval,
     }
     _queued_triggers.append(queued)
     append_chat_event("chat_queue_depth", depth=len(_queued_triggers))
@@ -931,6 +982,7 @@ def _clear_current_locked() -> dict[str, Any] | None:
         str(queued["use_id"]),
         dict(queued["trigger"]),
         dict(queued["location"]),
+        outbound_approval=queued.get("outbound_approval"),
     )
 
 
@@ -1127,16 +1179,22 @@ def _active_talent_count_for_today_locked() -> int:
 
 # target field — accepted aliases → canonical
 TARGET_ALIASES = {
+    "read": "read",
+    "Read": "read",
+    "READ": "read",
     "exec": "exec",
     "execute": "exec",
     "Exec": "exec",
     "EXEC": "exec",
-    "reflection": "reflection",
-    "Reflection": "reflection",
-    "REFLECTION": "reflection",
-    "reflect": "reflection",
+    "support": "support",
+    "Support": "support",
+    "SUPPORT": "support",
+    "reflection": "read",
+    "Reflection": "read",
+    "REFLECTION": "read",
+    "reflect": "read",
 }
-# Values outside this set still raise ValueError.
+# Values outside read/exec/support still raise ValueError.
 
 # LOCKED — see scope doc.
 # Spec amendment required to expand. No fuzzy matching, no LLM classification.
@@ -1175,7 +1233,7 @@ CLOSER_STRIP_PATTERNS = {
 #   1044 message non-string/non-null : keep      — field-type contract.
 #   1050 talent_request non-dict/null: keep      — spec call-out: keep strict.
 #   1053 target non-string           : keep      — aliases apply only after type check.
-#   1055 target unknown              : coerce    — TARGET_ALIASES, then raise if unresolved.
+#   1055 target unknown              : coerce    — TARGET_ALIASES, then raise if unresolved outside read/exec/support.
 #   1058 task non-empty              : coerce    — strip whitespace; empty-after-strip raises.
 #   1079 context odd shape           : ratified  — d03aa3ad shipped prose fallback; no new behavior.
 # Sibling sweep: chat_stream.py ValueErrors guard the state↔disk JSONL/path seam, out of scope.
@@ -1215,7 +1273,7 @@ def _parse_chat_result(result: Any, use_id: str | None = None) -> dict[str, Any]
             target,
             use_id,
         )
-    if target not in {"exec", "reflection"}:
+    if target not in {"read", "exec", "support"}:
         raise ValueError(f"unknown talent target: {target}")
     task = talent_request.get("task")
     if not isinstance(task, str):

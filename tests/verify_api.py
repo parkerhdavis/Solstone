@@ -111,13 +111,6 @@ ENDPOINTS = [
         "params": {"facet": "work"},
         "status": 200,
     },
-    {
-        "app": "activities",
-        "name": "screen-files",
-        "path": "/app/activities/api/screen_files/20260304",
-        "params": {},
-        "status": 200,
-    },
     # apps/entities/routes.py
     {
         "app": "entities",
@@ -323,28 +316,6 @@ ENDPOINTS = [
         "params": {},
         "status": 200,
     },
-    # apps/todos/routes.py
-    {
-        "app": "todos",
-        "name": "badge-count",
-        "path": "/app/todos/api/badge-count",
-        "params": {},
-        "status": 200,
-    },
-    {
-        "app": "todos",
-        "name": "nudges",
-        "path": "/app/todos/api/nudges",
-        "params": {},
-        "status": 200,
-    },
-    {
-        "app": "todos",
-        "name": "stats-month",
-        "path": "/app/todos/api/stats/202603",
-        "params": {},
-        "status": 200,
-    },
     # apps/tokens/routes.py
     {
         "app": "tokens",
@@ -487,6 +458,7 @@ def normalize(data: Any, journal_path: str) -> Any:
                                 if i
                                 in {
                                     "binary_missing",
+                                    "gpu_unavailable",
                                     "model_missing",
                                     "ram_insufficient",
                                     "server_unhealthy",
@@ -539,6 +511,10 @@ def normalize_for_compare(
             # them so the baseline stays portable across machines.
             normalized.pop("runtime_label", None)
             normalized.pop("hardware", None)
+            resource = normalized.get("resource")
+            if isinstance(resource, dict):
+                for key in resource:
+                    resource[key] = "<normalized>"
     return normalized
 
 

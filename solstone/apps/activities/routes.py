@@ -4,8 +4,7 @@
 from __future__ import annotations
 
 import calendar
-import os
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -13,23 +12,41 @@ from flask import Blueprint, jsonify, redirect, render_template, request, url_fo
 
 from solstone.convey import state
 from solstone.convey.reasons import (
+    ACTIVITIES_BUSY,
+    ACTIVITY_ALREADY_EXISTS,
+    ACTIVITY_INVALID,
+    ACTIVITY_NOT_FOUND,
     FILE_NOT_FOUND,
     FILE_READ_FAILED,
     INVALID_DAY,
     INVALID_MONTH,
     INVALID_PATH,
 )
-from solstone.convey.utils import DATE_RE, error_response, format_date
-from solstone.observe.utils import VIDEO_EXTENSIONS
+from solstone.convey.utils import (
+    DATE_RE,
+    error_response,
+    format_date,
+    respond_collection,
+)
 from solstone.think.activities import (
+    append_activity_record,
+    append_edit,
     estimate_duration_minutes,
+    format_activities,
     get_activity_by_id,
+    get_activity_record,
     get_default_activity_by_id,
     load_activity_records,
+    make_activity_id,
+    mute_activity_record,
+    unmute_activity_record,
+    update_activity_record,
 )
-from solstone.think.facets import get_facets
-from solstone.think.utils import day_path, iter_segments, segment_parse
-from solstone.think.utils import segment_path as get_segment_path
+from solstone.think.entities.loading import load_entities
+from solstone.think.entities.matching import find_matching_entity
+from solstone.think.facets import get_facets, log_call_action
+from solstone.think.journal_io import LockTimeout
+from solstone.think.utils import now_ms, segment_parse
 
 activities_bp = Blueprint(
     "app:activities",
@@ -98,6 +115,210 @@ def activities_stats(month: str) -> Any:
             INVALID_MONTH,
             detail="Invalid month format, expected YYYYMM",
         )
+
+
+def _record_payload(record: dict[str, Any]) -> dict[str, Any]:
+    chunks, _meta = format_activities([record])
+    return {"record": record, "markdown": chunks[0]["markdown"]}
+
+
+def _resolve_participation_entity_ids(
+    entries: list[dict[str, Any]], *, facet: str, day: str
+) -> list[dict[str, Any]]:
+    entities_list = load_entities(facet=facet, day=day)
+
+    resolved_entries = []
+    for entry in entries:
+        resolved = dict(entry)
+        match = find_matching_entity(resolved["name"], entities_list)
+        resolved["entity_id"] = match.get("id") if match else None
+        resolved_entries.append(resolved)
+
+    return resolved_entries
+
+
+@activities_bp.route("/api/day/<day>/records")
+def activities_day_records(day: str) -> Any:
+    """Return CLI-facing activity records plus per-record markdown."""
+    facet_filter = request.args.get("facet")
+    include_hidden = request.args.get("include_hidden") == "1"
+    facet_names = [facet_filter] if facet_filter else list(get_facets().keys())
+
+    items = []
+    for facet in facet_names:
+        for record in load_activity_records(facet, day, include_hidden=include_hidden):
+            rec = {**record, "facet": facet, "day": day}
+            items.append(_record_payload(rec))
+    return jsonify({"items": items})
+
+
+@activities_bp.route("/api/day/<day>/record/<span_id>")
+def activities_get_record(day: str, span_id: str) -> Any:
+    """Return one CLI-facing activity record plus markdown."""
+    facet = request.args.get("facet") or ""
+    record = get_activity_record(facet, day, span_id)
+    if record is None:
+        return error_response(ACTIVITY_NOT_FOUND, detail=span_id)
+    return jsonify(_record_payload(record))
+
+
+@activities_bp.route("/api/day/<day>/records", methods=["POST"])
+def activities_create_record(day: str) -> Any:
+    """Create one CLI-facing activity record."""
+    facet = request.args.get("facet") or ""
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        body = {}
+
+    title = str(body.get("title") or "").strip()
+    source = str(body.get("source") or "user")
+    if not title:
+        return error_response(ACTIVITY_INVALID, detail="title must not be empty")
+    if source not in {"user", "cogitate"}:
+        return error_response(
+            ACTIVITY_INVALID, detail="source must be 'user' or 'cogitate'"
+        )
+
+    activity_type = str(body.get("activity") or "").strip()
+    if not get_activity_by_id(facet, activity_type):
+        return error_response(ACTIVITY_NOT_FOUND, detail=activity_type)
+
+    if "since_segment" in body and body["since_segment"] is not None:
+        anchor = str(body["since_segment"])
+        segments = [anchor]
+    else:
+        anchor = f"user_{now_ms()}"
+        segments = []
+
+    description = str(body.get("description") or title).strip() or title
+    details = str(body.get("details") or "")
+    participation_provided = "participation" in body
+    participation: list[dict[str, Any]] = []
+    if participation_provided:
+        raw_participation = body.get("participation")
+        participation = raw_participation if isinstance(raw_participation, list) else []
+        participation = _resolve_participation_entity_ids(
+            participation, facet=facet, day=day
+        )
+
+    actor = "cogitate:activities" if source == "cogitate" else "cli:create"
+    span_id = make_activity_id(activity_type, anchor)
+    record: dict[str, Any] = {
+        "id": span_id,
+        "activity": activity_type,
+        "title": title,
+        "description": description,
+        "details": details,
+        "segments": segments,
+        "active_entities": [],
+        "created_at": now_ms(),
+        "source": source,
+        "hidden": False,
+        "edits": [],
+    }
+    if participation_provided:
+        record["participation"] = participation
+
+    edit_fields = ["activity", "title", "description", "details", "source"]
+    if participation_provided:
+        edit_fields.append("participation")
+
+    record = append_edit(
+        record,
+        actor=actor,
+        fields=edit_fields,
+        note="created",
+    )
+
+    try:
+        created = append_activity_record(facet, day, record)
+    except LockTimeout:
+        return error_response(ACTIVITIES_BUSY)
+
+    if not created:
+        return error_response(ACTIVITY_ALREADY_EXISTS, detail=span_id)
+
+    log_call_action(
+        facet=facet,
+        action="activity_create",
+        params={"id": span_id, "activity": activity_type, "source": source},
+        day=day,
+    )
+    return jsonify(_record_payload(record))
+
+
+@activities_bp.route("/api/day/<day>/record/<span_id>/update", methods=["POST"])
+def activities_update_record(day: str, span_id: str) -> Any:
+    """Update one CLI-facing activity record."""
+    facet = request.args.get("facet") or ""
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        body = {}
+    patch = body.get("patch")
+    note = body.get("note")
+    patch = patch if isinstance(patch, dict) else {}
+    note = str(note or "")
+
+    try:
+        updated = update_activity_record(
+            facet,
+            day,
+            span_id,
+            patch,
+            actor="cli:update",
+            note=note,
+        )
+    except LockTimeout:
+        return error_response(ACTIVITIES_BUSY)
+    if updated is None:
+        return error_response(ACTIVITY_NOT_FOUND, detail=span_id)
+
+    log_call_action(
+        facet=facet,
+        action="activity_update",
+        params={"id": span_id, "fields": sorted(patch)},
+        day=day,
+    )
+    return jsonify(_record_payload(updated))
+
+
+def _set_record_muted(day: str, span_id: str, *, hidden: bool) -> Any:
+    facet = request.args.get("facet") or ""
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        body = {}
+    raw_reason = body.get("reason")
+    reason = raw_reason if isinstance(raw_reason, str) else None
+    actor = "cli:mute" if hidden else "cli:unmute"
+    action = "activity_mute" if hidden else "activity_unmute"
+    mutator = mute_activity_record if hidden else unmute_activity_record
+
+    try:
+        record = mutator(facet, day, span_id, actor=actor, reason=reason)
+    except LockTimeout:
+        return error_response(ACTIVITIES_BUSY)
+    if record is None:
+        return error_response(ACTIVITY_NOT_FOUND, detail=span_id)
+
+    log_call_action(
+        facet=facet,
+        action=action,
+        params={"id": span_id, "reason": reason},
+        day=day,
+    )
+    return jsonify(_record_payload(record))
+
+
+@activities_bp.route("/api/day/<day>/record/<span_id>/mute", methods=["POST"])
+def activities_mute_record(day: str, span_id: str) -> Any:
+    """Mute one CLI-facing activity record."""
+    return _set_record_muted(day, span_id, hidden=True)
+
+
+@activities_bp.route("/api/day/<day>/record/<span_id>/unmute", methods=["POST"])
+def activities_unmute_record(day: str, span_id: str) -> Any:
+    """Unmute one CLI-facing activity record."""
+    return _set_record_muted(day, span_id, hidden=False)
 
 
 def _enrich_activity_record(
@@ -191,7 +412,7 @@ def activities_day_activities(day: str) -> Any:
     Returns enriched activity records: timing comes from ``start``/``end`` for
     anticipated records and from segment keys for realized records.
 
-    Returns JSON array of activity objects.
+    Returns JSON collection envelope of activity objects.
     """
     if not DATE_RE.fullmatch(day):
         return error_response(INVALID_DAY, detail="Invalid day format")
@@ -213,7 +434,7 @@ def activities_day_activities(day: str) -> Any:
 
     # Sort by start time (activities without times go last)
     enriched_records.sort(key=lambda a: a.get("startTime", "z"))
-    return jsonify(enriched_records)
+    return respond_collection(enriched_records)
 
 
 @activities_bp.route("/api/activity_output/<path:filename>")
@@ -246,265 +467,3 @@ def activities_activity_output(filename: str) -> Any:
         return error_response(FILE_READ_FAILED, detail="Could not read file")
 
     return jsonify(content=content, format=fmt, filename=file_path.name)
-
-
-# ============================================================================
-# DEVELOPER DEBUG VIEWS - Screen JSONL Viewer
-# These routes are for debugging screen.jsonl files and can be removed when
-# no longer needed. Look for _dev_ prefix to identify all related code.
-# ============================================================================
-
-# In-memory cache for decoded frames: {(day, timestamp): {frame_id: jpeg_bytes}}
-_frame_cache: dict = {}
-
-
-@activities_bp.route("/<day>/screens")
-def _dev_activities_screens_list(day: str) -> str:
-    """Render list of screen.jsonl files for a specific day."""
-    if not DATE_RE.fullmatch(day):
-        return "", 404
-
-    day_dir = str(day_path(day))
-    if not os.path.isdir(day_dir):
-        return "", 404
-
-    title = format_date(day)
-
-    return render_template(
-        "app.html",
-        view="_dev_screens_list",
-        title=title,
-    )
-
-
-@activities_bp.route("/<day>/screens/<stream>/<timestamp>")
-@activities_bp.route("/<day>/screens/<stream>/<timestamp>/<filename>")
-def _dev_activities_screens_detail(
-    day: str, stream: str, timestamp: str, filename: str = "screen.jsonl"
-) -> str:
-    """Render detail view for a specific screen.jsonl file."""
-    if not DATE_RE.fullmatch(day):
-        return "", 404
-    from solstone.think.utils import segment_key
-
-    if not segment_key(timestamp):
-        return "", 404
-
-    # Validate filename matches *screen.jsonl pattern
-    if not filename.endswith("screen.jsonl"):
-        return "", 404
-
-    day_dir = str(day_path(day))
-    if not os.path.isdir(day_dir):
-        return "", 404
-
-    # Check if the screen.jsonl file exists in segment
-    segment_dir = str(get_segment_path(day, timestamp, stream, create=False))
-    jsonl_path = os.path.join(segment_dir, filename)
-    if not os.path.isfile(jsonl_path):
-        return "", 404
-
-    title = format_date(day)
-
-    return render_template(
-        "app.html",
-        view="_dev_screens_detail",
-        title=title,
-        stream=stream,
-        timestamp=timestamp,
-        filename=filename,
-    )
-
-
-@activities_bp.route("/api/screen_files/<day>")
-def _dev_screen_files(day: str) -> Any:
-    """Return list of *screen.jsonl files for a day."""
-    if not DATE_RE.fullmatch(day):
-        return "", 404
-
-    day_dir = str(day_path(day))
-    if not os.path.isdir(day_dir):
-        return jsonify({"files": []})
-
-    from glob import glob
-
-    files = []
-    # Look for segments across all streams
-    for s_stream, s_key, s_path in iter_segments(day):
-        # Found segment, check for *screen.jsonl files
-        screen_files = glob(os.path.join(str(s_path), "*screen.jsonl"))
-        for jsonl_path in sorted(screen_files):
-            filename = os.path.basename(jsonl_path)
-            timestamp = s_key
-
-            # Count frames (excluding header line)
-            frame_count = 0
-            file_size = 0
-            try:
-                file_size = os.path.getsize(jsonl_path)
-                with open(jsonl_path, "r", encoding="utf-8") as f:
-                    for line_num, line in enumerate(f, 1):
-                        if line_num > 1:  # Skip header
-                            frame_count += 1
-            except Exception:
-                continue
-
-            # Format timestamp as human-readable time
-            try:
-                time_obj = datetime.strptime(timestamp[:6], "%H%M%S")
-                human_time = time_obj.strftime("%I:%M:%S %p").lstrip("0")
-            except Exception:
-                human_time = timestamp
-
-            files.append(
-                {
-                    "stream": s_stream,
-                    "timestamp": timestamp,
-                    "filename": filename,
-                    "human_time": human_time,
-                    "frame_count": frame_count,
-                    "file_size": file_size,
-                }
-            )
-
-    return jsonify({"files": files})
-
-
-@activities_bp.route("/api/screen_frames/<day>/<stream>/<timestamp>")
-@activities_bp.route("/api/screen_frames/<day>/<stream>/<timestamp>/<filename>")
-def _dev_screen_frames(
-    day: str, stream: str, timestamp: str, filename: str = "screen.jsonl"
-) -> Any:
-    """Return all frame records and pre-cache decoded frames from video."""
-    if not DATE_RE.fullmatch(day):
-        return "", 404
-    from solstone.think.utils import segment_key
-
-    if not segment_key(timestamp):
-        return "", 404
-
-    # Validate filename matches *screen.jsonl pattern
-    if not filename.endswith("screen.jsonl"):
-        return "", 404
-
-    segment_dir = str(get_segment_path(day, timestamp, stream, create=False))
-    jsonl_path = os.path.join(segment_dir, filename)
-
-    if not os.path.isfile(jsonl_path):
-        return "", 404
-
-    try:
-        from solstone.observe.see import decode_frames, image_to_jpeg_bytes
-        from solstone.observe.utils import load_analysis_frames
-
-        all_frames = load_analysis_frames(jsonl_path)
-
-        # The first line is a header with only {"raw": "path"}, filter it out
-        # Real frames have frame_id field
-        frames = [f for f in all_frames if "frame_id" in f]
-
-        # Extract raw video path from header (first item if it only has "raw" key)
-        raw_video_path = None
-        if all_frames and "raw" in all_frames[0] and "frame_id" not in all_frames[0]:
-            raw_path = all_frames[0].get("raw")
-            # Validate raw points to a video file (skip if not, e.g. tmux)
-            if raw_path and raw_path.endswith(VIDEO_EXTENSIONS):
-                raw_video_path = raw_path
-
-        # Decode and cache all frames from the video
-        cache_key = (day, stream, timestamp, filename)
-        if cache_key not in _frame_cache and raw_video_path:
-            # Video path is relative to segment directory (e.g., "screen.webm")
-            video_path = os.path.join(segment_dir, raw_video_path)
-            if os.path.isfile(video_path):
-                # Use the new decode_frames utility
-                images = decode_frames(video_path, frames, annotate_boxes=True)
-
-                # Setup ArUco detector for tag overlay
-                import cv2
-                import numpy as np
-                from PIL import ImageDraw
-
-                dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-                params = cv2.aruco.DetectorParameters()
-                params.minMarkerPerimeterRate = 0.002
-                params.maxMarkerPerimeterRate = 8.0
-                params.adaptiveThreshWinSizeMin = 3
-                params.adaptiveThreshWinSizeMax = 23
-                params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
-                aruco_detector = cv2.aruco.ArucoDetector(dictionary, params)
-
-                # Convert images to JPEG bytes and cache
-                _frame_cache[cache_key] = {}
-                for frame, img in zip(frames, images):
-                    if img is not None:
-                        frame_id = frame["frame_id"]
-
-                        # Detect ArUco tags and draw overlays
-                        img_array = np.array(img)
-                        gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-                        corners, ids, _ = aruco_detector.detectMarkers(gray)
-
-                        id_to_corners = {}
-                        if ids is not None:
-                            for cid, pts in zip(ids.flatten().tolist(), corners):
-                                id_to_corners[cid] = pts
-
-                        # Draw black rectangle if all 4 corner tags detected
-                        # Tag IDs: 6=TL, 7=TR, 4=BL, 2=BR
-                        # ArUco corner order: [TL, TR, BR, BL]
-                        corner_tags = {6, 7, 4, 2}
-                        if corner_tags.issubset(id_to_corners.keys()):
-                            draw = ImageDraw.Draw(img)
-                            # Extract outer corners from each tag
-                            tl = id_to_corners[6].reshape(4, 2)[0]  # TL tag, TL corner
-                            tr = id_to_corners[7].reshape(4, 2)[1]  # TR tag, TR corner
-                            br = id_to_corners[2].reshape(4, 2)[2]  # BR tag, BR corner
-                            bl = id_to_corners[4].reshape(4, 2)[3]  # BL tag, BL corner
-                            poly = [tuple(tl), tuple(tr), tuple(br), tuple(bl)]
-                            draw.polygon(poly, fill=(0, 0, 0))
-
-                        jpeg_bytes = image_to_jpeg_bytes(img)
-                        _frame_cache[cache_key][frame_id] = jpeg_bytes
-                        img.close()
-
-        return jsonify({"frames": frames, "raw_video_path": raw_video_path})
-
-    except Exception as e:
-        # PROTOCOL-ONLY: developer debug endpoint, not owner-facing product API.
-        return jsonify({"error": str(e)}), 500
-
-
-@activities_bp.route(
-    "/api/screen_frame_image/<day>/<stream>/<timestamp>/<int:frame_id>"
-)
-def _dev_screen_frame_image(
-    day: str, stream: str, timestamp: str, frame_id: int
-) -> Any:
-    """Serve a cached frame image as JPEG."""
-    if not DATE_RE.fullmatch(day):
-        return "", 404
-    from solstone.think.utils import segment_key
-
-    if not segment_key(timestamp):
-        return "", 404
-
-    try:
-        import io
-
-        from flask import send_file
-
-        # Check cache
-        cache_key = (day, stream, timestamp)
-        if cache_key in _frame_cache and frame_id in _frame_cache[cache_key]:
-            jpeg_bytes = _frame_cache[cache_key][frame_id]
-            buffer = io.BytesIO(jpeg_bytes)
-            buffer.seek(0)
-            return send_file(buffer, mimetype="image/jpeg")
-
-        # PROTOCOL-ONLY: developer debug endpoint, not owner-facing product API.
-        return jsonify({"error": "Frame not cached. Load the frames list first."}), 404
-
-    except Exception as e:
-        # PROTOCOL-ONLY: developer debug endpoint, not owner-facing product API.
-        return jsonify({"error": str(e)}), 500

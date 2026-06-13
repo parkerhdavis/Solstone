@@ -16,10 +16,13 @@ import pytest
 
 from solstone.think.pipeline_health import (
     STUCK_FAIL_THRESHOLD,
+    CompletionsSince,
     TerminalUnit,
     pipeline_status_message,
     read_backlog_view,
+    read_completed_since,
     read_completed_units,
+    read_daily_deterministic_failures,
     read_day_stuck,
     read_terminal_states,
     summarize_pipeline_day,
@@ -264,6 +267,134 @@ def test_read_completed_units_keys_include_facet(pipeline_journal):
     assert read_completed_units(day) == {("daily", "facet_newsletter", "work")}
 
 
+def test_read_daily_deterministic_failures(pipeline_journal):
+    day = "20990216"
+    base = pipeline_journal / "chronicle" / day / "health"
+    _write_jsonl(
+        base / "001_daily.jsonl",
+        [
+            {
+                "event": "talent.fail",
+                "ts": 1,
+                "mode": "daily",
+                "name": "alpha",
+                "reason_code": "max_turns_exhausted",
+            },
+            {
+                "event": "talent.fail",
+                "ts": 2,
+                "mode": "daily",
+                "name": "alpha",
+                "reason_code": "max_turns_exhausted",
+            },
+            {
+                "event": "talent.fail",
+                "ts": 1,
+                "mode": "daily",
+                "name": "single",
+                "reason_code": "context_window_exceeded",
+            },
+            {
+                "event": "talent.fail",
+                "ts": 1,
+                "mode": "daily",
+                "name": "completed",
+                "reason_code": "no_output",
+            },
+            {
+                "event": "talent.fail",
+                "ts": 2,
+                "mode": "daily",
+                "name": "completed",
+                "reason_code": "no_output",
+            },
+            {
+                "event": "talent.complete",
+                "ts": 3,
+                "mode": "daily",
+                "name": "completed",
+            },
+            {
+                "event": "talent.fail",
+                "ts": 1,
+                "mode": "daily",
+                "name": "transient",
+                "reason_code": "no_output",
+            },
+            {
+                "event": "talent.fail",
+                "ts": 2,
+                "mode": "daily",
+                "name": "transient",
+                "reason_code": "max_turns_exhausted",
+            },
+            {
+                "event": "talent.fail",
+                "ts": 3,
+                "mode": "daily",
+                "name": "transient",
+                "reason_code": "provider_quota_exceeded",
+            },
+            {
+                "event": "talent.fail",
+                "ts": 1,
+                "mode": "daily",
+                "name": "reset",
+                "reason_code": "no_output",
+            },
+            {
+                "event": "talent.complete",
+                "ts": 2,
+                "mode": "daily",
+                "name": "reset",
+            },
+            {
+                "event": "talent.fail",
+                "ts": 3,
+                "mode": "daily",
+                "name": "reset",
+                "reason_code": "context_window_exceeded",
+            },
+            {
+                "event": "talent.fail",
+                "ts": 1,
+                "mode": "daily",
+                "name": "facet_newsletter",
+                "facet": "work",
+                "reason_code": "max_turns_exhausted",
+            },
+            {
+                "event": "talent.fail",
+                "ts": 2,
+                "mode": "daily",
+                "name": "facet_newsletter",
+                "facet": "work",
+                "reason_code": "max_turns_exhausted",
+            },
+            {
+                "event": "talent.fail",
+                "ts": 1,
+                "mode": "daily",
+                "name": "facet_newsletter",
+                "facet": "personal",
+                "reason_code": "no_output",
+            },
+        ],
+    )
+
+    result = read_daily_deterministic_failures(day)
+
+    assert result[("alpha", None)].count == 2
+    assert result[("alpha", None)].reason_code == "max_turns_exhausted"
+    assert result[("single", None)].count == 1
+    assert ("completed", None) not in result
+    assert ("transient", None) not in result
+    assert result[("reset", None)].count == 1
+    assert result[("reset", None)].reason_code == "context_window_exceeded"
+    assert result[("facet_newsletter", "work")].count == 2
+    assert result[("facet_newsletter", "personal")].count == 1
+
+
 def test_read_completed_units_skips_malformed_records(pipeline_journal):
     day = "20990207"
     path = pipeline_journal / "chronicle" / day / "health" / "001_daily.jsonl"
@@ -330,6 +461,7 @@ def test_read_terminal_states_latest_wins_and_preserves_expanded_keys(
                 "ts": 4,
                 "mode": "daily",
                 "name": "alpha",
+                "reason_code": "provider_quota_exceeded",
                 "provider": "anthropic",
                 "model": "claude-opus-4-1",
             },
@@ -371,6 +503,7 @@ def test_read_terminal_states_latest_wins_and_preserves_expanded_keys(
     assert alpha.latest_ts == 4
     assert alpha.trailing_fail_count == 2
     assert alpha.last_fail_ts == 4
+    assert alpha.reason_code == "provider_quota_exceeded"
     assert alpha.provider == "anthropic"
     assert alpha.model == "claude-opus-4-1"
     assert beta.latest_event == "complete"
@@ -443,6 +576,151 @@ def test_read_completed_units_returns_old_daily_tuple_shape_and_filters_scoped_u
         ("daily", "facet_newsletter", "work"),
     }
     assert all(isinstance(unit, tuple) and len(unit) == 3 for unit in completed)
+
+
+def test_read_completed_since_missing_health_dirs(pipeline_journal):
+    assert read_completed_since("20990210", 0) == CompletionsSince((), ())
+
+
+def test_read_completed_since_dedups_segment_completions_at_max_ts(pipeline_journal):
+    day = "20990211"
+    base = pipeline_journal / "chronicle" / day / "health"
+    _write_jsonl(
+        base / "001_segment.jsonl",
+        [
+            _complete("090000_300", "entities", 100, stream="default"),
+            _complete("090000_300", "sense", 150, stream="default"),
+            _complete("090000_300", "documents", 125, stream="default"),
+        ],
+    )
+
+    assert read_completed_since(day, 99).segments == (
+        {"stream": "default", "segment": "090000_300", "ts": 150},
+    )
+
+
+def test_read_completed_since_excludes_ts_at_or_before_since(pipeline_journal):
+    day = "20990212"
+    base = pipeline_journal / "chronicle" / day / "health"
+    _write_jsonl(
+        base / "001_segment.jsonl",
+        [_complete("090000_300", "entities", 100, stream="default")],
+    )
+
+    assert read_completed_since(day, 100) == CompletionsSince((), ())
+
+
+def test_read_completed_since_projects_activity_units(pipeline_journal):
+    day = "20990213"
+    base = pipeline_journal / "chronicle" / day / "health"
+    _write_jsonl(
+        base / "001_activity.jsonl",
+        [
+            {
+                "event": "talent.complete",
+                "ts": 101,
+                "mode": "activity",
+                "name": "summary",
+                "facet": "work",
+                "activity": "meeting_090000_300",
+            }
+        ],
+    )
+
+    assert read_completed_since(day, 100).activities == (
+        {"facet": "work", "activity": "meeting_090000_300", "ts": 101},
+    )
+
+
+def test_read_completed_since_includes_prior_day_completions(pipeline_journal):
+    day = "20990214"
+    prev_day = "20990213"
+    base = pipeline_journal / "chronicle" / prev_day / "health"
+    _write_jsonl(
+        base / "001_segment.jsonl",
+        [_complete("235900_300", "entities", 200, stream="default")],
+    )
+
+    assert read_completed_since(day, 199).segments == (
+        {"stream": "default", "segment": "235900_300", "ts": 200},
+    )
+
+
+def test_read_completed_since_excludes_units_whose_latest_terminal_failed(
+    pipeline_journal,
+):
+    day = "20990215"
+    base = pipeline_journal / "chronicle" / day / "health"
+    _write_jsonl(
+        base / "001_segment.jsonl",
+        [
+            _complete("090000_300", "entities", 100, stream="default"),
+            _fail("090000_300", "entities", 110, stream="default"),
+        ],
+    )
+
+    assert read_completed_since(day, 99) == CompletionsSince((), ())
+
+
+def test_read_completed_since_ignores_cadence_own_terminal_record(pipeline_journal):
+    day = "20990216"
+    base = pipeline_journal / "chronicle" / day / "health"
+    _write_jsonl(
+        base / "001_cadence.jsonl",
+        [
+            {
+                "event": "talent.complete",
+                "ts": 100,
+                "mode": "cadence",
+                "name": "pulse",
+                "segment": None,
+                "activity": None,
+            }
+        ],
+    )
+
+    assert read_completed_since(day, 99) == CompletionsSince((), ())
+
+
+def test_read_completed_since_sorts_outputs_deterministically(pipeline_journal):
+    day = "20990217"
+    base = pipeline_journal / "chronicle" / day / "health"
+    _write_jsonl(
+        base / "001_units.jsonl",
+        [
+            _complete("z_seg", "entities", 200, stream="zeta"),
+            _complete("a_seg", "entities", 100, stream="zeta"),
+            _complete("b_seg", "entities", 100, stream="alpha"),
+            {
+                "event": "talent.complete",
+                "ts": 150,
+                "mode": "activity",
+                "name": "summary",
+                "facet": "work",
+                "activity": "z_activity",
+            },
+            {
+                "event": "talent.complete",
+                "ts": 150,
+                "mode": "activity",
+                "name": "summary",
+                "facet": "home",
+                "activity": "a_activity",
+            },
+        ],
+    )
+
+    completions = read_completed_since(day, 99)
+
+    assert completions.segments == (
+        {"stream": "alpha", "segment": "b_seg", "ts": 100},
+        {"stream": "zeta", "segment": "a_seg", "ts": 100},
+        {"stream": "zeta", "segment": "z_seg", "ts": 200},
+    )
+    assert completions.activities == (
+        {"facet": "home", "activity": "a_activity", "ts": 150},
+        {"facet": "work", "activity": "z_activity", "ts": 150},
+    )
 
 
 def test_empty_day_is_healthy(pipeline_journal):
@@ -883,6 +1161,7 @@ def test_read_backlog_view_reports_complete_pending_stuck_and_why_axis(
                 "entities",
                 stuck_fail_ts,
                 stream="default",
+                reason_code="provider_key_missing",
                 provider="anthropic",
                 model="claude-opus-4-1",
             ),
@@ -912,10 +1191,14 @@ def test_read_backlog_view_reports_complete_pending_stuck_and_why_axis(
     assert by_day[stuck_day].units == 1
     stuck_unit = by_day[stuck_day].why[0]
     assert stuck_unit.why == "failed"
+    assert stuck_unit.reason_code == "provider_key_missing"
     assert stuck_unit.provider == "anthropic"
     assert stuck_unit.model == "claude-opus-4-1"
     assert stuck_unit.trailing_fail_count == STUCK_FAIL_THRESHOLD
     assert stuck_unit.stuck is True
+    assert by_day[stuck_day].reason_code == "provider_key_missing"
+    assert by_day[stuck_day].provider == "anthropic"
+    assert by_day[stuck_day].model == "claude-opus-4-1"
     assert view.pending_days == 1
     assert view.stuck_days == 1
     assert view.oldest_pending_day == stuck_day
@@ -1092,7 +1375,9 @@ def test_read_backlog_view_repeated_talent_fail_reason_is_failing_step(
 
     assert backlog_day.state == "stuck"
     assert backlog_day.reason == "failing_step"
+    assert backlog_day.reason_code is None
     assert backlog_day.why[0].why == "failed"
+    assert backlog_day.why[0].reason_code is None
     assert backlog_day.why[0].stuck is True
 
 
@@ -1156,6 +1441,7 @@ def test_read_backlog_view_provider_model_failure_remains_failing_step(
                 "entities",
                 3000,
                 stream="default",
+                reason_code="provider_quota_exceeded",
                 provider="openai",
                 model="gpt-5",
             ),
@@ -1174,7 +1460,11 @@ def test_read_backlog_view_provider_model_failure_remains_failing_step(
     assert backlog_day.state == "stuck"
     assert backlog_day.reason == "failing_step"
     assert backlog_day.reason != "provider_down"
+    assert backlog_day.reason_code == "provider_quota_exceeded"
+    assert backlog_day.provider == "openai"
+    assert backlog_day.model == "gpt-5"
     unit = backlog_day.why[0]
+    assert unit.reason_code == "provider_quota_exceeded"
     assert unit.provider == "openai"
     assert unit.model == "gpt-5"
     assert unit.stuck is True

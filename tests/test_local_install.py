@@ -9,12 +9,13 @@ import tarfile
 import time
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from solstone.think.journal_config import read_journal_config
 from solstone.think.models import LOCAL_MODEL
-from solstone.think.providers import local_install
+from solstone.think.providers import local_install, local_vulkan, memory
 from solstone.think.providers.install_state import read_install_status
 from solstone.think.providers.local import LOCAL_MODEL_SPECS
 
@@ -48,13 +49,43 @@ def test_install_hint_literal() -> None:
     assert local_install.install_hint() == "journal install-provider local"
 
 
+def test_llama_server_pins_cover_expected_platforms() -> None:
+    pins = local_install.LLAMA_SERVER_PINS
+    # macOS arm64 (Metal) + both Linux arches on the cross-vendor Vulkan build.
+    assert {
+        "aarch64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+    } <= set(pins)
+    for key, pin in pins.items():
+        assert pin["release_tag"] == "b9291"
+        assert pin["binary_name"] == "llama-server"
+        # sha256 is a 64-char hex digest.
+        assert len(pin["sha256"]) == 64
+        int(pin["sha256"], 16)
+        # Linux GPU acceleration rides the cross-vendor Vulkan prebuilt on both
+        # arches (NVIDIA + AMD + Intel from one binary).
+        if key.endswith("-unknown-linux-gnu"):
+            assert "vulkan" in pin["filename"]
+    assert (
+        pins["aarch64-unknown-linux-gnu"]["filename"]
+        == "llama-b9291-bin-ubuntu-vulkan-arm64.tar.gz"
+    )
+
+
 def test_install_llama_server_relocates_binary_and_libraries(tmp_path, monkeypatch):
     _init_journal(tmp_path, monkeypatch)
     pin = local_install.pin_for_current_platform()
+    if local_install.llama_server_artifact_key() == "x86_64-unknown-linux-gnu":
+        assert pin["filename"] == "llama-b9291-bin-ubuntu-vulkan-x64.tar.gz"
+        assert (
+            pin["sha256"]
+            == "7e3bf4202bedc71c2c9fbfbe02d10075b8d596bb963e7ab006663582dc2e92c2"
+        )
     artifact_key = local_install.llama_server_artifact_key()
     install_dir = local_install.binary_install_dir(artifact_key, pin)
     binary_path = local_install.binary_path_for_pin(artifact_key, pin)
-    inner_name = "llama-btest"
+    inner_name = "llama-b9291"
     lib_names = ["libllama.so", "libggml.so", "libfoo.dylib"]
     fixture_root = tmp_path / "fixture" / inner_name
     fixture_root.mkdir(parents=True)
@@ -311,6 +342,104 @@ def test_ensure_artifacts_installed_returns_binary_gguf_and_optional_mmproj(
     )
 
 
+def test_ensure_artifacts_installed_ignores_low_memory_when_artifacts_exist(
+    tmp_path, monkeypatch
+):
+    binary = tmp_path / "llama-server"
+    gguf = tmp_path / "model.gguf"
+    monkeypatch.setattr(
+        local_install,
+        "inspect_readiness",
+        lambda model_id: {
+            "binary_installed": True,
+            "model_installed": True,
+            "ram_sufficient": False,
+            "binary_path": str(binary),
+            "model_path": str(gguf),
+            "mmproj_path": None,
+        },
+    )
+
+    assert local_install.ensure_artifacts_installed(LOCAL_MODEL) == (
+        binary,
+        gguf,
+        None,
+    )
+
+
+def test_inspect_readiness_reports_ram_sufficient_for_low_or_unknown_memory(
+    tmp_path, monkeypatch
+):
+    _init_journal(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        memory.psutil,
+        "virtual_memory",
+        lambda: SimpleNamespace(available=1 * 1024**3, total=16 * 1024**3),
+    )
+
+    readiness = local_install.inspect_readiness(LOCAL_MODEL)
+
+    assert readiness["ram_sufficient"] is True
+
+
+def test_inspect_readiness_reports_gpu_available_with_hardware(tmp_path, monkeypatch):
+    _init_journal(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        local_vulkan,
+        "detect_gpus",
+        lambda: [
+            local_vulkan.VulkanDevice(
+                1,
+                "NVIDIA GeForce GTX 1660 Ti",
+                local_vulkan.VK_TYPE_DISCRETE,
+                6390,
+            )
+        ],
+    )
+
+    readiness = local_install.inspect_readiness(LOCAL_MODEL)
+
+    assert readiness["gpu_available"] is True
+
+
+def test_inspect_readiness_reports_gpu_unavailable_without_hardware(
+    tmp_path, monkeypatch
+):
+    _init_journal(tmp_path, monkeypatch)
+    monkeypatch.setattr(local_vulkan, "detect_gpus", lambda: [])
+
+    readiness = local_install.inspect_readiness(LOCAL_MODEL)
+
+    assert readiness["gpu_available"] is False
+
+
+def test_inspect_readiness_honors_vulkan_device_override(tmp_path, monkeypatch):
+    _init_journal(tmp_path, monkeypatch)
+    devices = [
+        local_vulkan.VulkanDevice(
+            0,
+            "Intel(R) Graphics",
+            local_vulkan.VK_TYPE_INTEGRATED,
+            23814,
+        ),
+        local_vulkan.VulkanDevice(
+            1,
+            "llvmpipe (LLVM)",
+            local_vulkan.VK_TYPE_CPU,
+            0,
+        ),
+    ]
+    monkeypatch.setattr(local_vulkan, "detect_gpus", lambda: devices)
+    local_install._write_local_metadata({"vulkan_device_index": "0"})
+
+    assert local_install.gpu_device_override() == 0
+    assert local_install.inspect_readiness(LOCAL_MODEL)["gpu_available"] is True
+
+    local_install._write_local_metadata({"vulkan_device_index": "1"})
+
+    assert local_install.inspect_readiness(LOCAL_MODEL)["gpu_available"] is False
+
+
 def test_inspect_readiness_ignores_stale_model_path_after_model_change(
     tmp_path, monkeypatch
 ):
@@ -394,32 +523,3 @@ def test_install_llama_server_failure_writes_canonical_failed(tmp_path, monkeypa
     assert slot["install_state"] == "failed"
     assert slot["install_error"] == "network broke"
     assert "state" not in slot
-
-
-class TestSparkAarch64Pin:
-    """Fork-only: the Spark's aarch64-Linux CUDA pin (b9291, sm_121, CUDA 13.0).
-
-    These guard the fork-only pin entry: the binary is built from
-    ggml-org/llama.cpp@b9291 against CUDA 13.0 for sm_121 (GB10) and self-hosted
-    as a release asset. If a future upstream aarch64 pin lands on the same key,
-    these should fail loudly rather than let the Spark CUDA build be silently
-    clobbered.
-    """
-
-    def test_returns_linux_aarch64_key(self, monkeypatch):
-        monkeypatch.setattr(local_install.platform, "machine", lambda: "aarch64")
-        monkeypatch.setattr(local_install.sys, "platform", "linux")
-        assert local_install.llama_server_artifact_key() == "aarch64-unknown-linux-gnu"
-
-    def test_returns_linux_aarch64_for_arm64_alias(self, monkeypatch):
-        # arm64 -> aarch64 on Linux too (defensive: some distros report arm64)
-        monkeypatch.setattr(local_install.platform, "machine", lambda: "arm64")
-        monkeypatch.setattr(local_install.sys, "platform", "linux")
-        assert local_install.llama_server_artifact_key() == "aarch64-unknown-linux-gnu"
-
-    def test_spark_cuda_pin_present_and_shaped(self, monkeypatch):
-        pin = local_install.LLAMA_SERVER_PINS["aarch64-unknown-linux-gnu"]
-        assert pin["release_tag"] == "b9291"
-        assert pin["url"].startswith("https://github.com/parkerhdavis/Solstone/")
-        assert pin["filename"].endswith(".tar.gz")
-        assert len(pin["sha256"]) == 64

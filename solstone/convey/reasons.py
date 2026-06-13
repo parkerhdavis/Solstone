@@ -90,6 +90,11 @@ OPERATION_NO_LONGER_AVAILABLE = Reason(
 )
 
 # config/settings
+CORRUPT_CONFIG = Reason(
+    "corrupt_config",
+    "I couldn't read your settings.",
+    500,
+)
 INVALID_CONFIG_VALUE = Reason(
     "invalid_config_value",
     "I couldn't save that setting because one value was invalid.",
@@ -105,10 +110,67 @@ CONVEY_OPERATION_FAILED = Reason(
     "I couldn't update the interface settings.",
     500,
 )
+CONVEY_BUSY = Reason(
+    "convey_busy",
+    "I couldn't update the interface settings right now because they were busy. Try again in a moment.",
+    503,
+)
+SERVICE_BUSY = Reason(
+    "service_busy",
+    "The service operation is already running. Try again in a moment.",
+    503,
+)
+UNKNOWN_SERVICE = Reason(
+    "unknown_service",
+    "I couldn't find that service.",
+    404,
+)
+SERVICE_OPERATION_FAILED = Reason(
+    "service_operation_failed",
+    "The service operation could not be completed.",
+    500,
+)
+
+# backup
+BACKUP_BUSY = Reason(
+    "backup_busy",
+    "I couldn't start that because another backup task is already running. Try again in a moment.",
+    503,
+)
+BACKUP_NOT_CONFIRMED = Reason(
+    "backup_not_confirmed",
+    "I couldn't turn on backup until you confirm your recovery key.",
+    400,
+)
+RECOVERY_KEY_MISMATCH = Reason(
+    "recovery_key_mismatch",
+    "I couldn't confirm that — it didn't match your recovery key.",
+    400,
+)
+BACKUP_OPERATION_FAILED = Reason(
+    "backup_operation_failed",
+    "I couldn't finish that backup action.",
+    500,
+)
+BACKUP_UNAVAILABLE = Reason(
+    "backup_unavailable",
+    "I couldn't start a backup because solstone's background service isn't running. Start it, then try again.",
+    503,
+)
 NETWORK_SECURITY_REQUIRES_PASSWORD = Reason(
     "network_security_requires_password",
     "I couldn't change network access until a password is set.",
     400,
+)
+LOCAL_REQUEST_REQUIRED = Reason(
+    "local_request_required",
+    "I couldn't change network access from this request.",
+    403,
+)
+LOCAL_REQUEST_ONLY = Reason(
+    "local_request_only",
+    "I couldn't register that observer because this endpoint serves local requests only.",
+    403,
 )
 
 # entities
@@ -144,7 +206,7 @@ ENTITY_OPERATION_FAILED = Reason(
     500,
 )
 
-# facets/activities/todos
+# facets/activities
 FACET_NOT_FOUND = Reason("facet_not_found", "I couldn't find that facet.", 404)
 FACET_ALREADY_EXISTS = Reason(
     "facet_already_exists",
@@ -161,17 +223,16 @@ ACTIVITY_NOT_FOUND = Reason(
     "I couldn't find that activity in the facet.",
     404,
 )
+ACTIVITY_ALREADY_EXISTS = Reason(
+    "activity_already_exists",
+    "I couldn't create that activity because it already exists.",
+    409,
+)
 ACTIVITY_PROTECTED = Reason(
     "activity_protected",
     "I can't remove that always-on activity.",
     400,
 )
-TODO_OPERATION_FAILED = Reason(
-    "todo_operation_failed",
-    "I couldn't update that todo.",
-    500,
-)
-
 # agent/talent
 AGENT_UNAVAILABLE = Reason(
     "agent_unavailable",
@@ -197,6 +258,13 @@ TALENT_RUN_MALFORMED = Reason(
 TALENT_OPERATION_FAILED = Reason(
     "talent_operation_failed",
     "I couldn't load that talent data.",
+    500,
+)
+
+# health
+HEALTH_REPORT_FAILED = Reason(
+    "health_report_failed",
+    "I couldn't build your journal health report.",
     500,
 )
 
@@ -286,6 +354,60 @@ SPEAKER_NOT_FOUND = Reason(
     "I couldn't find that speaker. They may have been removed — try refreshing the page.",
     404,
 )
+SPEAKER_VOICEPRINT_BUSY = Reason(
+    "speaker_voiceprint_busy",
+    "I couldn't update that voice right now because it was busy. Try again in a moment.",
+    503,
+)
+SPEAKER_LABELS_BUSY = Reason(
+    "speaker_labels_busy",
+    "I couldn't update those speaker attributions right now because they were busy. Try again in a moment.",
+    503,
+)
+SPEAKER_OWNER_CENTROID_REQUIRED = Reason(
+    "speaker_owner_centroid_required",
+    "I couldn't run that speaker command until your owner voice is set up.",
+    409,
+)
+SPEAKER_COMMAND_FAILED = Reason(
+    "speaker_command_failed",
+    "I couldn't finish that speaker command.",
+    400,
+)
+AWARENESS_BUSY = Reason(
+    "awareness_busy",
+    "I couldn't update what I know right now because it was busy. Try again in a moment.",
+    503,
+)
+AWARENESS_SECTION_NOT_FOUND = Reason(
+    "awareness_section_not_found",
+    "I couldn't find that part of what I know.",
+    404,
+)
+ENTITY_BUSY = Reason(
+    "entity_busy",
+    "I couldn't update that entity right now because it was busy. Try again in a moment.",
+    503,
+)
+ACTIVITIES_BUSY = Reason(
+    "activities_busy",
+    "I couldn't update activities right now because they were busy. Try again in a moment.",
+    503,
+)
+
+# ledger
+LEDGER_ITEM_NOT_FOUND = Reason(
+    "ledger_item_not_found",
+    "I couldn't find that ledger item.",
+    404,
+)
+
+# identity
+IDENTITY_BUSY = Reason(
+    "identity_busy",
+    "I couldn't update my identity right now because it was busy. Try again in a moment.",
+    503,
+)
 
 # reprocess
 REPROCESS_PAST_ONLY = Reason(
@@ -304,4 +426,26 @@ REPROCESS_ALREADY_COMPLETE = Reason(
     "reprocess_already_complete",
     "this day's already done. want to redo it from scratch?",
     200,
+)
+
+# scout / setup wizard
+SETUP_ALREADY_COMPLETE = Reason(
+    "setup_already_complete",
+    "I couldn't do that because setup is already complete.",
+    404,
+)
+SCOUT_ALREADY_ENABLED = Reason(
+    "already_enabled",
+    "I couldn't enable scout because it's already on.",
+    409,
+)
+SCOUT_MANUAL_KEY_PRESENT = Reason(
+    "manual_key_present",
+    "I couldn't enable scout because a Gemini key is already on this machine.",
+    409,
+)
+SCOUT_SESSION_NOT_FOUND = Reason(
+    "scout_session_not_found",
+    "I couldn't find that scout session.",
+    404,
 )

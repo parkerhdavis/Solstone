@@ -105,7 +105,7 @@ def test_launch_process_records_service_state(monkeypatch):
         _callosum=None,
     )
 
-    def fake_spawn(cmd, *, ref=None, callosum=None, day=None):
+    def fake_spawn(cmd, *, ref=None, callosum=None, day=None, env=None):
         assert cmd == ["journal", "sense"]
         assert ref == "ref-1"
         assert day is None
@@ -147,6 +147,20 @@ def test_parse_args_remote_flag_optional():
     args = parser.parse_args([])
 
     assert args.remote is None
+
+
+def test_parse_args_app_supervised_flag():
+    mod = importlib.reload(importlib.import_module("solstone.think.supervisor"))
+
+    parser = mod.parse_args()
+    args = parser.parse_args(
+        ["5016", "--app-supervised", "--no-daily", "--no-schedule"]
+    )
+
+    assert args.port == 5016
+    assert args.app_supervised is True
+    assert args.no_daily is True
+    assert args.no_schedule is True
 
 
 def test_parse_args_lifecycle_verb_hint(monkeypatch, capsys):
@@ -224,9 +238,8 @@ def test_graceful_shutdown_calls_stop_process_for_each_managed_proc(
     monkeypatch.setattr(mod, "_sweep_orphaned_sol_processes", lambda *_a, **_k: 0)
     monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(mod, "start_callosum_in_process", lambda: None)
-    monkeypatch.setattr(mod, "stop_callosum_in_process", lambda: None)
+    monkeypatch.setattr(mod, "stop_callosum_in_process", lambda **_kwargs: None)
     monkeypatch.setattr(mod, "wait_for_convey_ready", lambda _proc: True)
-    monkeypatch.setattr(mod, "_maybe_submit_startup_digest", lambda *, no_cortex: None)
 
     class FakeCallosumConnection:
         def __init__(self, *args, **kwargs):
@@ -262,7 +275,7 @@ def test_graceful_shutdown_calls_stop_process_for_each_managed_proc(
     monkeypatch.setattr(
         mod,
         "_stop_process",
-        lambda managed: stop_order.append(managed.name),
+        lambda managed, **_kwargs: stop_order.append(managed.name),
     )
 
     def interrupt_supervise(coro):
@@ -279,6 +292,150 @@ def test_graceful_shutdown_calls_stop_process_for_each_managed_proc(
     assert stop_order == ["spl", "cortex", "sense", "convey"]
 
 
+def _run_supervisor_main_for_shutdown_knobs(tmp_path, monkeypatch, *, argv):
+    mod = importlib.reload(importlib.import_module("solstone.think.supervisor"))
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+    monkeypatch.delenv("SOL_SUPERVISOR_SPAWNED", raising=False)
+    monkeypatch.delenv("SOLSTONE_APP_SUPERVISED", raising=False)
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr(mod, "run_pending_tasks", lambda *a, **k: (0, 0))
+    monkeypatch.setattr(mod, "_sweep_orphaned_sol_processes", lambda *_a, **_k: 0)
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(mod, "start_callosum_in_process", lambda: None)
+    monkeypatch.setattr(mod, "is_local_provider_needed", lambda: False)
+
+    class FakeCallosumConnection:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self, *args, **kwargs):
+            pass
+
+        def emit(self, *args, **kwargs):
+            pass
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(mod, "CallosumConnection", FakeCallosumConnection)
+
+    managed = _TaskManagedStub(cmd=["journal", "sense"])
+    managed.name = "sense"
+    monkeypatch.setattr(mod, "start_sense", lambda: managed)
+
+    events: list[str] = []
+    captures: dict[str, list] = {
+        "task_shutdown": [],
+        "stop_process": [],
+        "callosum_join": [],
+    }
+
+    class FakeTaskQueue:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def set_ready(self):
+            pass
+
+        def shutdown(self, *, timeout):
+            captures["task_shutdown"].append(timeout)
+
+    monkeypatch.setattr(mod, "TaskQueue", FakeTaskQueue)
+    monkeypatch.setattr(mod, "signal_ready", lambda: events.append("ready"))
+
+    def record_watcher_start():
+        events.append("watcher")
+        assert mod._managed_procs == [managed]
+
+    monkeypatch.setattr(mod, "start_parent_death_watcher", record_watcher_start)
+    monkeypatch.setattr(
+        mod,
+        "_stop_process",
+        lambda proc, *, timeout_cap=None: captures["stop_process"].append(
+            (proc.name, timeout_cap)
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "stop_callosum_in_process",
+        lambda *, join_timeout=5.0: captures["callosum_join"].append(join_timeout),
+    )
+    exit_now = MagicMock()
+    monkeypatch.setattr(mod.os, "_exit", exit_now)
+
+    def interrupt_supervise(coro):
+        events.append("run")
+        coro.close()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(mod.asyncio, "run", interrupt_supervise)
+
+    try:
+        mod.main()
+    finally:
+        os.environ.pop("SOL_SUPERVISOR_SPAWNED", None)
+
+    return mod, captures, events, exit_now
+
+
+def test_app_supervised_main_uses_watcher_and_compressed_shutdown_knobs(
+    tmp_path, monkeypatch
+):
+    from solstone.think import install_guard, service, skills_cli
+
+    reconcile = MagicMock()
+    install_wrappers = MagicMock()
+    install_project = MagicMock()
+    monkeypatch.setattr(service, "reconcile_installed_unit", reconcile)
+    monkeypatch.setattr(install_guard, "install_wrappers", install_wrappers)
+    monkeypatch.setattr(skills_cli, "install_project", install_project)
+
+    mod, captures, events, exit_now = _run_supervisor_main_for_shutdown_knobs(
+        tmp_path,
+        monkeypatch,
+        argv=[
+            "supervisor",
+            "0",
+            "--app-supervised",
+            "--no-daily",
+            "--no-schedule",
+            "--no-convey",
+            "--no-cortex",
+            "--no-spl",
+        ],
+    )
+
+    assert events == ["ready", "watcher", "run"]
+    assert captures["task_shutdown"] == [mod.APP_SUPERVISED_TASK_DRAIN_S]
+    assert captures["stop_process"] == [("sense", mod.APP_SUPERVISED_CHILD_STOP_S)]
+    assert captures["callosum_join"] == [mod.APP_SUPERVISED_CALLOSUM_JOIN_S]
+    exit_now.assert_not_called()
+    reconcile.assert_not_called()
+    install_wrappers.assert_not_called()
+    install_project.assert_not_called()
+
+
+def test_default_main_uses_default_shutdown_knobs(tmp_path, monkeypatch):
+    mod, captures, events, _exit_now = _run_supervisor_main_for_shutdown_knobs(
+        tmp_path,
+        monkeypatch,
+        argv=[
+            "supervisor",
+            "0",
+            "--no-daily",
+            "--no-schedule",
+            "--no-convey",
+            "--no-cortex",
+            "--no-spl",
+        ],
+    )
+
+    assert events == ["ready", "run"]
+    assert captures["task_shutdown"] == [10]
+    assert captures["stop_process"] == [("sense", None)]
+    assert captures["callosum_join"] == [5.0]
+
+
 def test_get_command_name():
     """Test command name extraction for queue serialization."""
     mod = importlib.import_module("solstone.think.supervisor")
@@ -288,6 +445,15 @@ def test_get_command_name():
     assert get(["journal", "indexer", "--rescan"]) == "indexer"
     assert get(["sol", "insight", "20240101"]) == "insight"
     assert get(["journal", "think", "--day", "20240101"]) == "daily"
+    assert get(["journal", "maintenance", "list"]) == "maintenance"
+    assert get(["journal", "maintenance", "run", "foo:bar"]) == "maintenance:foo:bar"
+    assert get(["journal", "maintenance", "run", "baz:qux"]) == "maintenance:baz:qux"
+    assert get(["journal", "maintenance", "run", "foo:bar"]) == get(
+        ["journal", "maintenance", "run", "foo:bar"]
+    )
+    assert get(["journal", "maintenance", "run", "foo:bar"]) != get(
+        ["journal", "maintenance", "run", "baz:qux"]
+    )
 
     # Other commands -> basename
     assert get(["/usr/bin/python", "script.py"]) == "python"
@@ -336,6 +502,8 @@ def test_get_command_name():
         ["journal", "think"],
         ["journal", "indexer", "--rescan"],
         ["journal", "sense", "--day", "20260101"],
+        ["journal", "maintenance", "list"],
+        ["journal", "maintenance", "run", "foo:bar"],
     ],
 )
 def test_command_partition_matches_task_queue_get_command_name(cmd):
@@ -1118,6 +1286,14 @@ class _TaskManagedStub:
         self.is_running = MagicMock(return_value=True)
 
 
+BENIGN_LLAMA_LOAD_LOG = (
+    "2026-06-12T12:00:00+00:00 [llama-server:stderr] "
+    "llama_model_loader: loading model tensors\n"
+    "2026-06-12T12:00:02+00:00 [llama-server:stderr] "
+    "common_init_from_params: setting dry_penalty_last_n to ctx_size = 16384\n"
+)
+
+
 def test_ensure_venv_bin_on_path_prepends_when_missing(monkeypatch):
     mod = importlib.import_module("solstone.think.supervisor")
     monkeypatch.setenv("PATH", "/usr/bin")
@@ -1174,7 +1350,7 @@ def test_task_queue_history_records_completion(tmp_path, monkeypatch):
     managed.wait.return_value = 0
     managed.cleanup = MagicMock()
 
-    def fake_spawn(cmd, *, ref=None, callosum=None, day=None):
+    def fake_spawn(cmd, *, ref=None, callosum=None, day=None, env=None):
         managed.cmd = cmd
         managed.ref = ref
         return managed
@@ -1261,7 +1437,7 @@ def test_run_task_completes_when_scheduler_writeback_fails(monkeypatch):
     managed.wait.return_value = 0
     managed.cleanup = MagicMock()
 
-    def fake_spawn(cmd, *, ref=None, callosum=None, day=None):
+    def fake_spawn(cmd, *, ref=None, callosum=None, day=None, env=None):
         managed.cmd = cmd
         managed.ref = ref
         return managed
@@ -1348,7 +1524,7 @@ def test_task_history_records_cap_kill_as_timeout(monkeypatch):
 
     managed.wait.side_effect = wait
 
-    def fake_spawn(cmd, *, ref=None, callosum=None, day=None):
+    def fake_spawn(cmd, *, ref=None, callosum=None, day=None, env=None):
         return managed
 
     monkeypatch.setattr(mod, "CallosumConnection", FakeCallosum)
@@ -1643,13 +1819,16 @@ def test_start_local_server_launches_mlx_server_on_darwin(
     tmp_path, monkeypatch, capsys
 ):
     mod = importlib.import_module("solstone.think.supervisor")
-    from solstone.think.providers import local_server, mlx_install
+    from solstone.think.providers import local_server, local_vulkan, mlx_install
 
     monkeypatch.setattr(sys, "platform", "darwin")
+    gpu_gate = MagicMock(side_effect=AssertionError("darwin must not probe Vulkan"))
+    monkeypatch.setattr(local_vulkan, "detect_gpus", gpu_gate)
     mod._SERVICE_STATE.clear()
     runtime_dir = tmp_path / "gemma4" / "variant-1120"
     written_ports = []
     spawned = []
+    spawned_envs = []
     managed = _TaskManagedStub(cmd=[])
     managed.name = "mlx-vlm-server"
     managed.process.returncode = None
@@ -1674,8 +1853,9 @@ def test_start_local_server_launches_mlx_server_on_darwin(
     )
     monkeypatch.setattr(local_server, "_probe_health", lambda port: ("ready", None))
 
-    def fake_spawn(cmd, *, ref=None, callosum=None, day=None):
+    def fake_spawn(cmd, *, ref=None, callosum=None, day=None, env=None):
         spawned.append(cmd)
+        spawned_envs.append(env)
         managed.cmd = cmd
         managed.ref = ref
         return managed
@@ -1698,10 +1878,16 @@ def test_start_local_server_launches_mlx_server_on_darwin(
         ]
     ]
     assert "0.0.0.0" not in spawned[0]
+    assert "--n-gpu-layers" not in spawned[0]
+    assert "-c" not in spawned[0]
+    assert "--device" not in spawned[0]
+    assert "Vulkan0" not in spawned[0]
+    assert spawned_envs == [None]
     assert "--draft-model" not in spawned[0]
     assert "--draft-kind" not in spawned[0]
     assert mod._SERVICE_STATE["mlx-vlm-server"]["restart"] is True
     assert mod.LOCAL_MODEL_WARMING_UP_COPY in capsys.readouterr().out
+    gpu_gate.assert_not_called()
 
 
 def test_start_local_server_skips_when_mlx_not_installed_on_darwin(monkeypatch):
@@ -1726,11 +1912,33 @@ def test_start_local_server_skips_when_mlx_not_installed_on_darwin(monkeypatch):
     launch.assert_not_called()
 
 
+def test_start_local_server_skips_when_mlx_memory_blocked_on_darwin(monkeypatch):
+    mod = importlib.import_module("solstone.think.supervisor")
+    from solstone.think.providers import mlx_install
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(
+        mlx_install,
+        "inspect_readiness",
+        lambda: {
+            "platform_supported": True,
+            "package_available": True,
+            "ram_sufficient": False,
+            "model_installed": True,
+        },
+    )
+    launch = MagicMock()
+    monkeypatch.setattr(mod, "_launch_process", launch)
+
+    assert mod.start_local_server() is None
+    launch.assert_not_called()
+
+
 def test_start_local_server_launches_llama_server_key_and_cmd(
     tmp_path, monkeypatch, capsys
 ):
     mod = importlib.import_module("solstone.think.supervisor")
-    from solstone.think.providers import local_install, local_server
+    from solstone.think.providers import local_install, local_server, local_vulkan
 
     mod._SERVICE_STATE.clear()
     binary = tmp_path / "llama-server"
@@ -1742,15 +1950,32 @@ def test_start_local_server_launches_llama_server_key_and_cmd(
     mmproj = model_artifact_dir / "mmproj.gguf"
     written_ports = []
     spawned = []
+    spawned_envs = []
     managed = _TaskManagedStub(cmd=[])
     managed.name = "llama-server"
     managed.process.returncode = None
+    log_path = tmp_path / "llama-server.log"
+    log_path.write_text(BENIGN_LLAMA_LOAD_LOG, encoding="utf-8")
+    managed.log_writer = type("LogWriter", (), {"path": log_path})()
 
     monkeypatch.setattr(
         local_install,
         "ensure_artifacts_installed",
         lambda model_id: (binary, gguf, mmproj),
     )
+    monkeypatch.setattr(
+        local_vulkan,
+        "detect_gpus",
+        lambda: [
+            local_vulkan.VulkanDevice(
+                1,
+                "NVIDIA GeForce GTX 1660 Ti",
+                local_vulkan.VK_TYPE_DISCRETE,
+                6390,
+            )
+        ],
+    )
+    monkeypatch.setattr(local_vulkan, "device_local_used_mib", lambda index: 512)
     monkeypatch.setattr(mod, "find_available_port", lambda: 2468)
     monkeypatch.setattr(
         mod,
@@ -1759,8 +1984,9 @@ def test_start_local_server_launches_llama_server_key_and_cmd(
     )
     monkeypatch.setattr(local_server, "_probe_health", lambda port: ("ready", None))
 
-    def fake_spawn(cmd, *, ref=None, callosum=None, day=None):
+    def fake_spawn(cmd, *, ref=None, callosum=None, day=None, env=None):
         spawned.append(cmd)
+        spawned_envs.append(env)
         managed.cmd = cmd
         managed.ref = ref
         return managed
@@ -1783,10 +2009,17 @@ def test_start_local_server_launches_llama_server_key_and_cmd(
             "--port",
             "2468",
             "--jinja",
+            "--n-gpu-layers",
+            "999",
+            "-c",
+            "16384",
+            "--device",
+            "Vulkan0",
             "--mmproj",
             str(mmproj),
         ]
     ]
+    assert spawned_envs[0]["GGML_VK_VISIBLE_DEVICES"] == "1"
     assert "0.0.0.0" not in spawned[0]
     assert mod._SERVICE_STATE["llama-server"]["restart"] is True
     assert mod.LOCAL_MODEL_WARMING_UP_COPY in capsys.readouterr().out
@@ -1806,6 +2039,163 @@ def test_start_local_server_skips_missing_artifacts(monkeypatch):
 
     assert mod.start_local_server() is None
     launch.assert_not_called()
+
+
+def _configure_linux_llama_start(
+    mod,
+    tmp_path,
+    monkeypatch,
+    *,
+    log_text: str,
+    poll_return=None,
+):
+    from solstone.think.providers import local_install, local_server, local_vulkan
+
+    mod._SERVICE_STATE.clear()
+    binary = tmp_path / "llama-server"
+    model_artifact_dir = local_install.model_dir(mod.LOCAL_MODEL)
+    gguf = model_artifact_dir / "model.gguf"
+    log_path = tmp_path / "llama-server.log"
+    log_path.write_text(log_text, encoding="utf-8")
+    managed = _TaskManagedStub(cmd=[])
+    managed.name = "llama-server"
+    managed.process.returncode = poll_return
+    managed.process.poll = MagicMock(return_value=poll_return)
+    managed.log_writer = type("LogWriter", (), {"path": log_path})()
+    spawned: list[list[str]] = []
+    spawned_envs: list[dict[str, str] | None] = []
+
+    monkeypatch.setattr(
+        local_install,
+        "ensure_artifacts_installed",
+        lambda model_id: (binary, gguf, None),
+    )
+    monkeypatch.setattr(
+        local_vulkan,
+        "detect_gpus",
+        lambda: [
+            local_vulkan.VulkanDevice(
+                1,
+                "NVIDIA GeForce GTX 1660 Ti",
+                local_vulkan.VK_TYPE_DISCRETE,
+                6390,
+            )
+        ],
+    )
+    monkeypatch.setattr(local_vulkan, "device_local_used_mib", lambda index: 512)
+    monkeypatch.setattr(mod, "find_available_port", lambda: 2468)
+    monkeypatch.setattr(mod, "write_service_port", lambda _service, _port: None)
+    monkeypatch.setattr(local_server, "_probe_health", lambda _port: ("ready", None))
+
+    def fake_spawn(cmd, *, ref=None, callosum=None, day=None, env=None):
+        spawned.append(cmd)
+        spawned_envs.append(env)
+        managed.cmd = cmd
+        managed.ref = ref
+        return managed
+
+    monkeypatch.setattr(mod.RunnerManagedProcess, "spawn", fake_spawn)
+    return managed, spawned, spawned_envs
+
+
+def test_start_local_server_skips_without_hardware_gpu(tmp_path, monkeypatch):
+    mod = importlib.import_module("solstone.think.supervisor")
+    from solstone.think.providers import local_install, local_vulkan
+
+    binary = tmp_path / "llama-server"
+    model_artifact_dir = local_install.model_dir(mod.LOCAL_MODEL)
+    gguf = model_artifact_dir / "model.gguf"
+    monkeypatch.setattr(
+        local_install,
+        "ensure_artifacts_installed",
+        lambda model_id: (binary, gguf, None),
+    )
+    monkeypatch.setattr(local_vulkan, "detect_gpus", lambda: [])
+    launch = MagicMock()
+    monkeypatch.setattr(mod, "_launch_process", launch)
+
+    assert mod.start_local_server() is None
+    launch.assert_not_called()
+
+
+def test_start_local_server_benign_load_log_returns_ready(tmp_path, monkeypatch):
+    mod = importlib.import_module("solstone.think.supervisor")
+    managed, _spawned, spawned_envs = _configure_linux_llama_start(
+        mod, tmp_path, monkeypatch, log_text=BENIGN_LLAMA_LOAD_LOG
+    )
+
+    assert mod.start_local_server() is managed
+    assert spawned_envs[0]["GGML_VK_VISIBLE_DEVICES"] == "1"
+    managed.terminate.assert_not_called()
+
+
+def test_start_local_server_process_exit_during_warmup_fails_closed(
+    tmp_path, monkeypatch
+):
+    mod = importlib.import_module("solstone.think.supervisor")
+    managed, _spawned, _envs = _configure_linux_llama_start(
+        mod,
+        tmp_path,
+        monkeypatch,
+        log_text="2026-06-12T12:00:00+00:00 [llama-server:stderr] loading\n",
+        poll_return=1,
+    )
+
+    assert mod.start_local_server() is None
+    assert "llama-server" not in mod._SERVICE_STATE
+    managed.terminate.assert_called_once_with(timeout=15)
+    managed.cleanup.assert_called_once_with()
+
+
+def test_start_local_server_deadline_with_live_process_returns_managed(
+    tmp_path, monkeypatch
+):
+    mod = importlib.import_module("solstone.think.supervisor")
+    monkeypatch.setattr(mod, "LOCAL_SERVER_READY_TIMEOUT_S", 0.0)
+    managed, _spawned, _envs = _configure_linux_llama_start(
+        mod,
+        tmp_path,
+        monkeypatch,
+        log_text="2026-06-12T12:00:00+00:00 [llama-server:stderr] loading\n",
+    )
+
+    assert mod.start_local_server() is managed
+    managed.terminate.assert_not_called()
+    managed.cleanup.assert_not_called()
+
+
+class _LocalManagedStub:
+    def __init__(self, *, name="llama-server", running=True):
+        self.name = name
+        self.is_running = MagicMock(return_value=running)
+
+
+def test_handle_start_local_request_starts_and_appends(monkeypatch):
+    mod = importlib.import_module("solstone.think.supervisor")
+    managed = _LocalManagedStub()
+    start_local_server = MagicMock(return_value=managed)
+    monkeypatch.setattr(mod, "_managed_procs", [])
+    monkeypatch.setattr(mod, "_is_remote_mode", False)
+    monkeypatch.setattr(mod, "start_local_server", start_local_server)
+
+    mod._handle_callosum_message({"tract": "supervisor", "event": "start_local"})
+
+    start_local_server.assert_called_once_with()
+    assert mod._managed_procs == [managed]
+
+
+def test_handle_start_local_request_noops_when_local_server_running(monkeypatch):
+    mod = importlib.import_module("solstone.think.supervisor")
+    running = _LocalManagedStub()
+    start_local_server = MagicMock()
+    monkeypatch.setattr(mod, "_managed_procs", [running])
+    monkeypatch.setattr(mod, "_is_remote_mode", False)
+    monkeypatch.setattr(mod, "start_local_server", start_local_server)
+
+    mod._handle_callosum_message({"tract": "supervisor", "event": "start_local"})
+
+    start_local_server.assert_not_called()
+    assert mod._managed_procs == [running]
 
 
 def test_handle_runner_exits_restarts_llama_server_by_managed_name(monkeypatch):

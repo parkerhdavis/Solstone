@@ -31,6 +31,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from solstone.think.journal_io import write_json
 from solstone.think.utils import get_journal
 
 # Production spl-relay endpoint. Single source of truth — self-hosters
@@ -56,14 +57,8 @@ def authorized_clients_path() -> Path:
     return link_root() / "authorized_clients.json"
 
 
-def tokens_dir() -> Path:
-    d = link_root() / "tokens"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
 def service_token_path() -> Path:
-    return tokens_dir() / "account.json"
+    return Path(get_journal()) / "link" / "tokens" / "account.json"
 
 
 def totp_secret_path() -> Path:
@@ -98,6 +93,7 @@ def relay_url() -> str:
             if isinstance(url, str) and url.strip():
                 return url.strip().rstrip("/")
     except Exception:
+        # Intended fail-closed-on-unreadable-config: use the benign default relay.
         pass
     return DEFAULT_RELAY_URL
 
@@ -128,20 +124,28 @@ class LinkState:
         state.save()
         return state
 
-    def save(self) -> None:
+    @classmethod
+    def load(cls, *, default_label: str = "solstone") -> LinkState | None:
+        """Pure read of `state.json`; None if unprovisioned/unreadable. No write."""
         path = state_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(
-                {"instance_id": self.instance_id, "home_label": self.home_label},
-                f,
-                indent=2,
-            )
-            f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
+        if not path.exists():
+            return None
+        try:
+            raw = json.loads(path.read_text("utf-8"))
+            iid = raw.get("instance_id")
+            label = raw.get("home_label") or default_label
+            if isinstance(iid, str) and iid:
+                return cls(instance_id=iid, home_label=label)
+        except (json.JSONDecodeError, OSError):
+            return None
+        return None
+
+    def save(self) -> None:
+        write_json(
+            state_path(),
+            {"instance_id": self.instance_id, "home_label": self.home_label},
+            indent=2,
+        )
 
 
 def load_service_token() -> str | None:
@@ -161,15 +165,7 @@ def load_service_token() -> str | None:
 def save_service_token(token: str) -> None:
     """Persist the service token atomically with mode 0600."""
     path = service_token_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"service_token": token}, f, indent=2)
-        f.write("\n")
-        f.flush()
-        os.fsync(f.fileno())
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    write_json(path, {"service_token": token}, indent=2, mode=0o600)
 
 
 def generate_totp_secret() -> str:
@@ -192,12 +188,4 @@ def load_totp_secret() -> str | None:
 def save_totp_secret(secret: str) -> None:
     """Persist the relay pairing TOTP secret atomically with mode 0600."""
     path = totp_secret_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"totp_secret": secret}, f, indent=2)
-        f.write("\n")
-        f.flush()
-        os.fsync(f.fileno())
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    write_json(path, {"totp_secret": secret}, indent=2, mode=0o600)

@@ -9,10 +9,11 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from solstone.think.cluster import cluster_segments
+from solstone.think.cogitate_policy import DETERMINISTIC_FAILURE_REASON_CODES
 from solstone.think.utils import (
     DEFAULT_STREAM,
     day_dirs,
@@ -28,7 +29,7 @@ logger = logging.getLogger(__name__)
 # Test indirection: tests monkeypatch this for time-sensitive branches.
 _now = datetime.now
 
-_MODES = ("segment", "daily", "activity", "weekly", "flush")
+_MODES = ("segment", "daily", "activity", "weekly", "flush", "cadence")
 _FAILED_LIST_CAP = 20
 SEGMENT_FLOOR_TALENTS: tuple[str, ...] = ("entities", "documents")
 STUCK_FAIL_THRESHOLD = 3
@@ -103,9 +104,27 @@ class TerminalState:
     latest_event: str
     latest_ts: int
     trailing_fail_count: int
+    deterministic_fail_count: int
     last_fail_ts: int | None
+    reason_code: str | None
     provider: str | None
     model: str | None
+
+
+@dataclass(frozen=True)
+class CompletionsSince:
+    """Completed segment/activity units newer than a timestamp, for cadence."""
+
+    segments: tuple[dict, ...]
+    activities: tuple[dict, ...]
+
+
+@dataclass(frozen=True)
+class DeterministicFailure:
+    """A daily unit whose latest terminal is a deterministic crash."""
+
+    count: int
+    reason_code: str
 
 
 @dataclass(frozen=True)
@@ -125,6 +144,7 @@ class BacklogUnit:
     stream: str | None
     segment: str | None
     why: str
+    reason_code: str | None
     provider: str | None
     model: str | None
     trailing_fail_count: int
@@ -152,6 +172,9 @@ class BacklogDay:
     not_sensed: int
     why: tuple[BacklogUnit, ...]
     reason: str | None
+    reason_code: str | None
+    provider: str | None
+    model: str | None
     error: BacklogError | None
 
 
@@ -333,7 +356,10 @@ def _str_or_none(value: object) -> str | None:
 
 def read_terminal_states(day: str) -> dict[TerminalUnit, TerminalState]:
     """Return latest terminal talent state per unit for one day."""
-    records: dict[TerminalUnit, list[tuple[int, int, str, str | None, str | None]]] = {}
+    records: dict[
+        TerminalUnit,
+        list[tuple[int, int, str, str | None, str | None, str | None]],
+    ] = {}
     sequence = 0
 
     try:
@@ -402,6 +428,7 @@ def read_terminal_states(day: str) -> dict[TerminalUnit, TerminalState]:
                             ts,
                             sequence,
                             latest_event,
+                            _str_or_none(rec.get("reason_code")),
                             _str_or_none(rec.get("provider")),
                             _str_or_none(rec.get("model")),
                         )
@@ -417,12 +444,21 @@ def read_terminal_states(day: str) -> dict[TerminalUnit, TerminalState]:
     states: dict[TerminalUnit, TerminalState] = {}
     for unit, unit_records in records.items():
         ordered = sorted(unit_records, key=lambda item: (item[0], item[1]))
-        latest_ts, _seq, latest_event, _provider, _model = ordered[-1]
+        latest_ts, _seq, latest_event, _reason_code, _provider, _model = ordered[-1]
         trailing_fail_count = 0
-        for _ts, _seq, event, _provider, _model in reversed(ordered):
+        for _ts, _seq, event, _reason_code, _provider, _model in reversed(ordered):
             if event != TERMINAL_FAIL:
                 break
             trailing_fail_count += 1
+        deterministic_fail_count = 0
+        for _ts, _seq, event, reason_code, _provider, _model in reversed(ordered):
+            if event == TERMINAL_COMPLETE:
+                break
+            if (
+                event == TERMINAL_FAIL
+                and reason_code in DETERMINISTIC_FAILURE_REASON_CODES
+            ):
+                deterministic_fail_count += 1
         last_fail = next(
             (record for record in reversed(ordered) if record[2] == TERMINAL_FAIL),
             None,
@@ -431,9 +467,11 @@ def read_terminal_states(day: str) -> dict[TerminalUnit, TerminalState]:
             latest_event=latest_event,
             latest_ts=latest_ts,
             trailing_fail_count=trailing_fail_count,
+            deterministic_fail_count=deterministic_fail_count,
             last_fail_ts=last_fail[0] if last_fail else None,
-            provider=last_fail[3] if last_fail else None,
-            model=last_fail[4] if last_fail else None,
+            reason_code=last_fail[3] if last_fail else None,
+            provider=last_fail[4] if last_fail else None,
+            model=last_fail[5] if last_fail else None,
         )
     return states
 
@@ -454,6 +492,93 @@ def read_completed_units(day: str) -> set[tuple[str, str, str | None]]:
         and unit.activity is None
         and state.latest_event == TERMINAL_COMPLETE
     }
+
+
+def read_completed_since(day: str, since_ms: int) -> CompletionsSince:
+    """Return unique completed segment/activity units newer than since_ms.
+
+    Scans ``day`` and the prior day because post-midnight completions can
+    reference the previous day's health dir. Projects ``read_terminal_states``
+    from per-talent identities to unique segment/activity units, each tagged
+    with the newest completion ts.
+
+    This function does not create, modify, or delete journal state.
+    """
+    prev = (datetime.strptime(day, "%Y%m%d") - timedelta(days=1)).strftime("%Y%m%d")
+    seg_max: dict[tuple[str | None, str], int] = {}
+    act_max: dict[tuple[str | None, str], int] = {}
+
+    for scan_day in (day, prev):
+        for unit, state in read_terminal_states(scan_day).items():
+            if state.latest_event != TERMINAL_COMPLETE or state.latest_ts <= since_ms:
+                continue
+
+            if unit.segment:
+                seg_key = (unit.stream, unit.segment)
+                seg_max[seg_key] = max(seg_max.get(seg_key, 0), state.latest_ts)
+            elif unit.activity:
+                act_key = (unit.facet, unit.activity)
+                act_max[act_key] = max(act_max.get(act_key, 0), state.latest_ts)
+
+    segments = tuple(
+        sorted(
+            (
+                {"stream": stream, "segment": segment, "ts": ts}
+                for (stream, segment), ts in seg_max.items()
+            ),
+            key=lambda item: (
+                item["ts"],
+                item["stream"] or "",
+                item["segment"],
+            ),
+        )
+    )
+    activities = tuple(
+        sorted(
+            (
+                {"facet": facet, "activity": activity, "ts": ts}
+                for (facet, activity), ts in act_max.items()
+            ),
+            key=lambda item: (
+                item["ts"],
+                item["facet"] or "",
+                item["activity"],
+            ),
+        )
+    )
+    return CompletionsSince(segments=segments, activities=activities)
+
+
+def read_daily_deterministic_failures(
+    day: str,
+) -> dict[tuple[str, str | None], DeterministicFailure]:
+    """Return daily units whose latest terminal is a deterministic failure.
+
+    Keyed by ``(name, facet)``. A unit qualifies only when its latest
+    terminal health event is a ``talent.fail`` whose ``reason_code`` is in
+    ``DETERMINISTIC_FAILURE_REASON_CODES``; the count is the number of such
+    deterministic failures since the unit's last completion that day. A
+    completion or a transient latest failure excludes the unit.
+
+    This function does not create, modify, or delete journal state.
+    """
+    result: dict[tuple[str, str | None], DeterministicFailure] = {}
+    for unit, state in read_terminal_states(day).items():
+        if (
+            unit.mode != "daily"
+            or unit.segment is not None
+            or unit.activity is not None
+        ):
+            continue
+        if state.latest_event != TERMINAL_FAIL:
+            continue
+        if state.reason_code not in DETERMINISTIC_FAILURE_REASON_CODES:
+            continue
+        result[(unit.name, unit.facet)] = DeterministicFailure(
+            count=state.deterministic_fail_count,
+            reason_code=state.reason_code,
+        )
+    return result
 
 
 def read_segment_progress(day: str) -> dict[tuple[str | None, str], SegmentProgress]:
@@ -773,6 +898,7 @@ def _failed_backlog_unit(
         stream=unit.stream,
         segment=unit.segment,
         why=WHY_FAILED,
+        reason_code=state.reason_code,
         provider=state.provider,
         model=state.model,
         trailing_fail_count=state.trailing_fail_count,
@@ -811,6 +937,7 @@ def _segment_backlog_units(
                         stream=seg["stream"],
                         segment=key,
                         why=WHY_CORRUPT_RAW,
+                        reason_code=None,
                         provider=None,
                         model=None,
                         trailing_fail_count=0,
@@ -840,6 +967,7 @@ def _segment_backlog_units(
                         stream=unit.stream,
                         segment=unit.segment,
                         why=WHY_SENSED_NOT_THOUGHT,
+                        reason_code=None,
                         provider=None,
                         model=None,
                         trailing_fail_count=0,
@@ -859,6 +987,7 @@ def _segment_backlog_units(
                         stream=unit.stream,
                         segment=unit.segment,
                         why=WHY_NEVER_ATTEMPTED,
+                        reason_code=None,
                         provider=None,
                         model=None,
                         trailing_fail_count=0,
@@ -881,6 +1010,7 @@ def _segment_backlog_units(
                         stream=unit.stream,
                         segment=unit.segment,
                         why=WHY_SENSED_NOT_THOUGHT,
+                        reason_code=None,
                         provider=None,
                         model=None,
                         trailing_fail_count=0,
@@ -889,6 +1019,22 @@ def _segment_backlog_units(
                     )
                 )
     return tuple(why)
+
+
+def _representative_reason_unit(why: tuple[BacklogUnit, ...]) -> BacklogUnit | None:
+    candidates = [unit for unit in why if unit.why == WHY_FAILED and unit.reason_code]
+    if not candidates:
+        return None
+    return sorted(
+        candidates,
+        key=lambda unit: (
+            unit.mode,
+            unit.name,
+            unit.facet or "",
+            unit.stream or "",
+            unit.segment or "",
+        ),
+    )[0]
 
 
 def _non_segment_failed_units(
@@ -926,6 +1072,9 @@ def _complete_backlog_day(day: str) -> BacklogDay:
         not_sensed=0,
         why=(),
         reason=None,
+        reason_code=None,
+        provider=None,
+        model=None,
         error=None,
     )
 
@@ -959,6 +1108,9 @@ def read_backlog_view(window: int = BACKLOG_DEFAULT_WINDOW) -> BacklogView:
                     not_sensed=0,
                     why=(),
                     reason=None,
+                    reason_code=None,
+                    provider=None,
+                    model=None,
                     error=error,
                 )
             )
@@ -985,6 +1137,9 @@ def read_backlog_view(window: int = BACKLOG_DEFAULT_WINDOW) -> BacklogView:
                     not_sensed=0,
                     why=(),
                     reason=None,
+                    reason_code=None,
+                    provider=None,
+                    model=None,
                     error=error,
                 )
             )
@@ -1002,6 +1157,7 @@ def read_backlog_view(window: int = BACKLOG_DEFAULT_WINDOW) -> BacklogView:
         else:
             reason = None
 
+        representative = _representative_reason_unit(why)
         if any(unit.stuck for unit in why):
             state = BACKLOG_STATE_STUCK
         elif segment_depth > 0 or why:
@@ -1018,6 +1174,9 @@ def read_backlog_view(window: int = BACKLOG_DEFAULT_WINDOW) -> BacklogView:
                 not_sensed=completion.not_sensed,
                 why=why,
                 reason=reason,
+                reason_code=representative.reason_code if representative else None,
+                provider=representative.provider if representative else None,
+                model=representative.model if representative else None,
                 error=None,
             )
         )

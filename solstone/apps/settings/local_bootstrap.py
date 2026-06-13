@@ -6,13 +6,19 @@
 from __future__ import annotations
 
 import logging
+import sys
 import threading
+from pathlib import Path
 
-import psutil
-
-from solstone.apps.settings.install_copy import INSTALL_FAILED_NO_PROGRESS
-from solstone.think.models import LOCAL_MODEL
-from solstone.think.providers import local_install
+from solstone.apps.settings.install_copy import (
+    INSTALL_FAILED_NO_PROGRESS,
+    LOCAL_MEMORY_WARNING_LOW_TEMPLATE,
+    LOCAL_MEMORY_WARNING_UNKNOWN,
+    LOCAL_MLX_MEMORY_WARNING_UNKNOWN,
+)
+from solstone.think.callosum import callosum_send
+from solstone.think.models import LOCAL_MODEL, QWEN_35_9B
+from solstone.think.providers import local_install, mlx_install
 from solstone.think.providers.install_state import (
     IN_FLIGHT_STATES,
     InstallStatus,
@@ -24,8 +30,17 @@ from solstone.think.providers.install_state import (
 )
 from solstone.think.providers.local import (
     LOCAL_MODEL_SPECS,
+    LocalModelSpec,
     LocalProviderError,
     normalize_model_id,
+)
+from solstone.think.providers.memory import (
+    MLX_AVAILABLE_FLOOR_BYTES,
+    assess_memory,
+    free_bytes,
+    gb,
+    gb_label,
+    read_total_bytes,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,6 +48,7 @@ logger = logging.getLogger(__name__)
 _INSTALL_THREADS: dict[str, threading.Thread] = {}
 _INSTALL_PROGRESS: dict[str, tuple[int | None, int | None]] = {}
 _INSTALL_LOCK = threading.Lock()
+_MLX_MODEL_LABEL = f"qwen 3.5 9B VLM — {gb_label(MLX_AVAILABLE_FLOOR_BYTES)} GB"
 
 
 class LocalBootstrapUnavailableError(RuntimeError):
@@ -41,6 +57,56 @@ class LocalBootstrapUnavailableError(RuntimeError):
 
 class LocalBootstrapStartError(RuntimeError):
     """Raised when the bootstrap worker could not be started."""
+
+
+def _is_mlx_backend() -> bool:
+    return sys.platform == "darwin"
+
+
+def _resolve_model_id(model: str | None) -> str:
+    if _is_mlx_backend():
+        return QWEN_35_9B
+    return normalize_model_id(model)
+
+
+def accepted_request_model(model: str | None) -> str | None:
+    """Return the canonical local model id for this backend, if recognized."""
+    candidate = model or LOCAL_MODEL
+    if _is_mlx_backend():
+        return QWEN_35_9B if candidate in {LOCAL_MODEL, QWEN_35_9B} else None
+    return candidate if candidate in LOCAL_MODEL_SPECS else None
+
+
+def local_model_ids() -> list[str]:
+    """Selectable canonical model ids for this backend."""
+    if _is_mlx_backend():
+        return [QWEN_35_9B]
+    return list(LOCAL_MODEL_SPECS)
+
+
+def list_local_models() -> list[dict[str, object]]:
+    """Return backend-aware local model descriptors for Settings."""
+    if _is_mlx_backend():
+        spec = mlx_install.resolve_model_spec()
+        return [
+            {
+                "name": spec.name,
+                "label": _MLX_MODEL_LABEL,
+                "min_ram_gb": MLX_AVAILABLE_FLOOR_BYTES // 1024**3,
+                "size_bytes": spec.size_bytes,
+            }
+        ]
+    return [
+        {
+            "name": name,
+            # Fork: bundled model is Qwen3.6-35B-A3B (see providers/local.py),
+            # not upstream's qwen3.5-4b. min_ram_gb below is spec-derived (48).
+            "label": "qwen3.6 35B-A3B VLM — 48 GB",
+            "min_ram_gb": spec.min_ram_bytes // 1024**3,
+            "size_bytes": spec.size_bytes,
+        }
+        for name, spec in LOCAL_MODEL_SPECS.items()
+    ]
 
 
 def check_binary_present() -> bool:
@@ -68,25 +134,79 @@ def _platform_supported() -> tuple[bool, str]:
     return True, ""
 
 
-def get_availability_payload(model: str) -> dict[str, bool | float | int | str]:
+def _download_bytes_for_local_spec(spec: LocalModelSpec) -> int:
+    return int(spec.size_bytes + (spec.mmproj_size_bytes or 0))
+
+
+def get_availability_payload(model: str) -> dict[str, bool | float | int | str | None]:
     """Return the local provider availability payload used by Settings."""
-    model_id = normalize_model_id(model)
+    model_id = _resolve_model_id(model)
+    if _is_mlx_backend():
+        spec = mlx_install.resolve_model_spec(model_id)
+        readiness = mlx_install.inspect_readiness(model_id)
+        memory_verdict = assess_memory(
+            MLX_AVAILABLE_FLOOR_BYTES, block_below_floor=True
+        )
+        total_memory_bytes = read_total_bytes()
+        min_ram_gb = MLX_AVAILABLE_FLOOR_BYTES // 1024**3
+        memory_blocked = memory_verdict.severity == "blocked"
+        available = bool(
+            readiness["platform_supported"]
+            and readiness["package_available"]
+            and not memory_blocked
+            and readiness["model_installed"]
+        )
+        warning = (
+            LOCAL_MLX_MEMORY_WARNING_UNKNOWN
+            if memory_verdict.severity == "warning"
+            else ""
+        )
+        if not readiness["platform_supported"]:
+            reason = "requires Apple Silicon macOS"
+        elif memory_blocked:
+            assert memory_verdict.available_bytes is not None
+            reason = (
+                "insufficient RAM "
+                f"(need {gb_label(memory_verdict.required_bytes)} GB available, "
+                f"have {gb_label(memory_verdict.available_bytes)} GB available)"
+            )
+        elif not readiness["package_available"]:
+            reason = "mlx-vlm runtime is not installed"
+        elif not readiness["model_installed"]:
+            reason = "local model files are not installed"
+        else:
+            reason = ""
+        return {
+            "model": readiness["model_id"],
+            "platform_supported": readiness["platform_supported"],
+            "total_memory_gb": gb(total_memory_bytes),
+            "available_memory_gb": gb(memory_verdict.available_bytes),
+            "min_ram_gb": min_ram_gb,
+            "binary_present": readiness["package_available"],
+            "model_present": readiness["model_installed"],
+            "available": available,
+            "reason": reason,
+            "warning": warning,
+            "download_bytes": spec.size_bytes,
+        }
+
     spec = LOCAL_MODEL_SPECS[model_id]
     binary_present = check_binary_present()
     model_present = check_model_present(model_id)
     platform_supported, reason = _platform_supported()
-    total_memory_bytes = int(psutil.virtual_memory().total)
-    total_memory_gb = round(total_memory_bytes / 1024**3, 1)
-    ram_sufficient = total_memory_bytes >= spec.min_ram_bytes
+    total_memory_gb = gb(read_total_bytes())
+    memory_verdict = assess_memory(spec.min_ram_bytes, block_below_floor=False)
+    warning = ""
+    if memory_verdict.severity == "warning":
+        if memory_verdict.available_bytes is None:
+            warning = LOCAL_MEMORY_WARNING_UNKNOWN
+        else:
+            warning = LOCAL_MEMORY_WARNING_LOW_TEMPLATE.format(
+                ram_gb=spec.min_ram_bytes // 1024**3
+            )
 
     if not platform_supported:
         available = False
-    elif not ram_sufficient:
-        available = False
-        reason = (
-            f"insufficient RAM (need {spec.min_ram_bytes // 1024**3} GB, "
-            f"have {int(total_memory_bytes / 1024**3)} GB)"
-        )
     else:
         available = binary_present and model_present
         if not binary_present:
@@ -100,11 +220,14 @@ def get_availability_payload(model: str) -> dict[str, bool | float | int | str]:
         "model": model_id,
         "platform_supported": platform_supported,
         "total_memory_gb": total_memory_gb,
+        "available_memory_gb": gb(memory_verdict.available_bytes),
         "min_ram_gb": spec.min_ram_bytes // 1024**3,
         "binary_present": binary_present,
         "model_present": model_present,
         "available": available,
         "reason": reason,
+        "warning": warning,
+        "download_bytes": _download_bytes_for_local_spec(spec),
     }
 
 
@@ -172,14 +295,14 @@ def _normalize_stalled_status(model: str, status: InstallStatus) -> InstallStatu
 
 def get_state(model: str) -> dict[str, int | str | None]:
     """Return the serialized bootstrap state, applying stall detection."""
-    model_id = normalize_model_id(model)
+    model_id = _resolve_model_id(model)
     status = _normalize_stalled_status(model_id, _read_status())
     return _payload_for_status(model_id, status)
 
 
 def start_bootstrap(model: str) -> tuple[dict[str, str], int]:
     """Start the local provider bootstrap worker if needed."""
-    model_id = normalize_model_id(model)
+    model_id = _resolve_model_id(model)
     get_state(model_id)
     status = _read_status()
     if status["install_state"] == "installed":
@@ -209,9 +332,16 @@ def start_bootstrap(model: str) -> tuple[dict[str, str], int]:
         if status["install_state"] in IN_FLIGHT_STATES:
             return {"install_state": status["install_state"]}, 200
 
+        disk_reason = _disk_blocked_reason(availability)
+        if disk_reason:
+            raise LocalBootstrapUnavailableError(disk_reason)
+
         try:
+            worker = (
+                _mlx_bootstrap_worker if _is_mlx_backend() else _run_bootstrap_worker
+            )
             thread = threading.Thread(
-                target=_run_bootstrap_worker,
+                target=worker,
                 args=(model_id,),
                 name=f"local-provider-bootstrap-{model_id}",
                 daemon=True,
@@ -238,13 +368,58 @@ def start_bootstrap(model: str) -> tuple[dict[str, str], int]:
     return {"install_state": "downloading"}, 202
 
 
-def _blocked_reason(availability: dict[str, bool | float | int | str]) -> str:
+def _blocked_reason(availability: dict[str, bool | float | int | str | None]) -> str:
     if not availability["platform_supported"]:
         return str(availability["reason"])
     reason = str(availability["reason"])
     if reason.startswith("insufficient RAM"):
         return reason
+    if reason.startswith("insufficient disk"):
+        return reason
+    if _is_mlx_backend() and reason == "mlx-vlm runtime is not installed":
+        return reason
     return ""
+
+
+def _disk_target() -> Path:
+    if _is_mlx_backend():
+        return Path(mlx_install.constants.HF_HUB_CACHE)
+    return local_install.cache_root()
+
+
+def _disk_blocked_reason(
+    availability: dict[str, bool | float | int | str | None],
+) -> str:
+    need = int(availability["download_bytes"] or 0)
+    free = free_bytes(_disk_target())
+    if free >= need:
+        return ""
+    return (
+        "insufficient disk space "
+        f"(need {gb_label(need)} GB, have {gb_label(free)} GB free)"
+    )
+
+
+def _mlx_bootstrap_worker(model: str) -> None:
+    current_thread = threading.current_thread()
+    try:
+        mlx_install.install_local_mlx(model)
+    except Exception:
+        logger.exception("local MLX provider bootstrap failed")
+        _clear_progress(model)
+    finally:
+        with _INSTALL_LOCK:
+            if _INSTALL_THREADS.get(model) is current_thread:
+                _INSTALL_THREADS.pop(model, None)
+
+
+def _request_local_server_start() -> None:
+    """Best-effort: ask the supervisor to start the local server. Never raises."""
+    try:
+        if not callosum_send("supervisor", "start_local"):
+            logger.warning("could not request local server start: callosum send failed")
+    except Exception:
+        logger.exception("could not request local server start")
 
 
 def _run_bootstrap_worker(model: str) -> None:
@@ -259,6 +434,9 @@ def _run_bootstrap_worker(model: str) -> None:
             transition_state(_read_status(), new_state="failed", error=str(exc))
         )
         _clear_progress(model)
+    else:
+        logger.info("local provider bootstrap complete; requesting local server start")
+        _request_local_server_start()
     finally:
         with _INSTALL_LOCK:
             if _INSTALL_THREADS.get(model) is current_thread:

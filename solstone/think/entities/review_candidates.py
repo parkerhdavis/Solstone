@@ -8,14 +8,13 @@ Sole write-owner of:
 
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from solstone.think.entities.core import atomic_write
+from solstone.think.journal_io import atomic_replace, hold_lock
 from solstone.think.utils import get_journal
 
 logger = logging.getLogger(__name__)
@@ -31,11 +30,6 @@ def review_candidates_dir() -> Path:
 def review_candidates_path() -> Path:
     """Return the entity merge-candidates JSONL path."""
     return review_candidates_dir() / "review-candidates.jsonl"
-
-
-def review_candidates_lock_path() -> Path:
-    """Return the sibling lock path for review-candidates.jsonl."""
-    return review_candidates_dir() / ".review-candidates.lock"
 
 
 def _load_jsonl_rows(path: Path) -> list[dict[str, Any]]:
@@ -78,7 +72,7 @@ def _save_jsonl_rows(path: Path, rows: list[dict[str, Any]]) -> None:
     content = ""
     if rows:
         content = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n"
-    atomic_write(path, content)
+    atomic_replace(path, content)
 
 
 def save_candidates(rows: list[dict[str, Any]]) -> None:
@@ -111,18 +105,11 @@ def locked_modify_candidates(
     fn: Callable[[list[dict[str, Any]]], list[dict[str, Any]]],
 ) -> list[dict[str, Any]]:
     """Apply a locked read-modify-write cycle to review-candidates.jsonl."""
-    review_candidates_dir()
-    lock_path = review_candidates_lock_path()
-    # Lock file contents are irrelevant; opening with "w" matches the existing pattern.
-    with open(lock_path, "w", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
-        try:
-            rows = load_candidates()
-            new_rows = fn(rows)
-            save_candidates(new_rows)
-            return new_rows
-        finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
+    with hold_lock(review_candidates_path()):
+        rows = load_candidates()
+        new_rows = fn(rows)
+        save_candidates(new_rows)
+        return new_rows
 
 
 def utc_now_iso() -> str:
@@ -130,6 +117,70 @@ def utc_now_iso() -> str:
     return (
         datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     )
+
+
+def record_merge_candidate(
+    *,
+    facet: str,
+    day: str,
+    source: str,
+    source_slug: str,
+    target: str,
+    target_slug: str,
+    evidence: str,
+    basis: str = "name-variant",
+    detections: int | None = None,
+    needs: int | None = None,
+) -> tuple[dict[str, Any], bool]:
+    """Create or update one entity merge candidate."""
+    row: dict[str, Any] | None = None
+    created = False
+
+    def mutate(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        nonlocal row, created
+        existing = find_candidate(rows, facet, source_slug, target_slug)
+        now = utc_now_iso()
+        if existing is None:
+            row = {
+                "facet": facet,
+                "source": source,
+                "source_slug": source_slug,
+                "target": target,
+                "target_slug": target_slug,
+                "status": "open",
+                "evidence": {
+                    "basis": basis,
+                    "summary": evidence,
+                    "detection_count": detections,
+                    "needs": needs,
+                },
+                "first_surfaced": day,
+                "last_surfaced": day,
+                "created_at": now,
+                "updated_at": now,
+            }
+            created = True
+            return list(rows) + [row]
+
+        ev = existing.setdefault("evidence", {})
+        ev["basis"] = basis
+        ev["summary"] = evidence
+        if detections is not None:
+            ev["detection_count"] = detections
+        if needs is not None:
+            ev["needs"] = needs
+        existing["last_surfaced"] = day
+        existing["updated_at"] = now
+        row = existing
+        created = False
+        return rows
+
+    locked_modify_candidates(mutate)
+
+    if row is None:  # pragma: no cover - defensive assertion
+        raise RuntimeError("record-merge-candidate produced no row")
+
+    return row, created
 
 
 def touch_updated(row: dict[str, Any]) -> None:

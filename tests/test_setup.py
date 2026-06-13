@@ -154,7 +154,7 @@ def patch_subprocess(
 
 
 def patch_service_health(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(service, "_up", lambda port=5015: 0)
+    monkeypatch.setattr(service, "_up", lambda: 0)
     monkeypatch.setattr(health_cli, "health_check", lambda: 0)
 
 
@@ -353,9 +353,9 @@ def prior_artifact_paths(journal: Path) -> dict[str, list[Path]]:
         "journal": [setup.config_path(), journal],
         "install_models": setup.model_paths(),
         "skills_user": [
-            Path.home() / ".claude" / "skills" / "solstone" / "SKILL.md",
-            Path.home() / ".codex" / "skills" / "solstone" / "SKILL.md",
-            Path.home() / ".gemini" / "skills" / "solstone" / "SKILL.md",
+            Path.home() / ".claude" / "skills" / "sol" / "SKILL.md",
+            Path.home() / ".codex" / "skills" / "sol" / "SKILL.md",
+            Path.home() / ".gemini" / "skills" / "sol" / "SKILL.md",
         ],
         "skills_journal": [
             journal / ".claude" / "skills",
@@ -1702,7 +1702,7 @@ def test_setup_wrapper_round_trip_closure(
         assert state is install_guard.AliasState.OWNED
 
 
-def test_step_skills_user_installs_solstone_bundle_for_all_agents(
+def test_step_skills_user_installs_sol_skill_for_all_agents(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1964,7 +1964,7 @@ def test_resumption_wedged_service_falls_through_when_service_up_fails(
     patch_home(monkeypatch, tmp_path)
     patch_source_checkout(monkeypatch, tmp_path)
     monkeypatch.delenv("SOLSTONE_JOURNAL", raising=False)
-    monkeypatch.setattr(service, "_up", lambda port=5015: 7)
+    monkeypatch.setattr(service, "_up", lambda: 7)
     journal = tmp_path / "journal"
     write_clean_prior_manifest(journal)
     calls = patch_subprocess(monkeypatch)
@@ -1991,7 +1991,7 @@ def test_step_service_failure_message(
     artifact = setup.service_artifact_path()
     expected_paths = [setup.absolute_string(artifact)] if artifact is not None else []
 
-    monkeypatch.setattr(service, "_up", lambda port=5015: 7)
+    monkeypatch.setattr(service, "_up", lambda: 7)
     result = setup.step_service(ctx, 6)
 
     assert result.status == "failed"

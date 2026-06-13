@@ -3,11 +3,8 @@
 
 """CLI commands for the journal identity directory.
 
-Provides read and write access to ``{journal}/identity/self.md``,
-``{journal}/identity/partner.md``, ``{journal}/identity/agency.md``, and
-``{journal}/identity/pulse.md``, ``{journal}/identity/awareness.md``, and
-``{journal}/identity/digest.md`` — sol's identity and initiative files. Also
-provides read access to the morning briefing at
+Provides read and write access to ``{journal}/identity/partner.md`` and read access
+to sol's health surface. Also provides read access to the morning briefing at
 ``{journal}/YYYYMMDD/talents/morning_briefing.md``.
 
 Top-level ``journal identity`` command.
@@ -28,7 +25,6 @@ from solstone.think.cortex_client import (
 from solstone.think.identity import (
     ensure_identity_directory,
     update_identity_section,
-    update_self_md_section,
     write_identity,
 )
 from solstone.think.steward import (
@@ -41,7 +37,7 @@ from solstone.think.steward import (
 from solstone.think.utils import day_dirs, day_path, get_journal, require_solstone
 
 app = typer.Typer(
-    help="Journal identity directory — self.md, partner.md, agency.md, pulse.md, awareness.md, digest.md, and morning briefing.",
+    help="Journal identity directory — partner.md, health.md, and morning briefing.",
     invoke_without_command=True,
     no_args_is_help=False,
 )
@@ -84,7 +80,7 @@ def _hydrate() -> str:
     """Return the combined identity hydration document."""
     identity_dir = Path(get_journal()) / "identity"
     chunks = [f"# species\n\n{_SPECIES_PREAMBLE}\n"]
-    for stem in ("self", "partner", "agency", "awareness"):
+    for stem in ("partner",):
         path = identity_dir / f"{stem}.md"
         content = (
             path.read_text(encoding="utf-8").strip()
@@ -122,58 +118,6 @@ def _resolve_content(value: str | None, *, allow_empty: bool = False) -> str:
         typer.echo("Error: no content provided.", err=True)
         raise typer.Exit(1)
     return content
-
-
-@app.command("self")
-def self_cmd(
-    write: bool = typer.Option(
-        False, "--write", "-w", help="Overwrite self.md (content via --value or stdin)."
-    ),
-    update_section: str | None = typer.Option(
-        None,
-        "--update-section",
-        help="Update a specific ## section of self.md (content via --value or stdin).",
-    ),
-    value: str | None = typer.Option(
-        None, "--value", help="Content to write (alternative to stdin)."
-    ),
-) -> None:
-    """Read or write identity/self.md."""
-    identity_dir = _identity_dir()
-    self_path = identity_dir / "self.md"
-
-    if update_section:
-        content = _resolve_content(value)
-        if update_self_md_section(
-            update_section,
-            content.strip(),
-            actor=_actor_for_cmd("self", "--update-section <heading>"),
-            reason="manual section update",
-        ):
-            typer.echo(f"Updated ## {update_section} in self.md.")
-        else:
-            typer.echo(f"Error: section '## {update_section}' not found.", err=True)
-            raise typer.Exit(1)
-        return
-
-    if write:
-        content = _resolve_content(value)
-        write_identity(
-            "self.md",
-            actor=_actor_for_cmd("self", "--write"),
-            op="replace",
-            section=None,
-            content=content,
-            reason="manual replace",
-        )
-        typer.echo("self.md updated.")
-        return
-
-    # Read mode
-    if not self_path.exists():
-        typer.echo("self.md not found.", err=True)
-        raise typer.Exit(1)
-    typer.echo(self_path.read_text(encoding="utf-8"))
 
 
 @app.command("partner")
@@ -230,174 +174,6 @@ def partner_cmd(
         typer.echo("partner.md not found.", err=True)
         raise typer.Exit(1)
     typer.echo(partner_path.read_text(encoding="utf-8"))
-
-
-@app.command("agency")
-def agency_cmd(
-    write: bool = typer.Option(
-        False,
-        "--write",
-        "-w",
-        help="Overwrite agency.md (content via --value or stdin).",
-    ),
-    value: str | None = typer.Option(
-        None, "--value", help="Content to write (alternative to stdin)."
-    ),
-) -> None:
-    """Read or write identity/agency.md."""
-    identity_dir = _identity_dir()
-    agency_path = identity_dir / "agency.md"
-
-    if write:
-        content = _resolve_content(value)
-        write_identity(
-            "agency.md",
-            actor=_actor_for_cmd("agency", "--write"),
-            op="replace",
-            section=None,
-            content=content,
-            reason="manual replace",
-        )
-        typer.echo("agency.md updated.")
-        return
-
-    # Read mode
-    if not agency_path.exists():
-        typer.echo("agency.md not found.", err=True)
-        raise typer.Exit(1)
-    typer.echo(agency_path.read_text(encoding="utf-8"))
-
-
-@app.command("pulse")
-def pulse_cmd(
-    write: bool = typer.Option(
-        False,
-        "--write",
-        "-w",
-        help="Overwrite pulse.md (content via --value or stdin).",
-    ),
-    value: str | None = typer.Option(
-        None, "--value", help="Content to write (alternative to stdin)."
-    ),
-) -> None:
-    """Read or write identity/pulse.md."""
-    identity_dir = _identity_dir()
-    pulse_path = identity_dir / "pulse.md"
-
-    if write:
-        content = _resolve_content(value)
-        write_identity(
-            "pulse.md",
-            actor=_actor_for_cmd("pulse", "--write"),
-            op="replace",
-            section=None,
-            content=content,
-            reason="manual replace",
-        )
-        typer.echo("pulse.md updated.")
-        return
-
-    # Read mode
-    if not pulse_path.exists():
-        typer.echo("pulse.md not found.", err=True)
-        raise typer.Exit(1)
-    typer.echo(pulse_path.read_text(encoding="utf-8"))
-
-
-@app.command("awareness")
-def awareness_cmd(
-    write: bool = typer.Option(
-        False,
-        "--write",
-        "-w",
-        help="Overwrite awareness.md (content via --value or stdin).",
-    ),
-    value: str | None = typer.Option(
-        None, "--value", help="Content to write (alternative to stdin)."
-    ),
-) -> None:
-    """Read or write identity/awareness.md."""
-    identity_dir = _identity_dir()
-    awareness_path = identity_dir / "awareness.md"
-
-    if write:
-        content = _resolve_content(value)
-        write_identity(
-            "awareness.md",
-            actor=_actor_for_cmd("awareness", "--write"),
-            op="replace",
-            section=None,
-            content=content,
-            reason="manual replace",
-        )
-        typer.echo("awareness.md updated.")
-        return
-
-    # Read mode
-    if not awareness_path.exists():
-        typer.echo("awareness.md not found.", err=True)
-        raise typer.Exit(1)
-    typer.echo(awareness_path.read_text(encoding="utf-8"))
-
-
-@app.command("digest")
-def digest_cmd(
-    write: bool = typer.Option(
-        False,
-        "--write",
-        "-w",
-        help="Persist digest text (used by the digest talent).",
-    ),
-    value: str | None = typer.Option(
-        None, "--value", help="Digest text to persist (alternative to stdin)."
-    ),
-) -> None:
-    """Regenerate the identity digest (synchronous)."""
-    identity_dir = _identity_dir()
-    digest_path = identity_dir / "digest.md"
-
-    if write:
-        content = _resolve_content(value, allow_empty=True)
-        write_identity(
-            "digest.md",
-            actor=_actor_for_cmd("digest", "--write"),
-            op="replace",
-            section=None,
-            content=content,
-            reason="manual replace",
-        )
-        typer.echo(f"wrote {digest_path} ({digest_path.stat().st_size} bytes)")
-        return
-
-    before_mtime_ns = digest_path.stat().st_mtime_ns if digest_path.exists() else None
-    try:
-        use_id = cortex_request(prompt="", name="digest")
-    except CortexSpawnUnavailable:
-        use_id = None
-    if use_id is None:
-        typer.echo("Error: failed to send digest request to cortex.", err=True)
-        raise typer.Exit(1)
-
-    completed, timed_out = wait_for_uses([use_id], timeout=600)
-    if use_id in timed_out:
-        typer.echo("Error: digest request timed out.", err=True)
-        raise typer.Exit(1)
-
-    end_state = completed.get(use_id, "unknown")
-    if end_state != "finish":
-        typer.echo(f"Error: digest request failed: {end_state}.", err=True)
-        raise typer.Exit(1)
-
-    if not digest_path.exists():
-        typer.echo("Error: digest.md was not written.", err=True)
-        raise typer.Exit(1)
-
-    after_mtime_ns = digest_path.stat().st_mtime_ns
-    if before_mtime_ns is not None and after_mtime_ns <= before_mtime_ns:
-        typer.echo("Error: digest.md was not updated.", err=True)
-        raise typer.Exit(1)
-
-    typer.echo(f"regenerated {digest_path} ({digest_path.stat().st_size} bytes)")
 
 
 @app.command("health")

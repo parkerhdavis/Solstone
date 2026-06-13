@@ -968,6 +968,15 @@ input:checked + .slider:before {
   margin: 1em 0 1.25em;
 }
 
+.ai-readiness-summary .provider-card__header {
+  margin-bottom: 0.35em;
+}
+
+.ai-readiness-summary[data-severity="neutral"] .provider-card__issue,
+.ai-readiness-summary[data-severity="ok"] .provider-card__issue {
+  color: #666;
+}
+
 .provider-card {
   border: 1px solid var(--facet-border, #e5e0db);
   border-radius: 8px;
@@ -2386,7 +2395,7 @@ button:focus:not(:focus-visible) {
     <select class="settings-nav-select" id="navSelect">
       <optgroup label="identity">
         <option value="profile">profile</option>
-        <option value="agent">agent identity</option>
+        <option value="agent">sol&#32;identity</option>
       </optgroup>
       <optgroup label="AI">
         <option value="providers">providers</option>
@@ -2426,7 +2435,7 @@ button:focus:not(:focus-visible) {
     <div class="settings-nav-group">
       <div class="settings-nav-label">identity</div>
       <button class="settings-nav-item active" data-section="profile" id="tab-profile" role="tab" aria-selected="true" aria-controls="section-profile" tabindex="0">profile</button>
-      <button class="settings-nav-item" data-section="agent" id="tab-agent" role="tab" aria-selected="false" aria-controls="section-agent" tabindex="-1">agent identity</button>
+      <button class="settings-nav-item" data-section="agent" id="tab-agent" role="tab" aria-selected="false" aria-controls="section-agent" tabindex="-1">sol&#32;identity</button>
     </div>
     <div class="settings-nav-group">
       <div class="settings-nav-label">AI</div>
@@ -2570,7 +2579,7 @@ button:focus:not(:focus-visible) {
     <section class="settings-section" id="section-providers" role="tabpanel" aria-labelledby="tab-providers">
       <h2>providers</h2>
       <p class="settings-section-desc">configure ai providers separately for generation (text analysis) and cogitate (tool-calling agents).</p>
-      <div id="providersPanel" class="providers-panel"></div>
+      <div id="providersPanel" class="providers-panel" tabindex="-1"></div>
 
       <form class="settings-form" onsubmit="return false;">
 
@@ -2815,6 +2824,11 @@ button:focus:not(:focus-visible) {
         <span id="backendCompatWarningText"></span>
       </div>
 
+      <div id="transcribeResourceNotice" class="provider-key-warning" style="display:none">
+        <span>&#9888;</span>
+        <span id="transcribeResourceNoticeText"></span>
+      </div>
+
       <!-- Whisper-specific settings -->
       <fieldset id="whisper-settings" class="backend-settings">
         <div class="settings-field">
@@ -2901,6 +2915,7 @@ button:focus:not(:focus-visible) {
 
         <div class="form-help">Platform runtime: <span id="parakeet-runtime-label">unsupported</span></div>
       </fieldset>
+      <div class="form-help" id="transcribeResourceInfo"></div>
 
       <!-- Shared settings -->
       <div class="settings-field" style="margin-top: 1.5em;">
@@ -3170,6 +3185,17 @@ button:focus:not(:focus-visible) {
       <div class="settings-field">
         <div class="toggle-container" style="justify-content:flex-start; gap:1em;">
           <label class="toggle-switch toggle-positive">
+            <input type="checkbox" id="field-network-access">
+            <span class="slider"></span>
+          </label>
+          <span>{{ settings_copy.CONVEY_NETWORK_ACCESS_LABEL }}</span>
+        </div>
+        <small id="network-access-status" data-default-text="{{ settings_copy.CONVEY_NETWORK_ACCESS_HINT }}">{{ settings_copy.CONVEY_NETWORK_ACCESS_HINT }}</small>
+      </div>
+
+      <div class="settings-field">
+        <div class="toggle-container" style="justify-content:flex-start; gap:1em;">
+          <label class="toggle-switch toggle-positive">
             <input type="checkbox" id="field-trust-localhost" data-section="convey" data-key="trust_localhost">
             <span class="slider"></span>
           </label>
@@ -3398,13 +3424,13 @@ button:focus:not(:focus-visible) {
 
     <!-- Agent Identity Section -->
     <section class="settings-section" id="section-agent" role="tabpanel" aria-labelledby="tab-agent">
-      <h2>agent identity</h2>
+      <h2>sol&#32;identity</h2>
       <p class="settings-section-desc">Your assistant's name and identity.</p>
 
       <form class="settings-form" onsubmit="return false;">
 
       <div class="settings-field">
-        <label for="field-agent-name">agent name</label>
+        <label for="field-agent-name">name</label>
         <input type="text" id="field-agent-name" placeholder="sol">
         <small>The name your assistant uses to identify itself</small>
       </div>
@@ -3423,7 +3449,7 @@ button:focus:not(:focus-visible) {
 
       <div class="settings-field">
         <button class="setup-btn" id="resetAgentName" style="background: #6c757d; font-size: 0.85em; padding: 0.4em 1em;">reset to default</button>
-        <small>reset the agent name back to "sol"</small>
+        <small>reset the name back to "sol"</small>
       </div>
       </form>
     </section>
@@ -3623,7 +3649,9 @@ let logNextCursor = null;
 let insightsData = null;
 let keyValidationData = {};
 let solVoiceData = null;
+let networkAccessCapability = null;
 let solVoiceThrottledTimer = null;
+let transcribeResource = null;
 const escapeHtml = (value) => window.AppServices.escapeHtml(value);
 }
 
@@ -3638,6 +3666,12 @@ const solVoiceCopy = {
   throttledHeaderOutcome: {{ sol_voice_copy.SOL_VOICE_THROTTLED_LOG_HEADER_OUTCOME | tojson }},
 };
 const solVoiceCategories = {{ sol_voice_copy.CATEGORIES | list | tojson }};
+const networkAccessCopy = {
+  hint: {{ settings_copy.CONVEY_NETWORK_ACCESS_HINT | tojson }},
+  enableProgress: {{ settings_copy.CONVEY_NETWORK_ENABLE_PROGRESS | tojson }},
+  disableProgress: {{ settings_copy.CONVEY_NETWORK_DISABLE_PROGRESS | tojson }},
+  restartTimeout: {{ settings_copy.CONVEY_RESTART_TIMEOUT | tojson }},
+};
 
 // ========== TAB ATTENTION ==========
 
@@ -3712,6 +3746,23 @@ setupModalAccessibility('cleanupModal');
 // ========== NAVIGATION ==========
 const VALID_SECTIONS = ['profile', 'agent', 'providers', 'apikeys', 'transcription', 'observer', 'vision', 'insights', 'sol-voice', 'chat', 'security', 'sync', 'storage', 'support', 'facets', 'facet-appearance', 'facet-activities', 'facet-activity'];
 
+function focusProvidersPanel() {
+  const panel = document.getElementById('providersPanel');
+  if (!panel) return;
+  panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  panel.focus({ preventScroll: true });
+}
+
+function handleProvidersAnchorClick(e) {
+  const anchor = e.target.closest('a');
+  if (!anchor) return;
+  if (anchor.pathname !== window.location.pathname || anchor.hash !== '#providers') {
+    return;
+  }
+  e.preventDefault();
+  switchSection('providers');
+}
+
 function switchSection(sectionId, updateHash = true) {
   // Validate section exists
   if (!VALID_SECTIONS.includes(sectionId)) {
@@ -3738,6 +3789,10 @@ function switchSection(sectionId, updateHash = true) {
   document.querySelectorAll('.settings-section').forEach(section => {
     section.classList.toggle('active', section.id === 'section-' + sectionId);
   });
+
+  if (sectionId === 'providers') {
+    focusProvidersPanel();
+  }
 
   if (sectionId === 'facets') {
     loadAllFacets();
@@ -3918,6 +3973,8 @@ document.querySelectorAll('.settings-nav-item').forEach(btn => {
   btn.addEventListener('click', () => switchSection(btn.dataset.section));
 });
 
+document.addEventListener('click', handleProvidersAnchorClick);
+
 // Keyboard navigation for settings nav tabs
 document.getElementById('settingsNav').addEventListener('keydown', (e) => {
   if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(e.key)) return;
@@ -4009,7 +4066,7 @@ async function loadConfig() {
     // Load transcribe backends first (populates select options)
     await loadTranscribeBackends();
 
-    const conveyConfigRequest = fetch('api/config/convey')
+    const conveyConfigRequest = fetch('/api/config/convey')
       .then(response => response.json())
       .catch(err => {
         console.error('Error loading convey config:', err);
@@ -4022,6 +4079,7 @@ async function loadConfig() {
     configData = journalConfig;
     populateFields(configData);
     populateConveyFields(conveyConfig);
+    await refreshNetworkAccessCapability();
     checkShowSetup();
   } catch (err) {
     console.error('Error loading config:', err);
@@ -4073,6 +4131,8 @@ function populateFields(config) {
   if (runtimeLabel) {
     runtimeLabel.textContent = transcribeRuntimeLabel;
   }
+  renderTranscribeResourceInfo(transcribeResource);
+  renderTranscribeResourceNotice(transcribeResource);
 
   // Parakeet settings (nested)
   const parakeet = transcribe.parakeet || {};
@@ -4420,8 +4480,8 @@ async function loadSolVoiceThrottledLog() {
   const log = document.getElementById('sol-voice-throttled-log');
   if (!log || log.hidden) return;
   try {
-    const rows = await window.apiJson('api/sol_voice/throttled?limit=50');
-    renderSolVoiceThrottledLog(Array.isArray(rows) ? rows : []);
+    const data = await window.apiJson('api/sol_voice/throttled?limit=50');
+    renderSolVoiceThrottledLog(Array.isArray(data?.items) ? data.items : []);
   } catch (err) {
     log.textContent = solVoiceCopy.throttledError;
     window.logError(err, { context: 'settings: loadSolVoiceThrottledLog failed' });
@@ -4479,6 +4539,84 @@ function renderConveyHostFields(config) {
   }
 }
 
+function setNetworkAccessStatus(message, isError = false) {
+  const status = document.getElementById('network-access-status');
+  if (!status) return;
+  status.textContent = message || status.dataset.defaultText || networkAccessCopy.hint;
+  status.classList.toggle('status-error', Boolean(isError));
+  status.classList.toggle('status-saved', false);
+}
+
+function renderNetworkAccessCapability(data, options = {}) {
+  networkAccessCapability = data || {};
+  const toggle = document.getElementById('field-network-access');
+  if (!toggle) return;
+
+  const enabled = Boolean(networkAccessCapability.network_access_enabled);
+  const writable = Boolean(networkAccessCapability.can_change_network_access);
+  toggle.checked = enabled;
+  toggle.__lastKnownValue = enabled;
+  toggle.disabled = !writable;
+
+  if (options.message) {
+    setNetworkAccessStatus(options.message, Boolean(options.error));
+  } else if (!writable && networkAccessCapability.reason) {
+    setNetworkAccessStatus(networkAccessCapability.reason, true);
+  } else {
+    setNetworkAccessStatus(networkAccessCopy.hint);
+  }
+}
+
+async function refreshNetworkAccessCapability(options = {}) {
+  try {
+    const data = await window.apiJson('api/convey/network-access/capability');
+    renderNetworkAccessCapability(data, options);
+  } catch (err) {
+    const toggle = document.getElementById('field-network-access');
+    if (toggle) toggle.disabled = true;
+    setNetworkAccessStatus(err?.serverMessage || err?.message || 'Failed to load network access state', true);
+    window.logError(err, { context: 'settings: refreshNetworkAccessCapability failed' });
+  }
+}
+
+async function handleNetworkAccessChange(el) {
+  const desired = el.checked;
+  const previous = Boolean(el.__lastKnownValue);
+  el.checked = previous;
+  el.disabled = true;
+  setNetworkAccessStatus(
+    desired ? networkAccessCopy.enableProgress : networkAccessCopy.disableProgress
+  );
+
+  try {
+    const result = await window.apiJson('api/convey/network-access', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enable: desired })
+    });
+    if (result?.restart_timeout) {
+      await refreshNetworkAccessCapability({
+        message: networkAccessCopy.restartTimeout,
+        error: true
+      });
+      return;
+    }
+    await refreshNetworkAccessCapability();
+  } catch (err) {
+    await refreshNetworkAccessCapability({
+      message: err?.serverMessage || err?.message || 'Save failed',
+      error: true
+    });
+    window.logError(err, { context: 'settings: network access change failed' });
+  }
+}
+
+function setupNetworkAccessToggle() {
+  const toggle = document.getElementById('field-network-access');
+  if (!toggle) return;
+  toggle.addEventListener('change', () => handleNetworkAccessChange(toggle));
+}
+
 async function saveConfigValue(section, key, value) {
   const result = await window.apiJson('api/config', {
     method: 'PUT',
@@ -4492,7 +4630,7 @@ async function saveConfigValue(section, key, value) {
 }
 
 async function saveConveyReportingEnabled(checked) {
-  const result = await window.apiJson('api/config/convey', {
+  const result = await window.apiJson('/api/config/convey', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ reporting: { enabled: checked } })
@@ -5169,6 +5307,12 @@ const LOCAL_SCOPE_COPY = 'on-device generate and cogitate using bundled llama-se
 const LOCAL_MODEL_LABELS = {
   'local/qwen3.6-35b-a3b': 'qwen3.6 35B-A3B VLM — 48 GB',
 };
+const READINESS_SEVERITY_RANK = {
+  ok: 0,
+  neutral: 1,
+  attention: 2,
+  blocker: 3,
+};
 
 async function loadProviders() {
   try {
@@ -5335,6 +5479,7 @@ function localIssueCopy(issue) {
     model_missing: 'local model files are not installed',
     server_unhealthy: 'local runtime is not ready',
     ram_insufficient: 'not enough memory for the selected local model',
+    gpu_unavailable: 'This computer has no GPU acceleration, which local models require.',
   };
   return messages[issue] || issue || 'local provider is not ready';
 }
@@ -5415,8 +5560,10 @@ function populateLocalModelPicker(data) {
   select.value = active;
 }
 
-function providerKind(providerId) {
-  if (providerId === 'local') return 'local-mlx';
+function providerKind(providerId, data = providersData) {
+  if (providerId === 'local') {
+    return data?.local_backend === "mlx" ? 'local-mlx' : 'local';
+  }
   return 'cloud';
 }
 
@@ -5456,22 +5603,110 @@ function providerLabel(providerId, state) {
   return provider?.label || providerId;
 }
 
+function localProviderReadiness(data = providersData) {
+  return data?.ai_readiness?.local || null;
+}
+
+function readinessSeverity(value) {
+  return Object.hasOwn(READINESS_SEVERITY_RANK, value) ? value : 'neutral';
+}
+
+function readinessTone(severity) {
+  return {
+    ok: 'ok',
+    neutral: 'muted',
+    attention: 'warn',
+    blocker: 'error',
+  }[readinessSeverity(severity)] || 'muted';
+}
+
+function topAiReadinessGroup(aiReadiness) {
+  const groups = Array.isArray(aiReadiness?.groups) ? aiReadiness.groups : [];
+  return groups
+    .filter(group => group && typeof group.summary === 'string')
+    .sort((a, b) => (
+      (READINESS_SEVERITY_RANK[readinessSeverity(b.severity)] || 0)
+      - (READINESS_SEVERITY_RANK[readinessSeverity(a.severity)] || 0)
+    ))[0] || null;
+}
+
+function renderAiReadinessSummary(aiReadiness) {
+  const unavailable = !aiReadiness || aiReadiness.unavailable || !aiReadiness.summary;
+  const severity = unavailable ? 'neutral' : readinessSeverity(aiReadiness.summary.severity);
+  const primaryGroup = ['blocker', 'attention'].includes(severity)
+    ? topAiReadinessGroup(aiReadiness)
+    : null;
+  const message = unavailable
+    ? 'AI readiness unavailable'
+    : primaryGroup?.summary
+      || (severity === 'ok' ? 'AI providers are ready.' : 'AI readiness will be confirmed when providers are used.');
+  const action = primaryGroup?.recovery_action || null;
+
+  const summary = document.createElement('div');
+  summary.className = 'provider-card ai-readiness-summary';
+  summary.dataset.aiReadinessSummary = 'true';
+  summary.dataset.severity = severity;
+
+  const header = document.createElement('header');
+  header.className = 'provider-card__header';
+  const title = document.createElement('div');
+  title.className = 'provider-card__title';
+  title.textContent = 'ai readiness';
+  const pills = document.createElement('div');
+  pills.className = 'provider-card__pills';
+  const badge = document.createElement('span');
+  badge.className = 'provider-card__badge';
+  badge.dataset.tone = readinessTone(severity);
+  badge.textContent = severity === 'ok' ? 'Ready' : severity === 'neutral' ? 'Quiet' : 'Needs attention';
+  pills.appendChild(badge);
+  header.append(title, pills);
+  summary.appendChild(header);
+
+  const issue = document.createElement('div');
+  issue.className = 'provider-card__issue';
+  issue.textContent = message;
+  summary.appendChild(issue);
+
+  if (action?.href) {
+    const actions = document.createElement('div');
+    actions.className = 'provider-card__actions';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = action.label || 'Open settings';
+    button.addEventListener('click', () => {
+      window.location.href = action.href;
+    });
+    actions.appendChild(button);
+    summary.appendChild(actions);
+  }
+
+  return summary;
+}
+
 function renderProvidersPanel(data) {
   const container = document.getElementById('providersPanel');
   if (!container) return;
   container.innerHTML = '';
+  container.appendChild(renderAiReadinessSummary(data?.ai_readiness));
   const states = providerPanelStates(data);
   for (const providerId of PROVIDER_NAMES) {
     const state = states[providerId];
     if (!state) continue;
+    const kind = providerKind(providerId, data);
     container.appendChild(
-      renderProviderCard(providerId, state, providerKind(providerId), getProviderAvailability(providerId))
+      renderProviderCard(
+        providerId,
+        state,
+        kind,
+        getProviderAvailability(providerId),
+        providerId === 'local' && kind === 'local' ? localProviderReadiness(data) : null
+      )
     );
   }
 }
 
-function renderProviderCard(providerId, state, kind, availability) {
-  const meta = providerCardMeta(state, kind, availability);
+function renderProviderCard(providerId, state, kind, availability, readiness = null) {
+  const meta = providerCardMeta(state, kind, availability, readiness);
   const card = document.createElement('div');
   card.className = 'provider-card';
   card.dataset.provider = providerId;
@@ -5499,7 +5734,7 @@ function renderProviderCard(providerId, state, kind, availability) {
   header.append(title, pills);
   card.appendChild(header);
 
-  const metaLine = providerCardMetaLine(state, kind);
+  const metaLine = providerCardMetaLine(state, kind, availability);
   if (metaLine) {
     const details = document.createElement('div');
     details.className = 'provider-card__meta';
@@ -5528,7 +5763,11 @@ function renderProviderCard(providerId, state, kind, availability) {
     primary.type = 'button';
     primary.textContent = meta.primaryLabel;
     primary.disabled = meta.primaryDisabled;
-    if (meta.primaryAction) {
+    if (meta.primaryHref) {
+      primary.addEventListener('click', () => {
+        window.location.href = meta.primaryHref;
+      });
+    } else if (meta.primaryAction) {
       primary.addEventListener('click', () => runProviderAction(providerId, meta.primaryAction));
     }
     actions.appendChild(primary);
@@ -5539,8 +5778,48 @@ function renderProviderCard(providerId, state, kind, availability) {
   return card;
 }
 
-function providerCardMetaLine(state, kind) {
-  return null;
+function providerCardMetaLine(state, kind, availability) {
+  if (!['local', 'local-mlx'].includes(kind) || !availability) return null;
+  const block = document.createElement('div');
+  block.className = 'provider-card__resource-meta';
+  const requirement = installCopyTemplate(INSTALL_COPY.LOCAL_REQUIREMENTS_TEMPLATE, {
+    ram_gb: availability.min_ram_gb,
+    download_size: formatMlxBytes(availability.download_bytes),
+  });
+  appendProviderMetaLine(block, requirement);
+  if (availability.available_memory_gb == null) {
+    appendProviderMetaLine(block, INSTALL_COPY.LOCAL_DETECTED_MEMORY_UNKNOWN);
+  } else {
+    appendProviderMetaLine(
+      block,
+      installCopyTemplate(INSTALL_COPY.LOCAL_DETECTED_MEMORY_TEMPLATE, {
+        available_gb: availability.available_memory_gb,
+      })
+    );
+  }
+  appendProviderMetaLine(block, INSTALL_COPY.LOCAL_PATHS_FRAMING);
+  appendProviderMetaLine(block, INSTALL_COPY.LOCAL_EXPERIMENTAL_NOTE);
+  if (localMlxBlockedReason(state, availability)) {
+    const hasHostedKey = !!(configData?.env?.GOOGLE_API_KEY || configData?.runtime_env?.GOOGLE_API_KEY);
+    appendProviderMetaLine(
+      block,
+      hasHostedKey ? INSTALL_COPY.LOCAL_RECOVERY_HOSTED_KEY_SET : INSTALL_COPY.LOCAL_RECOVERY_NO_HOSTED_KEY
+    );
+  }
+  return block;
+}
+
+function appendProviderMetaLine(parent, text) {
+  const line = document.createElement('div');
+  line.textContent = text;
+  parent.appendChild(line);
+}
+
+function installCopyTemplate(template, values) {
+  return template.replace(/\{([a-z_]+)\}/g, (match, key) => {
+    if (Object.prototype.hasOwnProperty.call(values, key)) return String(values[key]);
+    return match;
+  });
 }
 
 function localMlxBlockedReason(state, availability) {
@@ -5577,7 +5856,41 @@ function installBadgeLabel(installState, installError) {
   }[installState] || INSTALL_COPY.INSTALL_PHASE_IDLE;
 }
 
-function providerCardMeta(state, kind, availability) {
+function localReadinessBadgeLabel(readiness) {
+  if (readiness?.status === 'ready') return 'Ready';
+  return {
+    local_model_loading: 'Starting up',
+    local_model_not_ready: 'Starting up',
+    local_server_unhealthy: 'Server not responding',
+  }[readiness?.reason_code] || readiness?.summary || 'Readiness pending';
+}
+
+function localReadinessBadgeTone(readiness) {
+  if (readiness?.status === 'ready') return 'ok';
+  if (['local_model_loading', 'local_model_not_ready'].includes(readiness?.reason_code)) return 'progress';
+  if (readiness?.status === 'blocked' || readiness?.status === 'unhealthy') return 'warn';
+  return 'muted';
+}
+
+function localReadinessMeta(readiness) {
+  const action = readiness?.recovery_action || null;
+  return {
+    badgeLabel: localReadinessBadgeLabel(readiness),
+    badgeTone: localReadinessBadgeTone(readiness),
+    primaryLabel: action?.label || null,
+    primaryAction: null,
+    primaryHref: action?.href || null,
+    primaryDisabled: false,
+    showKeyPill: false,
+    keyPillLabel: '',
+    keyPillTone: 'muted',
+    showByteCounter: false,
+    byteLabel: '',
+    issueText: readiness?.status === 'ready' ? '' : (readiness?.detail || readiness?.summary || ''),
+  };
+}
+
+function providerCardMeta(state, kind, availability, readiness = null) {
   if (kind === 'cloud') {
     const configured = !!state?.configured;
     const cogitateReady = !!state?.cogitate_ready;
@@ -5586,6 +5899,7 @@ function providerCardMeta(state, kind, availability) {
       badgeTone: cogitateReady ? 'ok' : 'muted',
       primaryLabel: null,
       primaryAction: null,
+      primaryHref: null,
       primaryDisabled: true,
       showKeyPill: true,
       keyPillLabel: configured ? 'Key set' : 'Needs API key',
@@ -5605,6 +5919,7 @@ function providerCardMeta(state, kind, availability) {
       badgeTone: 'error',
       primaryLabel: INSTALL_COPY.INSTALL_BUTTON_INSTALL,
       primaryAction: 'install',
+      primaryHref: null,
       primaryDisabled: true,
       showKeyPill: false,
       keyPillLabel: '',
@@ -5621,6 +5936,7 @@ function providerCardMeta(state, kind, availability) {
       badgeTone: 'muted',
       primaryLabel: 'Enable',
       primaryAction: 'enable',
+      primaryHref: null,
       primaryDisabled: false,
       showKeyPill: kind === 'cloud',
       ...providerCardKeyFields(keyStatus),
@@ -5649,6 +5965,7 @@ function providerCardMeta(state, kind, availability) {
       ...base,
       primaryLabel: INSTALL_COPY.INSTALL_BUTTON_INSTALLING,
       primaryAction: null,
+      primaryHref: null,
       primaryDisabled: true,
     };
   }
@@ -5657,6 +5974,7 @@ function providerCardMeta(state, kind, availability) {
       ...base,
       primaryLabel: INSTALL_COPY.INSTALL_BUTTON_INSTALL,
       primaryAction: 'install',
+      primaryHref: null,
       primaryDisabled: false,
     };
   }
@@ -5665,13 +5983,18 @@ function providerCardMeta(state, kind, availability) {
       ...base,
       primaryLabel: INSTALL_COPY.INSTALL_BUTTON_RETRY,
       primaryAction: 'install',
+      primaryHref: null,
       primaryDisabled: false,
     };
+  }
+  if (kind === 'local' && installState === 'installed') {
+    return localReadinessMeta(readiness);
   }
   return {
     ...base,
     primaryLabel: null,
     primaryAction: null,
+    primaryHref: null,
     primaryDisabled: true,
   };
 }
@@ -5696,9 +6019,10 @@ function providerByteLabel(kind, installState, badgeLabel, state) {
   if (!['local-mlx', 'local'].includes(kind) || !['downloading', 'verifying'].includes(installState)) return '';
   const received = state?.progress_bytes_received;
   const total = state?.progress_bytes_total;
-  const receivedBytes = Number(received || 0);
-  const totalBytes = Number(total || 0);
-  if ((received == null && total == null) || (receivedBytes === 0 && totalBytes === 0)) return '';
+  const receivedBytes = Number(received);
+  const totalBytes = Number(total);
+  if (!Number.isFinite(receivedBytes) || !Number.isFinite(totalBytes)) return '';
+  if (totalBytes <= 0 || receivedBytes < 0 || receivedBytes > totalBytes) return '';
   return `${badgeLabel} ${formatMlxBytes(receivedBytes)} / ${formatMlxBytes(totalBytes)}`;
 }
 
@@ -5995,11 +6319,7 @@ function renderContextGroups(data) {
   const container = document.getElementById('contextGroups');
   const contexts = data.context_defaults;
   const overrides = data.contexts || {};
-  // The /api/providers response stopped exposing a single `default` key
-  // when generate/cogitate were split into separate per-tier sections.
-  // Fall back through the new keys (and the legacy one for safety) so
-  // this never throws on configs without a `default` entry.
-  const defaultTier = data.generate?.tier ?? data.cogitate?.tier ?? data.default?.tier ?? null;
+  const defaultTier = data.generate?.tier || data.default?.tier || 2;
   const providers = data.providers || [];
 
   // Group by group name
@@ -6396,6 +6716,32 @@ function setStorageControlsDisabled(disabled) {
 
 let transcribeHardware = null;
 
+function renderTranscribeResourceInfo(resource) {
+  const info = document.getElementById('transcribeResourceInfo');
+  if (!info) return;
+  const lines = [];
+  if (resource?.requirement) lines.push(resource.requirement);
+  if (resource?.detected) lines.push(resource.detected);
+  info.textContent = lines.join(' ');
+}
+
+function renderTranscribeResourceNotice(resource) {
+  const notice = document.getElementById('transcribeResourceNotice');
+  const text = document.getElementById('transcribeResourceNoticeText');
+  if (!notice || !text) return;
+  const show = !!(resource?.auto_switched || resource?.needs_setup);
+  if (!show) {
+    text.textContent = '';
+    notice.style.display = 'none';
+    return;
+  }
+  const lines = [];
+  if (resource.notice) lines.push(resource.notice);
+  if (resource.force_local_hint) lines.push(resource.force_local_hint);
+  text.textContent = lines.join(' ');
+  notice.style.display = 'flex';
+}
+
 async function loadTranscribeBackends() {
   try {
     const data = await window.apiJson('api/transcribe');
@@ -6403,6 +6749,7 @@ async function loadTranscribeBackends() {
     transcribeApiKeys = data.api_keys || {};
     transcribeRuntimeLabel = data.runtime_label || 'unsupported';
     transcribeHardware = data.hardware || null;
+    transcribeResource = data.resource || null;
     setLoadState('transcriptionLoadState');
     const select = document.getElementById('field-transcribe-backend');
     const runtimeLabel = document.getElementById('parakeet-runtime-label');
@@ -6412,6 +6759,8 @@ async function loadTranscribeBackends() {
     if (runtimeLabel) {
       runtimeLabel.textContent = transcribeRuntimeLabel;
     }
+    renderTranscribeResourceInfo(transcribeResource);
+    renderTranscribeResourceNotice(transcribeResource);
 
     // Populate the backend select
     if (select) {
@@ -6568,6 +6917,17 @@ document.getElementById('field-transcribe-backend').addEventListener('change', a
     const result = await response.json();
     if (result.success) {
       configData = result.config;
+      if (transcribeResource) {
+        transcribeResource = {
+          ...transcribeResource,
+          auto_switched: false,
+          needs_setup: false,
+          notice: '',
+          force_local_hint: '',
+        };
+        renderTranscribeResourceInfo(transcribeResource);
+        renderTranscribeResourceNotice(transcribeResource);
+      }
       showFieldStatus(e.target, 'saved');
       notifySegmentCardConfigChanged();
     } else {
@@ -7757,7 +8117,7 @@ if (agentNameInput) {
       });
       const result = await response.json();
       if (!result.success) {
-        throw new Error(result.error || 'Could not save agent name');
+        throw new Error(result.error || 'Could not save name');
       }
 
       configData = result.config;
@@ -7793,9 +8153,9 @@ if (resetAgentBtn) {
         if (statusEl) statusEl.textContent = 'default';
         const dateEl = document.getElementById('agent-named-date');
         if (dateEl) dateEl.textContent = '—';
-        notifySuccess('Reset', 'Agent name reset to sol');
+        notifySuccess('Reset', 'Name reset to sol');
       } else {
-        notifyError('Reset Failed', result.error || 'Could not reset agent name');
+        notifyError('Reset Failed', result.error || 'Could not reset name');
       }
     } catch (err) {
       notifyError('Reset Failed', err.message);
@@ -8164,6 +8524,7 @@ function initSettings() {
   loadSync();
   loadStorage();
   setupAutoSave();
+  setupNetworkAccessToggle();
   setupSolVoiceListeners();
   setupChatSettingsListeners();
   setupStorageListeners();

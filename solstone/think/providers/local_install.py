@@ -30,10 +30,10 @@ from solstone.think.providers.install_state import (
 )
 from solstone.think.providers.local import (
     LOCAL_MODEL_SPECS,
-    LocalModelSpec,
     LocalProviderError,
     normalize_model_id,
 )
+from solstone.think.providers.memory import assess_memory
 from solstone.think.utils import get_journal
 
 LOCAL_PROVIDER_NAME = "local"
@@ -48,6 +48,7 @@ _LOCAL_METADATA_KEYS = frozenset(
         "model_sha256",
         "mmproj_path",
         "mmproj_sha256",
+        "vulkan_device_index",
     }
 )
 
@@ -60,26 +61,14 @@ LLAMA_SERVER_PINS: dict[str, dict[str, str]] = {
     },
     "x86_64-unknown-linux-gnu": {
         "release_tag": "b9291",
-        "filename": "llama-b9291-bin-ubuntu-x64.tar.gz",
-        "sha256": "8cb79eb596cc5cc15a6089ceadaa2723e3d75c1e7b37cfb9977ad1d4dc4a41eb",
+        "filename": "llama-b9291-bin-ubuntu-vulkan-x64.tar.gz",
+        "sha256": "7e3bf4202bedc71c2c9fbfbe02d10075b8d596bb963e7ab006663582dc2e92c2",
         "binary_name": "llama-server",
     },
-    # Fork-only: aarch64-Linux CUDA build for the DGX Spark (GB10/sm_121).
-    # No upstream prebuilt exists for this platform, so the binary is built
-    # from ggml-org/llama.cpp@b9291 against CUDA 13.0 (NOT 13.2 — gibberish
-    # for Nemotron Omni per Unsloth) and self-hosted as a release asset; the
-    # ``url`` override points at it. See the Obsidian runbook "Spark llama.cpp
-    # CUDA Build & Pin" for build/host provenance. Keep this annotated so a
-    # future upstream aarch64 pin (likely CPU, same key) surfaces as a
-    # recognizable merge collision rather than a silent clobber.
     "aarch64-unknown-linux-gnu": {
         "release_tag": "b9291",
-        "filename": "llama-server-spark-b9291-cuda13.0-sm121.tar.gz",
-        "url": (
-            "https://github.com/parkerhdavis/Solstone/releases/download/"
-            "llama-server-spark-b9291/llama-server-spark-b9291-cuda13.0-sm121.tar.gz"
-        ),
-        "sha256": "4763466dc051d496d42c8882fdb8b80945dd5e0c988a4b9d70571ced01495c9a",
+        "filename": "llama-b9291-bin-ubuntu-vulkan-arm64.tar.gz",
+        "sha256": "c88f06cc72f746d7cbbd69b705f0788488d8b9fe9051995a5e59b3b8b1e8fe61",
         "binary_name": "llama-server",
     },
 }
@@ -175,6 +164,21 @@ def _write_local_metadata(updates: dict[str, str]) -> None:
     for key, value in updates.items():
         slot[key] = value
     write_journal_config(config)
+
+
+def gpu_device_override() -> int | None:
+    config = read_journal_config()
+    record = config.get("providers", {}).get("bundled", {}).get(LOCAL_PROVIDER_NAME, {})
+    if not isinstance(record, dict):
+        return None
+    value = record.get("vulkan_device_index")
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        index = int(value)
+    except (TypeError, ValueError):
+        return None
+    return index if index >= 0 else None
 
 
 def _record_local_progress(received: int, total: int | None) -> None:
@@ -309,10 +313,7 @@ def probe_binary_runnable(binary_path: str | Path) -> tuple[bool, str | None]:
 def install_llama_server() -> dict[str, Any]:
     artifact_key = llama_server_artifact_key()
     pin = pin_for_current_platform()
-    # A pin may carry an explicit ``url`` to override the default
-    # llama.cpp-releases location — needed for platforms with no upstream
-    # prebuilt (e.g. the fork's self-hosted aarch64-CUDA build for the Spark).
-    url = pin.get("url") or (
+    url = (
         "https://github.com/ggml-org/llama.cpp/releases/download/"
         f"{pin['release_tag']}/{pin['filename']}"
     )
@@ -410,16 +411,9 @@ def install_local(model_id: str = LOCAL_MODEL) -> dict[str, Any]:
     return install_model(model_id)
 
 
-def _ram_sufficient(spec: LocalModelSpec) -> bool:
-    try:
-        import psutil
-
-        return int(psutil.virtual_memory().total) >= spec.min_ram_bytes
-    except Exception:
-        return True
-
-
 def inspect_readiness(model_id: str | None = None) -> dict[str, Any]:
+    from solstone.think.providers import local_vulkan
+
     config = read_journal_config()
     record = config.get("providers", {}).get("bundled", {}).get(LOCAL_PROVIDER_NAME, {})
     if not isinstance(record, dict):
@@ -453,14 +447,19 @@ def inspect_readiness(model_id: str | None = None) -> dict[str, Any]:
         selected_model
     )
     mmproj_installed = resolved_mmproj is None or resolved_mmproj.exists()
-    ram_sufficient = _ram_sufficient(spec)
+    memory_verdict = assess_memory(spec.min_ram_bytes, block_below_floor=False)
+    selected_gpu = local_vulkan.select_device(
+        local_vulkan.detect_gpus(), override_index=gpu_device_override()
+    )
+    gpu_available = selected_gpu is not None
     return {
         "install_state": status["install_state"],
         "binary_installed": binary_path.exists() and os.access(binary_path, os.X_OK),
         "model_installed": gguf_path.exists() and mmproj_installed,
         "gguf_installed": gguf_path.exists(),
         "mmproj_installed": mmproj_installed,
-        "ram_sufficient": ram_sufficient,
+        "ram_sufficient": memory_verdict.severity != "blocked",
+        "gpu_available": gpu_available,
         "binary_path": str(binary_path),
         "model_path": str(gguf_path),
         "mmproj_path": str(resolved_mmproj) if resolved_mmproj is not None else None,
@@ -472,11 +471,6 @@ def inspect_readiness(model_id: str | None = None) -> dict[str, Any]:
 def ensure_artifacts_installed(model_id: str) -> tuple[Path, Path, Path | None]:
     selected_model = normalize_model_id(model_id)
     readiness = inspect_readiness(selected_model)
-    if not readiness["ram_sufficient"]:
-        raise LocalProviderError(
-            "ram_insufficient",
-            "This computer does not have enough memory for the selected local model.",
-        )
     if not readiness["binary_installed"]:
         raise LocalProviderError("binary_missing", "Local runtime is not installed.")
     if not readiness["model_installed"]:
@@ -503,6 +497,7 @@ __all__ = [
     "install_local",
     "install_hint",
     "probe_binary_runnable",
+    "gpu_device_override",
     "inspect_readiness",
     "ensure_artifacts_installed",
 ]

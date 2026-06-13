@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import sys
 import traceback
 import uuid
@@ -24,8 +25,17 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any
 
+from solstone.think.cogitate_contract import (
+    capabilities_for_access_tier,
+    expects_emit_final,
+)
 from solstone.think.cogitate_policy import (
+    _FALLBACK_USD_PER_TOKEN,
+    CONTEXT_FINAL_FRAC,
+    CONTEXT_WARN_FRAC,
+    COST_WARN_FRAC,
     DEFAULT_READ_CALL_BUDGET,
+    DEFAULT_RUN_COST_CAP_USD,
     MAX_TURNS,
     CogitatePolicy,
     MaxTurnsExhausted,
@@ -163,7 +173,12 @@ def _ensure_sol_types() -> dict[str, Any]:
     from pydantic import Field
 
     class SolAction(Action):
-        command: str = Field(description="Shell command to run.")
+        command: str = Field(
+            description=(
+                "Single `sol` or approved `journal` command-line invocation to "
+                "run directly, without a shell."
+            )
+        )
 
     class SolObservation(Observation):
         pass
@@ -186,12 +201,9 @@ def _ensure_sol_types() -> dict[str, Any]:
             del conversation
 
             command = str(action.command)
-            ok, reason = self.policy.check(
-                "run_shell_command",
-                {"command": command},
-            )
-            if not ok:
-                return SolObservation.from_text(reason, is_error=True)
+            decision = self.policy.classify_command(command)
+            if not decision.allowed:
+                return SolObservation.from_text(decision.reason, is_error=True)
 
             self.read_call_count += 1
             if self.read_call_count > self.read_call_budget:
@@ -211,7 +223,8 @@ def _ensure_sol_types() -> dict[str, Any]:
                     is_error=True,
                 )
 
-            result = _run_shell_command(command)
+            assert decision.argv is not None
+            result = _run_command(decision.argv)
             return SolObservation.from_text(result["text"], is_error=result["is_error"])
 
     class SolTool(ToolDefinition[SolAction, SolObservation]):
@@ -262,7 +275,10 @@ def _build_sol_tools(
         read_call_budget=read_call_budget,
     )
     tool = sol_tool_cls(
-        description="Run a sol shell command after policy approval.",
+        description=(
+            "Run one policy-approved `sol` or `journal` command-line invocation "
+            "directly, without a shell."
+        ),
         action_type=sol_action,
         observation_type=sol_observation,
         executor=executor,
@@ -277,19 +293,24 @@ def _build_sol_tools(
     return [tool], executor
 
 
-def _run_shell_command(command: str) -> dict[str, Any]:
+def _run_command(argv: list[str]) -> dict[str, Any]:
     import subprocess
+
+    executable = Path(sys.executable).parent / argv[0]
+    resolved = str(executable) if executable.exists() else shutil.which(argv[0])
+    if not resolved:
+        return {"text": f"command_not_found: {argv[0]}", "is_error": True}
 
     try:
         completed = subprocess.run(
-            ["bash", "-lc", command],
+            [resolved, *argv[1:]],
             text=True,
             capture_output=True,
             timeout=_SHELL_TIMEOUT_SECONDS,
             check=False,
         )
     except FileNotFoundError:
-        return {"text": "command_not_found: bash", "is_error": True}
+        return {"text": f"command_not_found: {argv[0]}", "is_error": True}
     except subprocess.TimeoutExpired as exc:
         output = exc.stdout or ""
         error = exc.stderr or ""
@@ -327,7 +348,7 @@ def _format_shell_output(
     if stderr:
         parts.append(f"stderr:\n{_truncate_output(stderr, _SHELL_STDERR_CAP)}")
     if timed_out:
-        parts.append(f"timeout: run_shell_command exceeded {_SHELL_TIMEOUT_SECONDS}s")
+        parts.append(f"timeout: command exceeded {_SHELL_TIMEOUT_SECONDS}s")
     elif returncode is not None and returncode != 0:
         parts.append(f"exit_code: {returncode}")
     if not parts:
@@ -346,8 +367,10 @@ class _OpenHandsTranslator:
         self,
         *,
         callback: JSONEventCallback,
+        llm: Any,
         provider: str,
         model: str,
+        cost_cap: float,
         max_turns: int = MAX_TURNS,
         expects_emit_final: bool = False,
     ) -> None:
@@ -360,10 +383,13 @@ class _OpenHandsTranslator:
         from openhands.sdk.event.conversation_error import ConversationErrorEvent
 
         self.callback = callback
+        self.llm = llm
         self.provider = provider
         self.model = model
+        self.cost_cap = cost_cap
         self.max_turns = max_turns
         self.expects_emit_final = expects_emit_final
+        self.conversation: Any = None
         self.ActionEvent = ActionEvent
         self.AgentErrorEvent = AgentErrorEvent
         self.ConversationErrorEvent = ConversationErrorEvent
@@ -375,6 +401,9 @@ class _OpenHandsTranslator:
         self.final_message: str | None = None
         self.max_turns_exhausted = False
         self._max_turns_event_emitted = False
+        self._wrapup_nudged = False
+        self._final_turn_armed = False
+        self._cost_force_stopped = False
 
     def on_event(self, event: Any) -> None:
         if isinstance(event, self.ActionEvent):
@@ -422,6 +451,7 @@ class _OpenHandsTranslator:
             self.finish_message = _finish_message(event, args)
             return
 
+        self._check_resource_ceiling()
         self.tool_calls[call_id] = {"tool": tool_name, "args": args}
         self.callback.emit(
             {
@@ -433,6 +463,71 @@ class _OpenHandsTranslator:
                 "ts": now_ms(),
             }
         )
+
+    def _finish_tool_name(self) -> str:
+        return "emit_final" if self.expects_emit_final else "finish"
+
+    def _run_cost(self) -> float:
+        metrics = getattr(self.llm, "metrics", None)
+        cost = float(getattr(metrics, "accumulated_cost", 0.0) or 0.0)
+        if cost > 0.0:
+            return cost
+        usage = getattr(metrics, "accumulated_token_usage", None)
+        if usage is None:
+            return 0.0
+        prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
+        cache_read = int(getattr(usage, "cache_read_tokens", 0) or 0)
+        completion = int(getattr(usage, "completion_tokens", 0) or 0)
+        fresh = max(0, prompt - cache_read) + completion
+        return fresh * _FALLBACK_USD_PER_TOKEN
+
+    def _context_fraction(self) -> float | None:
+        window = getattr(self.llm, "effective_max_input_tokens", None)
+        if not window or window <= 0:
+            return None
+        metrics = getattr(self.llm, "metrics", None)
+        usage = getattr(metrics, "accumulated_token_usage", None)
+        per_turn = int(getattr(usage, "per_turn_token", 0) or 0)
+        return per_turn / window
+
+    def _check_resource_ceiling(self) -> None:
+        if self.conversation is None or self._cost_force_stopped:
+            return
+
+        # Stage 3: the armed last turn did not finish -> hard backstop.
+        if self._final_turn_armed:
+            self.conversation.pause()
+            self._cost_force_stopped = True
+            return
+
+        cost = self._run_cost()
+        context_frac = self._context_fraction()
+        finish_tool = self._finish_tool_name()
+
+        # Stage 2: at the cap -> arm exactly one more turn.
+        if cost >= self.cost_cap or (
+            context_frac is not None and context_frac >= CONTEXT_FINAL_FRAC
+        ):
+            self.conversation.send_message(
+                f"Resource budget reached: this is the final turn. Stop gathering "
+                f"more context or using tools, and call {finish_tool} now with the "
+                f"best result available."
+            )
+            self._final_turn_armed = True
+            self._wrapup_nudged = True
+            return
+
+        # Stage 1: approaching the cap -> one wrap-up nudge.
+        if not self._wrapup_nudged and (
+            cost >= COST_WARN_FRAC * self.cost_cap
+            or (context_frac is not None and context_frac >= CONTEXT_WARN_FRAC)
+        ):
+            self.conversation.send_message(
+                f"Resource budget warning: this run is approaching its per-run "
+                f"resource budget. Finish useful work now and call {finish_tool} "
+                f"with the best complete result you can produce."
+            )
+            self._wrapup_nudged = True
 
     def _emit_reasoning(self, event: Any, raw: list[dict[str, Any]]) -> None:
         reasoning_content = getattr(event, "reasoning_content", None)
@@ -777,36 +872,58 @@ async def run_cogitate(
         from openhands.sdk.tool.registry import register_tool
         from openhands.sdk.tool.spec import Tool
 
-        expects_emit_final = bool(config.get("output_path")) or config.get(
-            "schedule"
-        ) in {"daily", "weekly", "activity"}
+        wants_emit_final = expects_emit_final(config)
         max_turns = int(config.get("max_turns", MAX_TURNS) or MAX_TURNS)
+        cost_cap = float(
+            config.get("max_run_cost_usd", DEFAULT_RUN_COST_CAP_USD)
+            or DEFAULT_RUN_COST_CAP_USD
+        )
         session_id, conversation_id = _session_identity(config.get("session_id"))
         prompt_body, system_instruction = assemble_prompt(
             config,
             sol_tool_name="sol",
         )
         allowed_roots = _resolve_allowed_roots(config)
-        policy = CogitatePolicy(allowed_roots=allowed_roots)
+        access_tier = str(config.get("access_tier", "normal"))
+        outbound_approval = config.get("outbound_approval")
+        caps = capabilities_for_access_tier(access_tier)
+        policy = CogitatePolicy(
+            allowed_roots=allowed_roots,
+            access_tier=access_tier,
+            outbound_approval=outbound_approval,
+        )
         read_call_budget = int(
             config.get("read_call_budget", DEFAULT_READ_CALL_BUDGET) or 0
         )
+        journal = Path(get_journal())
         llm = _build_llm(provider, model)
         usage_start = _usage_snapshot(llm)
-        sol_tools, _executor = _build_sol_tools(
-            policy=policy,
-            callback=callback,
-            read_call_budget=read_call_budget,
-        )
-        # openhands-sdk v1.23 resolves Agent.tools by spec name via the
-        # registry; passing ToolDefinition instances directly fails pydantic
-        # validation. Re-register the per-run SolTool instance (its executor
-        # closure captures this run's policy / callback / budget) and
-        # reference it by name.
-        register_tool("sol", sol_tools[0])
-        tool_specs = [Tool(name="sol")]
+        tool_specs = []
+        if caps.sol:
+            sol_tools, _executor = _build_sol_tools(
+                policy=policy,
+                callback=callback,
+                read_call_budget=read_call_budget,
+            )
+            # openhands-sdk v1.23 resolves Agent.tools by spec name via the
+            # registry; passing ToolDefinition instances directly fails pydantic
+            # validation. Re-register the per-run SolTool instance (its executor
+            # closure captures this run's policy / callback / budget) and
+            # reference it by name.
+            register_tool("sol", sol_tools[0])
+            tool_specs.append(Tool(name="sol"))
+        from .read_tools import build_read_tools
+
+        if caps.reads:
+            read_tools = build_read_tools(
+                journal=journal,
+                read_call_budget=read_call_budget,
+            )
+            for read_tool in read_tools:
+                register_tool(read_tool.name, read_tool)
+                tool_specs.append(Tool(name=read_tool.name))
         default_tools = ["FinishTool"]
-        if expects_emit_final:
+        if wants_emit_final:
             from .emit_final_tool import build_emit_final_tools
 
             emit_final_tools = build_emit_final_tools()
@@ -821,15 +938,16 @@ async def run_cogitate(
             system_prompt=system_instruction,
         )
 
-        journal = Path(get_journal())
         persistence_dir = journal / ".cache" / "cogitate-history" / session_id
         persistence_dir.mkdir(parents=True, exist_ok=True)
         translator = _OpenHandsTranslator(
             callback=callback,
+            llm=llm,
             provider=provider,
             model=_prefixed_model(provider, model),
+            cost_cap=cost_cap,
             max_turns=max_turns,
-            expects_emit_final=expects_emit_final,
+            expects_emit_final=wants_emit_final,
         )
         conversation = Conversation(
             agent=agent,
@@ -842,6 +960,7 @@ async def run_cogitate(
             stuck_detection=True,
             visualizer=None,
         )
+        translator.conversation = conversation
         conversation.send_message(prompt_body)
         with _suppress_litellm_cost_warnings():
             await conversation.arun()
@@ -852,7 +971,22 @@ async def run_cogitate(
             )
 
         result = translator.result()
-        if expects_emit_final and not (result and result.strip()):
+        if translator._cost_force_stopped and not (result and result.strip()):
+            callback.emit(
+                {
+                    "event": "error",
+                    "error": (
+                        "token_budget_exceeded: cogitate run reached its per-run "
+                        "resource budget before emitting a final result"
+                    ),
+                    "reason_code": "token_budget_exceeded",
+                    "provider": provider,
+                    "terminal": True,
+                    "ts": now_ms(),
+                }
+            )
+            return None
+        if wants_emit_final and not (result and result.strip()):
             callback.emit(
                 {
                     "event": "error",

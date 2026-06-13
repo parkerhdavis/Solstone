@@ -7,8 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
-import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -22,13 +21,13 @@ from solstone.apps.home.needs_you import classify_needs_you
 from solstone.convey.apps import _resolve_attention
 from solstone.convey.bridge import get_cached_state
 from solstone.convey.utils import DATE_RE, format_date, relative_time
-from solstone.think import skills as think_skills
 from solstone.think.awareness import get_current
 from solstone.think.capture_health import get_capture_health
+from solstone.think.day_accumulator import read_latest
 from solstone.think.facets import get_enabled_facets, get_facets
 from solstone.think.pipeline_health import summarize_pipeline_day
-from solstone.think.steward import read_steward_health
-from solstone.think.utils import get_journal
+from solstone.think.steward import read_steward_health, read_steward_summary
+from solstone.think.utils import day_path, get_journal
 
 # Briefing phase thresholds
 BRIEFING_MORNING_END_HOUR = 10
@@ -111,8 +110,10 @@ def _load_latest_weekly_reflection() -> dict[str, str] | None:
 def _load_flow_md(today: str) -> tuple[str | None, float | None]:
     """Load today's flow.md content and mtime. Returns (content, mtime) or (None, None)."""
     try:
-        journal = Path(get_journal())
-        flow_path = journal / today / "talents" / "flow.md"
+        # flow.md is no longer produced by any current talent (the flow talent was
+        # removed); this fallback is presently inert and will light up only if a
+        # flow producer returns. Resolve via day_path so the path can't rot.
+        flow_path = day_path(today, create=False) / "talents" / "flow.md"
         if flow_path.exists():
             return flow_path.read_text(), flow_path.stat().st_mtime
     except Exception:
@@ -120,43 +121,25 @@ def _load_flow_md(today: str) -> tuple[str | None, float | None]:
     return None, None
 
 
-def _load_pulse_md() -> tuple[str | None, dict | None, list[str]]:
-    """Load identity/pulse.md if current for today.
-
-    Returns (content, metadata, needs_you) or (None, None, []).
-    """
+def _load_pulse_narrative(today: str) -> tuple[str | None, str | None, list[str]]:
+    """Load today's latest pulse record as narrative content."""
     try:
-        journal = Path(get_journal())
-        pulse_path = journal / "identity" / "pulse.md"
-        if not pulse_path.exists():
+        record = read_latest(today, "pulse", lookback_days=0)
+        if not record:
             return None, None, []
-        post = frontmatter.load(str(pulse_path))
-        updated = post.metadata.get("updated")
-        if not updated:
+
+        full_details = record.get("full_details")
+        if not isinstance(full_details, str) or not full_details.strip():
             return None, None, []
-        # Parse ISO datetime and check if from today
-        if isinstance(updated, str):
-            updated_dt = datetime.fromisoformat(updated)
-        else:
-            updated_dt = updated  # frontmatter may parse datetime objects
-        if updated_dt.date() != datetime.now().date():
-            return None, None, []
-        # Extract ## needs you section
-        needs = []
-        in_needs = False
-        for line in post.content.splitlines():
-            if line.strip().lower() == "## needs you":
-                in_needs = True
-                continue
-            if in_needs:
-                if line.startswith("## "):
-                    break
-                stripped = line.strip()
-                if stripped.startswith("- "):
-                    needs.append(stripped[2:].strip())
-        return post.content, post.metadata, needs
+
+        needs = [str(n) for n in record.get("needs_you", []) if str(n).strip()]
+        updated_at = None
+        ts = record.get("ts")
+        if isinstance(ts, (int, float)):
+            updated_at = datetime.fromtimestamp(ts / 1000).strftime("%H:%M")
+        return full_details, updated_at, needs
     except Exception:
-        logger.warning("home: failed to load pulse.md", exc_info=True)
+        logger.warning("home: failed to load pulse record", exc_info=True)
         return None, None, []
 
 
@@ -308,28 +291,6 @@ def _load_yesterday_stats(yesterday: str) -> dict[str, Any] | None:
 
 def _load_yesterday_pipeline_summary(yesterday: str) -> dict[str, Any]:
     return summarize_pipeline_day(yesterday)
-
-
-def _collect_todos(today: str) -> list[dict[str, Any]]:
-    """Collect pending todos across all facets."""
-    from solstone.apps.todos.todo import get_todos
-
-    todos = []
-    try:
-        facets = get_facets()
-    except Exception:
-        logger.warning("home: failed to get facets for todos", exc_info=True)
-        return []
-
-    for facet_name in facets:
-        facet_todos = get_todos(today, facet_name)
-        if facet_todos is None:
-            continue
-        for todo in facet_todos:
-            if not todo.get("completed") and not todo.get("cancelled"):
-                todo["facet"] = facet_name
-                todos.append(todo)
-    return todos
 
 
 def _collect_anticipated_activities(today: str) -> list[dict[str, Any]]:
@@ -948,294 +909,6 @@ def _summarize_yesterday_processing(
     }
 
 
-def _freshness_hours(cadence) -> int:
-    """Return freshness window in hours based on routine cadence type."""
-    if isinstance(cadence, dict):
-        return 24
-    if isinstance(cadence, str):
-        fields = cadence.split()
-        if len(fields) == 5:
-            dom, dow = fields[2], fields[4]
-            if dom == "*" and dow == "*":
-                return 24
-            return 168
-    return 24
-
-
-def _extract_summary(output_path: Path) -> str:
-    """Extract a concise routine summary from a markdown output file."""
-    try:
-        lines = output_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return ""
-
-    if lines and lines[0].strip() == "---":
-        for i in range(1, len(lines)):
-            if lines[i].strip() == "---":
-                lines = lines[i + 1 :]
-                break
-
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if len(stripped) > 80:
-            return stripped[:79] + "…"
-        return stripped
-    return ""
-
-
-def _load_routines_state() -> dict[str, Any]:
-    """Load routines seen state from routines/state.json."""
-    state_path = Path(get_journal()) / "routines" / "state.json"
-    if not state_path.exists():
-        return {}
-    try:
-        with open(state_path, encoding="utf-8") as f:
-            raw = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return {}
-    return raw if isinstance(raw, dict) else {}
-
-
-def _save_routines_state(state: dict[str, Any]) -> None:
-    """Persist routines seen state to routines/state.json."""
-    routines_dir = Path(get_journal()) / "routines"
-    routines_dir.mkdir(parents=True, exist_ok=True)
-    state_path = routines_dir / "state.json"
-
-    fd, tmp_path = tempfile.mkstemp(dir=routines_dir, suffix=".tmp", prefix=".state_")
-    tmp_file = Path(tmp_path)
-    try:
-        with open(fd, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2)
-        tmp_file.replace(state_path)
-    except BaseException:
-        tmp_file.unlink(missing_ok=True)
-        raise
-
-
-def _load_skills_state() -> dict[str, Any]:
-    """Load skills seen state from skills/state.json."""
-    state_path = Path(get_journal()) / "skills" / "state.json"
-    if not state_path.exists():
-        return {}
-    try:
-        with open(state_path, encoding="utf-8") as f:
-            raw = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return {}
-    return raw if isinstance(raw, dict) else {}
-
-
-def _save_skills_state(state: dict[str, Any]) -> None:
-    """Persist skills seen state to skills/state.json."""
-    skills_dir = Path(get_journal()) / "skills"
-    skills_dir.mkdir(parents=True, exist_ok=True)
-    state_path = skills_dir / "state.json"
-
-    fd, tmp_path = tempfile.mkstemp(dir=skills_dir, suffix=".tmp", prefix=".state_")
-    tmp_file = Path(tmp_path)
-    try:
-        with open(fd, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2)
-        tmp_file.replace(state_path)
-    except BaseException:
-        tmp_file.unlink(missing_ok=True)
-        raise
-
-
-def _parse_seen_iso(value: str | None) -> datetime | None:
-    # Legacy state files persisted naive-UTC ISO; current writers persist aware UTC.
-    # Treat naive as UTC so both formats round-trip into a comparable aware datetime.
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (ValueError, TypeError):
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
-
-
-def _was_seen(item_time: datetime | None, last_seen: datetime | None) -> bool:
-    if item_time is None or last_seen is None:
-        return False
-    return item_time <= last_seen
-
-
-def _collect_routines() -> list[dict[str, Any]]:
-    """Collect recent routine outputs for display."""
-    from solstone.think.routines import get_config as get_routines_config
-
-    try:
-        config = get_routines_config()
-        state = _load_routines_state()
-        last_seen_dt = _parse_seen_iso(state.get("routines_last_seen"))
-
-        now = datetime.now(timezone.utc)
-        journal = Path(get_journal())
-        routines = []
-
-        for value in config.values():
-            if not isinstance(value, dict):
-                continue
-            if not value.get("enabled"):
-                continue
-            last_run = value.get("last_run")
-            if not last_run:
-                continue
-
-            try:
-                parsed = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
-            except (ValueError, AttributeError):
-                continue
-            last_run_dt = (
-                parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-            )
-
-            freshness = _freshness_hours(value.get("cadence"))
-            if (now - last_run_dt).total_seconds() > freshness * 3600:
-                continue
-
-            delta = now - last_run_dt
-            run_time_display = f"{relative_time(delta.total_seconds())} ago"
-
-            routine_id = value.get("id", "")
-            output_dir = journal / "routines" / routine_id
-            summary = ""
-            if output_dir.exists():
-                outputs = sorted(
-                    output_dir.glob("*.md"),
-                    key=lambda p: p.stat().st_mtime,
-                    reverse=True,
-                )
-                if outputs:
-                    summary = _extract_summary(outputs[0])
-
-            seen = _was_seen(last_run_dt, last_seen_dt)
-
-            routines.append(
-                {
-                    "id": routine_id,
-                    "name": value.get("name", routine_id),
-                    "last_run": last_run,
-                    "run_time_display": run_time_display,
-                    "summary": summary,
-                    "seen": seen,
-                }
-            )
-
-        routines.sort(key=lambda r: r["last_run"], reverse=True)
-        return routines
-    except Exception:
-        logger.warning("home: failed to collect routines", exc_info=True)
-        return []
-
-
-def _collect_skills() -> list[dict[str, Any]]:
-    """Collect owner-wide skill profiles for the Pulse view."""
-    try:
-        state = _load_skills_state()
-        last_seen_dt = _parse_seen_iso(state.get("skills_last_seen"))
-
-        skills: list[dict[str, Any]] = []
-        for pattern in think_skills.load_patterns():
-            try:
-                slug = str(pattern.get("slug") or "").strip()
-                status = str(pattern.get("status") or "").strip() or "emerging"
-                if not slug or status == "retired":
-                    continue
-
-                profile_markdown = think_skills.load_profile(slug)
-                if profile_markdown is None:
-                    continue
-
-                post = frontmatter.loads(profile_markdown)
-                meta = post.metadata
-                observations = [
-                    observation
-                    for observation in pattern.get("observations", [])
-                    if isinstance(observation, dict)
-                ]
-                observation_times = sorted(
-                    str(observation.get("recorded_at") or observation.get("day") or "")
-                    for observation in observations
-                    if observation.get("recorded_at") or observation.get("day")
-                )
-                facets = sorted(
-                    {
-                        str(item).strip()
-                        for item in pattern.get("facets_touched", [])
-                        if str(item).strip()
-                    }
-                    or {
-                        str(observation.get("facet") or "").strip()
-                        for observation in observations
-                        if str(observation.get("facet") or "").strip()
-                    }
-                )
-                confidence = meta.get("confidence", 0.0)
-                if isinstance(confidence, (int, float)) and not isinstance(
-                    confidence, bool
-                ):
-                    confidence_value = float(confidence)
-                else:
-                    confidence_value = 0.0
-
-                try:
-                    profile_mtime = datetime.fromtimestamp(
-                        think_skills.profile_path(slug).stat().st_mtime,
-                        tz=timezone.utc,
-                    )
-                except OSError:
-                    profile_mtime = None
-
-                seen = _was_seen(profile_mtime, last_seen_dt)
-
-                skills.append(
-                    {
-                        "id": slug,
-                        "slug": slug,
-                        "name": (
-                            str(meta.get("display_name") or "").strip()
-                            or str(pattern.get("name") or "").strip()
-                            or slug
-                        ),
-                        "description": str(meta.get("description") or "").strip(),
-                        "category": str(meta.get("category") or "").strip(),
-                        "confidence": confidence_value,
-                        "status": status,
-                        "facets": facets,
-                        "observations": len(observations),
-                        "first_seen": observation_times[0] if observation_times else "",
-                        "last_seen": observation_times[-1] if observation_times else "",
-                        "content": post.content,
-                        "seen": seen,
-                    }
-                )
-            except Exception:
-                logger.warning(
-                    "home: failed to load skill %s",
-                    pattern.get("slug"),
-                    exc_info=True,
-                )
-                continue
-
-        skills.sort(
-            key=lambda skill: (
-                float(skill.get("confidence") or 0.0),
-                str(skill.get("last_seen") or ""),
-            ),
-            reverse=True,
-        )
-        return skills
-    except Exception:
-        logger.warning("home: failed to collect skills", exc_info=True)
-        return []
-
-
 def _build_pulse_context() -> dict[str, Any]:
     """Build the full Pulse page context."""
     today = _today()
@@ -1262,22 +935,13 @@ def _build_pulse_context() -> dict[str, Any]:
     if flow_mtime:
         flow_updated_at = datetime.fromtimestamp(flow_mtime).strftime("%H:%M")
 
-    # Try pulse.md as primary narrative, fall back to flow.md
-    pulse_content, pulse_meta, pulse_needs = _load_pulse_md()
+    # Try today's pulse record as primary narrative, fall back to flow.md
+    pulse_content, pulse_time, pulse_needs = _load_pulse_narrative(today)
     if pulse_content:
         narrative_content = pulse_content
         narrative_source = "pulse"
         narrative_header = "pulse"
-        updated = pulse_meta.get("updated", "")
-        if isinstance(updated, str):
-            try:
-                narrative_updated_at = datetime.fromisoformat(updated).strftime("%H:%M")
-            except ValueError:
-                narrative_updated_at = flow_updated_at
-        elif hasattr(updated, "strftime"):
-            narrative_updated_at = updated.strftime("%H:%M")
-        else:
-            narrative_updated_at = flow_updated_at
+        narrative_updated_at = pulse_time or flow_updated_at
     else:
         narrative_content = flow_content
         narrative_source = "flow"
@@ -1287,9 +951,6 @@ def _build_pulse_context() -> dict[str, Any]:
 
     anticipated_activities = _collect_anticipated_activities(today)
     activities = _collect_activities(today)
-    todos = _collect_todos(today)
-    routines = _collect_routines()
-    skills = _collect_skills()
     latest_weekly_reflection = _load_latest_weekly_reflection()
 
     last_observe_relative = None
@@ -1307,15 +968,10 @@ def _build_pulse_context() -> dict[str, Any]:
     briefing_exists = bool(briefing_sections)
     briefing_phase = _compute_briefing_phase(segment_count, now.hour, briefing_exists)
     briefing_lateness = _briefing_lateness_state(now, briefing_phase)
-    unseen_routines = [r for r in routines if not r["seen"]]
-    unseen_skills = [s for s in skills if not s["seen"]]
     show_welcome = (
         narrative_content is None
         and not anticipated_activities
         and not activities
-        and not todos
-        and not unseen_routines
-        and not skills
         and not briefing_exists
         and not attention
         and not pulse_needs
@@ -1329,22 +985,6 @@ def _build_pulse_context() -> dict[str, Any]:
         if narrative_updated_at:
             narrative_summary += f" — updated {narrative_updated_at}"
 
-    routines_summary = ""
-    if unseen_routines:
-        n = len(unseen_routines)
-        routines_summary = f"{n} new routine{'s' if n != 1 else ''}"
-
-    skills_summary = ""
-    if skills:
-        new_count = len(unseen_skills)
-        total = len(skills)
-        if new_count:
-            skills_summary = f"{new_count} new, {total} total"
-        else:
-            skills_summary = f"{total} skill{'s' if total != 1 else ''}"
-
-    skills_content = {s["id"]: s["content"] for s in skills}
-
     today_summary_parts = []
     if anticipated_activities:
         n = len(anticipated_activities)
@@ -1354,7 +994,7 @@ def _build_pulse_context() -> dict[str, Any]:
         today_summary_parts.append(f"{n} {'activities' if n != 1 else 'activity'}")
     today_summary = ", ".join(today_summary_parts)
 
-    needs_you_items = classify_needs_you(attention, pulse_needs, todos)
+    needs_you_items = classify_needs_you(attention, pulse_needs)
     needs_count = len(needs_you_items)
     needs_summary = ""
     if needs_count:
@@ -1386,6 +1026,13 @@ def _build_pulse_context() -> dict[str, Any]:
         )
 
     pipeline_status = read_steward_health()
+    if pipeline_status is not None:
+        # Enrich the deterministic warning signal with the lite generate talent's
+        # human-friendly summary (headline + sentence + a closed-enum action) when
+        # one is available. Falls back to the raw bullet (message) if not.
+        summary = read_steward_summary()
+        if summary:
+            pipeline_status = {**pipeline_status, **summary}
 
     yesterday_processing = _summarize_yesterday_processing(yesterday, journal_age_days)
 
@@ -1409,12 +1056,7 @@ def _build_pulse_context() -> dict[str, Any]:
         "flow_updated_at": flow_updated_at,
         "anticipated_activities": anticipated_activities,
         "activities": activities,
-        "todos": todos,
         "needs_you_items": [item.to_dict() for item in needs_you_items],
-        "routines": routines,
-        "skills": skills,
-        "skills_summary": skills_summary,
-        "skills_content": skills_content,
         "briefing_sections": briefing_sections,
         "briefing_meta": briefing_meta,
         "briefing_phase": briefing_phase,
@@ -1428,7 +1070,6 @@ def _build_pulse_context() -> dict[str, Any]:
         "yesterday_processing": yesterday_processing,
         "show_welcome": show_welcome,
         "narrative_summary": narrative_summary,
-        "routines_summary": routines_summary,
         "today_summary": today_summary,
         "needs_summary": needs_summary,
     }
@@ -1453,24 +1094,6 @@ def api_pulse():
     ctx.pop("show_welcome", None)
     ctx["now"] = ctx["now"].isoformat()
     return jsonify(ctx)
-
-
-@home_bp.route("/api/routines/seen", methods=["POST"])
-def api_routines_seen():
-    """Mark routines as seen."""
-    state = _load_routines_state()
-    state["routines_last_seen"] = datetime.now(timezone.utc).isoformat()
-    _save_routines_state(state)
-    return jsonify({"ok": True})
-
-
-@home_bp.route("/api/skills/seen", methods=["POST"])
-def api_skills_seen():
-    """Mark skills as seen."""
-    state = _load_skills_state()
-    state["skills_last_seen"] = datetime.now(timezone.utc).isoformat()
-    _save_skills_state(state)
-    return jsonify({"ok": True})
 
 
 @home_bp.route("/api/briefing")

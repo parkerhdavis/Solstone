@@ -4,6 +4,71 @@ All notable changes to solstone (the Python package) will be documented in this 
 
 Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), aligned with `cmo/brand/changelog-voice.md`.
 
+## [0.5.4] - 2026-06-12
+
+### Added
+- you can now back up your journal to your own cloud storage, encrypted before it ever leaves your machine. set up a destination you own (an S3 or B2 bucket), and solstone keeps an encrypted copy there on a schedule, with restore and prune built in. you hold the keys: a daily key that runs the backup and a separate recovery key you save somewhere safe, and you need the recovery key to restore. nothing routes through sol pbc, ever; the backup goes straight from your machine to your bucket and back. set it up from the new backup page in your journal, or from the terminal with `journal backup`.
+- your journal now has a "your services" page that gathers the optional extras you can turn on, like scout and your private link, in one place. each one shows whether it's on and lets you turn it on or off from inside your journal, with backup linked from there too.
+- on-device transcription can now tell voices apart on its own. when the local engine handles your audio, it now labels who's speaking the same way the hosted option already did, so a conversation reads as a back-and-forth rather than one undivided block. this runs entirely on your machine; nothing new leaves it.
+- the curation page now suggests when two speaker names look like the same person, alongside the facet and entity merges it already offered, so tidying up who's who has one clear place to happen. it only ever suggests; you decide.
+
+### Changed
+- solstone no longer includes todos, skills, routines, or the daily digest. these came out as a deliberate narrowing of what solstone does. anything you'd already saved under them stays untouched on disk; nothing is deleted.
+- on Linux, the on-device (local) option now runs on your graphics card instead of the processor. it needs a usable GPU; a Linux machine without one uses a hosted option instead. on macOS, the local option runs on Apple's MLX, as before.
+- turning on solstone scout is now a single sign-in link that works the same on every machine, including headless ones. the older code-based path could stall or report a confusing failure on some setups; that path is gone.
+
+### Fixed
+- a computer running more than one observer no longer blends them into a single stream. if you ran, say, a desktop observer and a terminal observer on the same machine, they could collapse into one and overwrite each other; each observer now registers itself and keeps its own identity. this happens locally on your machine; nothing new leaves it.
+
+## [0.5.3] - 2026-06-10
+
+### Added
+- whether your journal is reachable over your local network is now a setting in journal settings, alongside everything else. it used to live only behind a command-line flag. the default is unchanged: your journal stays local-only until you turn this on.
+
+### Changed
+- your journal's own config is now the single source for your managed provider keys. a key set only in your shell environment, and not in your journal config, is no longer picked up. this keeps where your keys come from predictable, and your journal config the one place that decides. nothing about what leaves your machine changes.
+- the words across health, settings, and sol now read "talents" where they used to say "agents," with a few labels clarified along the way (disk usage, error counts, and a stray "None" that no longer shows up on the command line).
+
+### Fixed
+- search in the web app works again. every search was failing with a generic error; this resolves the underlying cause, and results come back as they should.
+- importing a transfer or peer archive now refuses anything that would write outside your journal folder. a malformed or hostile archive is turned away whole, writing nothing — your journal folder stays the only place an import can land.
+- marking a todo done or cancelled when it was already finished is now refused with a clear message, instead of leaving it recorded as both at once.
+- an entity active right now no longer shows "Last active: Tomorrow" in the evening. the day is computed on your local time, so it reads correctly.
+- the chat box no longer shows a provider-setup notice as its placeholder on every page, and a day with nothing in it now gets the same friendly empty state as the other timeline views.
+- on macOS, installing or upgrading the journal service no longer fails on a slow machine. some upgrades could stop on an input/output error while the old service was still unloading; this now waits and retries instead of giving up.
+
+## [0.5.2] - 2026-06-05
+
+### Changed
+- terminal `sol chat` now runs through the same chat that the web app uses, so you get the same answer whichever way you ask. it shows its progress as it works and prints the final answer at the end.
+
+### Fixed
+- on-device transcription no longer splits words apart. transcripts from the local engine were coming through with letters scattered ("Tak ing out the m one y" instead of "Taking out the money"); new transcriptions now read as natural words and sentences. anything already stored garbled needs a fresh re-transcription to clean up.
+- asking sol about your own journal now gets an answer. questions that look something up in your memory, like past conversations, your notes, a quote, or your name, used to get declined; sol answers them now. reflection-style questions are unchanged.
+- on macOS, setup and upgrade no longer stall at the readiness check. a diagnostic step could take long enough to time out on a fresh or cold machine; it now runs in a fraction of a second.
+- syncing a folder of audio now tells you what it couldn't read. `sol import --sync audio` used to fold an unreadable file in with the ones it intentionally skipped; an unreadable file is now called out on its own line, with a reason, and the per-file list shows up with `-v`. `--auto` guidance also works alongside `--sync --save` now.
+- on Linux, installing or reinstalling the journal service no longer removes other services you set up. if you had your own solstone-related units, like a desktop observer or your own backup job, an upgrade could delete them. that cleanup step is gone.
+
+## [0.5.1] - 2026-06-05
+
+### Fixed
+- macOS installs now get the same clean journal package as every other platform. the Apple Silicon wheel no longer carries retired internal talent prompts from an earlier build, so provider readiness stays available after install.
+
+## [0.5.0] - 2026-06-05
+
+### Added
+- you can now point solstone at a folder of audio files and keep it in sync with your journal. `sol import --sync audio --path <folder>` shows what is new, and `--save` imports only what has not already been brought in.
+- sol now surfaces suggested facets and entity merges for review, so organizing the journal has a clear place to happen.
+
+### Changed
+- provider readiness is now one signal across Settings, Health, support diagnostics, chat, and the command line. when a provider or model is blocking work, solstone shows the affected task and the next step instead of scattering the reason across pages.
+- on Apple Silicon, the local setup path now matches the on-device engine the journal actually runs, including the right memory requirement before activation.
+- transcription setup is more careful about memory. when the local model is a poor fit for the machine, solstone says so up front and points to a hosted option instead of trying to push through.
+
+### Fixed
+- provider settings load cleanly from a direct link and show each task's defaults.
+- audio folder sync retires missing skipped files when the source folder changes, so a dry run does not keep warning about files that are no longer there.
+
 ## [0.4.10] - 2026-06-02
 
 ### Added

@@ -42,6 +42,7 @@ class LocalModelSpec:
     min_ram_bytes: int
     mmproj_filename: str | None = None
     mmproj_sha256: str | None = None
+    mmproj_size_bytes: int | None = None
 
 
 # Fork: the single bundled local model is Qwen3.6-35B-A3B (Q8_0), a vision VLM

@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import queue
@@ -42,8 +41,7 @@ from solstone.think.utils import (
 
 from . import bridge as convey_bridge
 from .config import (
-    load_convey_config,
-    save_convey_config,
+    locked_modify_convey_config,
     seed_default_app_navigation,
 )
 from .copy import LOGIN_NO_PASSWORD_CONFIGURED
@@ -61,6 +59,7 @@ def _get_password_hash() -> str:
         convey_config = config.get("convey", {})
         return convey_config.get("password_hash", "")
     except Exception:
+        # Intended fail-closed-on-unreadable-config: no hash means no password auth.
         return ""
 
 
@@ -70,6 +69,7 @@ def _is_setup_complete() -> bool:
         config = get_config()
         return bool(config.get("setup", {}).get("completed_at"))
     except Exception:
+        # Intended fail-closed-on-unreadable-config: require setup flow.
         return False
 
 
@@ -82,19 +82,6 @@ def _check_basic_auth() -> bool:
     if not password_hash:
         return False
     return check_password_hash(password_hash, auth.password or "")
-
-
-def _save_config_section(section: str, data: dict) -> dict:
-    """Merge data into a config section and write back to journal.json."""
-    config = get_config()
-    config.setdefault(section, {}).update(data)
-    config_path = Path(get_journal()) / "config" / "journal.json"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-    os.chmod(config_path, 0o600)
-    return config
 
 
 bp = Blueprint(
@@ -128,6 +115,7 @@ def require_login() -> Any:
         "app:observer.ingest_transfer",
         "app:observer.ingest_manifest",
         "app:observer.ingest_manifest_day",
+        "app:observer.register",
         # Journal-source manifest and ingest endpoints use key-based auth, not session
         "app:import.journal_source_manifest",
         "app:import.ingest_segments",
@@ -381,8 +369,12 @@ def init_finalize() -> Any:
 
     write_journal_config(config)
 
-    config = load_convey_config()
-    if seed_default_app_navigation(config) and not save_convey_config(config):
+    def _seed(config: dict[str, Any]) -> dict[str, Any] | None:
+        return config if seed_default_app_navigation(config) else None
+
+    try:
+        locked_modify_convey_config(_seed)
+    except Exception:
         logger.error("default app navigation seed convey-config PERSIST failed")
 
     session["logged_in"] = True

@@ -25,7 +25,9 @@ import logging
 import os
 import platform
 import re
+import shutil
 import tarfile
+import tempfile
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -33,9 +35,11 @@ from typing import Any
 
 import requests
 
+from solstone.observe import protocol
 from solstone.observe.peer_lookup import PeerInfo, PeerLookupError, resolve_peer
 from solstone.observe.pl_http import PlHttpSession
 from solstone.think.callosum import callosum_send
+from solstone.think.journal_io import contained_path, install_file
 from solstone.think.link.bundle import load_client_identity
 from solstone.think.link.dialer import TunnelClient, TunnelRequestError
 from solstone.think.link.paths import relay_url
@@ -337,32 +341,75 @@ def import_archive(
             "validation": validation,
         }
 
-    # Ensure day directory exists
-    day_dir = day_path(day)
+    journal = get_journal()
 
-    # Extract segments
+    def _reject_if_unsafe(component: str, kind: str) -> None:
+        try:
+            contained_path(journal, component)
+        except ValueError as exc:
+            raise ValueError(
+                f"Refusing to import archive: unsafe {kind} {component!r} "
+                f"escapes the journal ({exc})"
+            ) from exc
+
     imported = []
     with tarfile.open(archive_path, "r:gz") as tar:
+        members = tar.getmembers()
+        plan: list[tuple[str, str, Path, list[tuple[tarfile.TarInfo, Path]]]] = []
+
         for original_arc_key, target_arc_key in validation["import_as"].items():
-            target_dir = day_dir / target_arc_key
+            _reject_if_unsafe(target_arc_key, "segment key")
+            target_dir = contained_path(journal, f"{day}/{target_arc_key}")
+
+            planned_files = []
+            prefix = f"{original_arc_key}/"
+            for member in members:
+                if member.name.startswith(prefix) and member.isfile():
+                    filename = member.name[len(prefix) :]
+                    if not filename:
+                        raise ValueError(
+                            "Refusing to import archive member with empty filename "
+                            f"for segment {original_arc_key!r} -> "
+                            f"{target_arc_key!r}: {member.name!r}"
+                        )
+                    _reject_if_unsafe(filename, "member filename")
+                    target_path = contained_path(
+                        journal,
+                        f"{day}/{target_arc_key}/{filename}",
+                    )
+                    planned_files.append((member, target_path))
+
+            plan.append((original_arc_key, target_arc_key, target_dir, planned_files))
+
+        for original_arc_key, target_arc_key, target_dir, planned_files in plan:
             target_dir.mkdir(parents=True, exist_ok=True)
 
-            # Extract files for this segment (archived as stream/segment/file)
-            prefix = f"{original_arc_key}/"
-            for member in tar.getmembers():
-                if member.name.startswith(prefix) and member.isfile():
-                    # Extract to target segment directory
-                    filename = member.name[len(prefix) :]
-                    target_path = target_dir / filename
-
-                    # Extract file content
-                    source = tar.extractfile(member)
-                    if source:
-                        with open(target_path, "wb") as f:
-                            f.write(source.read())
-
-                        # Preserve modification time
+            for member, target_path in planned_files:
+                source = tar.extractfile(member)
+                if source:
+                    temp_path = None
+                    temp_handle = None
+                    promoted = False
+                    try:
+                        temp_handle = tempfile.NamedTemporaryFile(
+                            mode="wb",
+                            dir=target_dir,
+                            prefix=".import_",
+                            suffix=".tmp",
+                            delete=False,
+                        )
+                        temp_path = Path(temp_handle.name)
+                        shutil.copyfileobj(source, temp_handle)
+                        temp_handle.close()
+                        install_file(temp_path, target_path)
+                        promoted = True
+                        # Preserve modification time (install_file does not)
                         os.utime(target_path, (member.mtime, member.mtime))
+                    finally:
+                        if temp_handle is not None and not temp_handle.closed:
+                            temp_handle.close()
+                        if temp_path is not None and not promoted:
+                            temp_path.unlink(missing_ok=True)
 
             if original_arc_key != target_arc_key:
                 logger.info(f"  Imported: {original_arc_key} -> {target_arc_key}")
@@ -463,6 +510,40 @@ def _parse_day_spec(day_spec: str | None, journal_root: Path) -> list[str]:
     raise ValueError("Invalid day format: use YYYYMMDD or YYYYMMDD-YYYYMMDD")
 
 
+def _parse_remote_segments(data: Any, day: str) -> dict[str, dict[str, str]]:
+    """Parse a segments 200 body (envelope or bare array) to {key: {name: sha}}.
+
+    Accepts both the v2 ``{"items": [...]}`` envelope and the legacy bare array,
+    yielding an identical map. Any unrecognized body degrades to ``{}`` with a
+    logged warning; never raises.
+    """
+    if isinstance(data, dict):
+        items = data.get("items")
+    elif isinstance(data, list):
+        items = data
+    else:
+        items = None
+    if not isinstance(items, list):
+        logger.warning(
+            f"Remote segment query for {day}: unrecognized response body, ignoring"
+        )
+        return {}
+    try:
+        return {
+            entry["key"]: {
+                file_info["name"]: file_info["sha256"]
+                for file_info in entry.get("files", [])
+            }
+            for entry in items
+            if isinstance(entry, dict) and entry.get("key")
+        }
+    except (KeyError, TypeError, AttributeError) as e:
+        logger.warning(
+            f"Remote segment query for {day}: malformed segment entry, ignoring: {e}"
+        )
+        return {}
+
+
 def _query_remote_segments(
     session: requests.Session,
     base_url: str,
@@ -471,17 +552,24 @@ def _query_remote_segments(
     """Query remote observer for existing segments on a day."""
     url = f"{base_url}/app/observer/ingest/segments/{day}"
     try:
-        response = session.get(url, timeout=UPLOAD_TIMEOUT)
+        response = session.get(
+            url,
+            headers={
+                protocol.OBSERVER_PROTOCOL_VERSION_HEADER: str(
+                    protocol.OBSERVER_PROTOCOL_VERSION
+                )
+            },
+            timeout=UPLOAD_TIMEOUT,
+        )
         if response.status_code == 200:
-            data = response.json()
-            return {
-                entry["key"]: {
-                    file_info["name"]: file_info["sha256"]
-                    for file_info in entry.get("files", [])
-                }
-                for entry in data
-                if entry.get("key")
-            }
+            try:
+                data = response.json()
+            except ValueError:
+                logger.warning(
+                    f"Remote segment query for {day}: non-JSON 200 body, ignoring"
+                )
+                return {}
+            return _parse_remote_segments(data, day)
         if response.status_code == 401:
             raise ValueError(AUTH_INVALID_OBSERVER_KEY)
         if response.status_code == 403:

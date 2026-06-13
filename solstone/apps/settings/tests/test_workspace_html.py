@@ -47,6 +47,33 @@ def test_workspace_has_diagnostic_reports_toggle():
     assert "diagnostic reports" in text
 
 
+def test_workspace_network_access_toggle_uses_dedicated_flow():
+    text = _workspace_text()
+
+    match = re.search(r'<input[^>]*\bid="field-network-access"[^>]*>', text)
+    assert match, "network access toggle not found"
+    toggle_tag = match.group(0)
+    assert "data-section" not in toggle_tag
+    assert "data-key" not in toggle_tag
+    assert "{{ settings_copy.CONVEY_NETWORK_ACCESS_LABEL }}" in text
+    assert "settings_copy.CONVEY_NETWORK_ACCESS_HINT" in text
+    assert "api/convey/network-access/capability" in text
+    assert "api/convey/network-access" in text
+    assert "function handleNetworkAccessChange(el)" in text
+    assert "const desired = el.checked" in text
+    assert "el.checked = previous" in text
+    assert "result?.restart_timeout" in text
+    assert "saveConfigValue('convey', 'allow_network_access" not in text
+
+
+def test_workspace_uses_global_convey_config_api():
+    text = _workspace_text()
+
+    assert "fetch('/api/config/convey')" in text
+    assert "window.apiJson('/api/config/convey'" in text
+    assert "'api/config/convey'" not in text
+
+
 def test_workspace_unified_provider_panel_replaces_install_regions():
     text = _workspace_text()
 
@@ -61,7 +88,12 @@ def test_workspace_unified_provider_panel_replaces_install_regions():
     assert "local-progress-shell" not in text
     assert "function startLocalBootstrap()" in text
     assert "function renderProvidersPanel(data)" in text
-    assert "function providerCardMeta(state, kind, availability)" in text
+    assert "function renderAiReadinessSummary(aiReadiness)" in text
+    assert "summary.dataset.aiReadinessSummary" in text
+    assert (
+        "function providerCardMeta(state, kind, availability, readiness = null)" in text
+    )
+    assert "function providerCardMetaLine(state, kind, availability)" in text
     assert "function runProviderAction(providerId, action)" in text
     assert "async function pollProvidersPanel()" in text
     assert "function providerCardOverflow(state, kind)" in text
@@ -79,6 +111,13 @@ def test_workspace_unified_provider_panel_keeps_bootstrap_endpoints_and_polling(
     assert "clearInterval(providersPanelPollTimer)" in text
     assert "IN_FLIGHT_INSTALL_STATES.includes(state.install_state)" in text
     assert "providersPanelActionPending" in text
+
+
+def test_workspace_local_issue_copy_includes_gpu_unavailable():
+    text = _workspace_text()
+
+    assert "gpu_unavailable" in text
+    assert "This computer has no GPU acceleration, which local models require." in text
 
 
 def test_workspace_provider_names_excludes_openhands():
@@ -102,9 +141,43 @@ def test_workspace_unified_provider_panel_has_byte_and_blocked_state_paths():
 
     assert "formatMlxBytes(receivedBytes)" in text
     assert "formatMlxBytes(totalBytes)" in text
+    assert "totalBytes <= 0" in text
+    assert "receivedBytes > totalBytes" in text
     assert "function localMlxBlockedReason(state, availability)" in text
+    assert "providerCardMetaLine(state, kind, availability)" in text
+    assert "INSTALL_COPY.LOCAL_REQUIREMENTS_TEMPLATE" in text
+    assert "INSTALL_COPY.LOCAL_DETECTED_MEMORY_TEMPLATE" in text
+    assert "INSTALL_COPY.LOCAL_DETECTED_MEMORY_UNKNOWN" in text
+    assert "INSTALL_COPY.LOCAL_PATHS_FRAMING" in text
+    assert "INSTALL_COPY.LOCAL_EXPERIMENTAL_NOTE" in text
+    assert "INSTALL_COPY.LOCAL_RECOVERY_HOSTED_KEY_SET" in text
+    assert "INSTALL_COPY.LOCAL_RECOVERY_NO_HOSTED_KEY" in text
+    assert (
+        "!!(configData?.env?.GOOGLE_API_KEY || configData?.runtime_env?.GOOGLE_API_KEY)"
+    ) in text
     assert "'local runtime is not installed'" in text
     assert "'local model files are not installed'" in text
+    match = re.search(
+        r"const installableReasons = \[(?P<body>.*?)\];",
+        text,
+        re.DOTALL,
+    )
+    assert match is not None
+    assert "insufficient RAM" not in match.group("body")
+    assert "insufficient disk" not in match.group("body")
+
+
+def test_workspace_transcription_resource_notice_and_info_line_present():
+    text = _workspace_text()
+
+    assert 'id="transcribeResourceNotice"' in text
+    assert 'id="transcribeResourceNoticeText"' in text
+    assert 'id="transcribeResourceInfo"' in text
+    assert "function renderTranscribeResourceInfo(resource)" in text
+    assert "function renderTranscribeResourceNotice(resource)" in text
+    assert "transcribeResource = data.resource || null" in text
+    assert "renderTranscribeResourceInfo(transcribeResource)" in text
+    assert "renderTranscribeResourceNotice(transcribeResource)" in text
 
 
 def test_workspace_cogitate_key_guidance_strings_present():
@@ -185,6 +258,7 @@ def test_workspace_local_model_row_uses_shared_local_install_path():
     assert 'id="field-local-active-model"' in text
     assert 'id="mlxModelRow"' not in text
     assert 'id="field-mlx-active-model"' not in text
-    assert "if (providerId === 'local') return 'local-mlx';" in text
+    assert "data?.local_backend === \"mlx\" ? 'local-mlx' : 'local'" in text
     assert "kind === 'local-mlx'" in text
+    assert "kind === 'local'" in text
     assert "function isLocalProviderSelected()" in text

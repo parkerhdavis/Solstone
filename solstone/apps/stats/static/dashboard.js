@@ -572,9 +572,9 @@ const Dashboard = (function() {
       return fmt(p === 1 ? C.VERDICT_PENDING_ONLY_SINGULAR : C.VERDICT_PENDING_ONLY_PLURAL, {pending: p});
     }
 
-    const stuckArm = fmt(s === 1 ? C.VERDICT_STUCK_ONLY_SINGULAR : C.VERDICT_STUCK_ONLY_PLURAL, {stuck: s}).replace(/\.$/, '');
-    const pendingTail = fmt((C.VERDICT_BOTH_PLURAL || '').split(' — ')[1], {pending: p});
-    return stuckArm + ' — ' + pendingTail;
+    const stuckArm = fmt(s === 1 ? C.VERDICT_MIXED_STUCK_SINGULAR : C.VERDICT_MIXED_STUCK_PLURAL, {stuck: s});
+    const pendingArm = fmt(p === 1 ? C.VERDICT_MIXED_PENDING_SINGULAR : C.VERDICT_MIXED_PENDING_PLURAL, {pending: p});
+    return stuckArm + ' — ' + pendingArm + '.';
   }
 
   function backlogDepth(day) {
@@ -776,17 +776,6 @@ const Dashboard = (function() {
     document.getElementById('loading').style.display = 'none';
     document.getElementById('notice').innerHTML = '';
 
-    // Handle API error
-    if (data.error) {
-      document.getElementById('notice').appendChild(
-        el('div', {className: 'alert alert-error'}, [
-          'Couldn\'t load stats data — the stats file may be corrupt or unreadable. ',
-          'Try regenerating with think-journal-stats.'
-        ])
-      );
-      return;
-    }
-
     // Schema version check (non-blocking warning)
     if (stats.schema_version && stats.schema_version !== EXPECTED_SCHEMA_VERSION) {
       document.getElementById('notice').appendChild(
@@ -865,7 +854,7 @@ const Dashboard = (function() {
     statsGrid.appendChild(statCard('audio hours', totalAudioHours, 'hours'));
     statsGrid.appendChild(statCard('screen hours', totalScreenHours, 'hours'));
     statsGrid.appendChild(statCard('total tokens', fmtTokens(totalTokens), 'tokens'));
-    statsGrid.appendChild(statCard('disk usage', fmtBytes(totals.day_bytes || 0), 'journal days'));
+    statsGrid.appendChild(statCard('disk usage', fmtBytes(totals.day_bytes || 0), 'on disk'));
     
     // Render progress cards
     const progressSection = document.getElementById('progressSection');
@@ -1007,7 +996,8 @@ const Dashboard = (function() {
           document.getElementById('loading').style.display = 'none';
           document.getElementById('notice').appendChild(
             el('div', {className: 'alert alert-error'}, [
-              'failed to load dashboard data: ' + error.message
+              'Couldn\'t load dashboard data — the stats file may be corrupt or unreadable. ',
+              'Try regenerating with think-journal-stats.'
             ])
           );
         });

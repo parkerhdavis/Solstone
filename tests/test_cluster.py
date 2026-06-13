@@ -530,7 +530,9 @@ def test_cluster_with_agent_filter_app_namespaced(tmp_path, monkeypatch):
     (segment / "talents").mkdir()
     (segment / "audio.jsonl").write_text('{}\n{"text": "hello"}\n')
     (segment / "talents" / "entities.md").write_text("System entity results")
-    (segment / "talents" / "_todos_review.md").write_text("Todos review results")
+    (segment / "talents" / "_activities_review.md").write_text(
+        "Activities review results"
+    )
 
     # Test filtering to include app-namespaced agent
     result, counts = mod.cluster(
@@ -538,14 +540,14 @@ def test_cluster_with_agent_filter_app_namespaced(tmp_path, monkeypatch):
         sources={
             "transcripts": True,
             "percepts": False,
-            "agents": {"entities": False, "todos:review": True},
+            "agents": {"entities": False, "activities:review": True},
         },
     )
 
     assert counts["transcripts"] == 1
-    assert counts["agents"] == 1  # Only todos:review
+    assert counts["agents"] == 1  # Only activities:review
     assert "System entity results" not in result
-    assert "Todos review results" in result
+    assert "Activities review results" in result
 
 
 def test_cluster_with_empty_agent_filter(tmp_path, monkeypatch):
@@ -581,7 +583,7 @@ def test_filename_to_agent_key():
     assert _filename_to_agent_key("flow") == "flow"
 
     # App-namespaced agents
-    assert _filename_to_agent_key("_todos_review") == "todos:review"
+    assert _filename_to_agent_key("_activities_review") == "activities:review"
     assert _filename_to_agent_key("_entities_observer") == "entities:observer"
 
     # Edge case: single underscore component
@@ -594,17 +596,17 @@ def test_agent_matches_filter():
 
     # None filter means all agents
     assert _agent_matches_filter("entities", None) is True
-    assert _agent_matches_filter("_todos_review", None) is True
+    assert _agent_matches_filter("_activities_review", None) is True
 
     # Empty dict means no agents
     assert _agent_matches_filter("entities", {}) is False
-    assert _agent_matches_filter("_todos_review", {}) is False
+    assert _agent_matches_filter("_activities_review", {}) is False
 
     # Specific filtering
-    filter_dict = {"entities": True, "meetings": False, "todos:review": "required"}
+    filter_dict = {"entities": True, "meetings": False, "activities:review": "required"}
     assert _agent_matches_filter("entities", filter_dict) is True
     assert _agent_matches_filter("meetings", filter_dict) is False
-    assert _agent_matches_filter("_todos_review", filter_dict) is True
+    assert _agent_matches_filter("_activities_review", filter_dict) is True
     assert _agent_matches_filter("flow", filter_dict) is False  # Not in filter
 
 
@@ -797,7 +799,7 @@ def test_scan_day_marks_header_only_audio_pending(tmp_path, monkeypatch):
     assert segments[0]["data_state"] == {"audio": "pending"}
 
 
-def test_derive_modality_state_chunks_win_rescue(tmp_path):
+def test_derive_modality_state_chunks_win_is_pure(tmp_path):
     from solstone.think.data_state import derive_modality_state
 
     segment = tmp_path / "090000_300"
@@ -814,10 +816,29 @@ def test_derive_modality_state_chunks_win_rescue(tmp_path):
     )
 
     assert state == "analyzed"
+    assert marker.exists()
+
+
+def test_repair_modality_markers_chunks_win_rescue(tmp_path):
+    from solstone.think.data_state import repair_modality_markers
+
+    segment = tmp_path / "090000_300"
+    segment.mkdir()
+    marker = segment / ".analyzing_audio"
+    marker.write_text('{"started_at": "2026-05-20T09:00:00Z", "modality": "audio"}\n')
+
+    repair_modality_markers(
+        segment,
+        "audio",
+        has_chunks=True,
+        has_jsonl=True,
+        has_raw=True,
+    )
+
     assert not marker.exists()
 
 
-def test_derive_modality_state_stale_marker_renames_failed(tmp_path):
+def test_derive_modality_state_stale_marker_is_pure(tmp_path):
     from solstone.think.data_state import derive_modality_state
 
     segment = tmp_path / "090000_300"
@@ -837,13 +858,36 @@ def test_derive_modality_state_stale_marker_renames_failed(tmp_path):
     )
 
     assert state == "failed"
+    assert marker.exists()
+    assert not failed.exists()
+
+
+def test_repair_modality_markers_stale_marker_renames_failed(tmp_path):
+    from solstone.think.data_state import repair_modality_markers
+
+    segment = tmp_path / "090000_300"
+    segment.mkdir()
+    marker = segment / ".analyzing_screen"
+    failed = segment / ".analyze_failed_screen"
+    marker.write_text('{"started_at": "2026-05-20T09:00:00Z", "modality": "screen"}\n')
+    old_time = time.time() - 2000
+    os.utime(marker, (old_time, old_time))
+
+    repair_modality_markers(
+        segment,
+        "screen",
+        has_chunks=False,
+        has_jsonl=True,
+        has_raw=True,
+    )
+
     assert not marker.exists()
     payload = json.loads(failed.read_text())
     assert payload["reason"] == "stale"
     assert payload["modality"] == "screen"
 
 
-def test_derive_modality_state_corrupt_marker_renames_failed(tmp_path):
+def test_derive_modality_state_corrupt_marker_is_pure(tmp_path):
     from solstone.think.data_state import derive_modality_state
 
     segment = tmp_path / "090000_300"
@@ -861,6 +905,27 @@ def test_derive_modality_state_corrupt_marker_renames_failed(tmp_path):
     )
 
     assert state == "failed"
+    assert marker.exists()
+    assert not failed.exists()
+
+
+def test_repair_modality_markers_corrupt_marker_renames_failed(tmp_path):
+    from solstone.think.data_state import repair_modality_markers
+
+    segment = tmp_path / "090000_300"
+    segment.mkdir()
+    marker = segment / ".analyzing_screen"
+    failed = segment / ".analyze_failed_screen"
+    marker.write_text("{not json")
+
+    repair_modality_markers(
+        segment,
+        "screen",
+        has_chunks=False,
+        has_jsonl=False,
+        has_raw=True,
+    )
+
     assert not marker.exists()
     payload = json.loads(failed.read_text())
     assert payload["reason"] == "marker_corrupt"
@@ -892,6 +957,58 @@ def test_derive_modality_state_does_not_probe_processes(tmp_path, monkeypatch):
     )
 
 
+@pytest.mark.parametrize(
+    ("case", "expected_state"),
+    [
+        ("chunks_win", "analyzed"),
+        ("stale", "failed"),
+        ("corrupt", "failed"),
+    ],
+)
+def test_detect_data_state_does_not_repair_markers(
+    tmp_path, monkeypatch, case, expected_state
+):
+    from solstone.think import cluster, data_state
+
+    def fail_write(*_args, **_kwargs):
+        raise AssertionError("_write_failed_marker should not be called by reads")
+
+    monkeypatch.setattr(data_state, "_write_failed_marker", fail_write)
+    segment = tmp_path / "090000_300"
+    segment.mkdir()
+    marker = segment / ".analyzing_screen"
+    failed = segment / ".analyze_failed_screen"
+
+    if case == "chunks_win":
+        (segment / "screen.jsonl").write_text(
+            '{"raw": "screen.webm"}\n{"timestamp": 1, "content": {}}\n',
+            encoding="utf-8",
+        )
+        marker.write_text(
+            '{"started_at": "2026-05-20T09:00:00Z", "modality": "screen"}\n',
+            encoding="utf-8",
+        )
+    elif case == "stale":
+        (segment / "screen.webm").write_bytes(b"raw")
+        marker.write_text(
+            '{"started_at": "2026-05-20T09:00:00Z", "modality": "screen"}\n',
+            encoding="utf-8",
+        )
+        old_time = time.time() - 2000
+        os.utime(marker, (old_time, old_time))
+    else:
+        marker.write_text("{not json", encoding="utf-8")
+
+    before = marker.read_bytes()
+
+    state = cluster._detect_data_state(segment)
+
+    assert state["screen"] == expected_state
+    assert marker.exists()
+    assert marker.read_bytes() == before
+    assert not failed.exists()
+
+
 def test_scan_day_detects_analyzing_markers_from_fixture(tmp_path, monkeypatch):
     monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
     source = Path("tests/fixtures/journal/chronicle/20260520")
@@ -915,12 +1032,10 @@ def test_scan_day_detects_analyzing_markers_from_fixture(tmp_path, monkeypatch):
     assert by_key["090000_300"]["data_state"]["screen"] == "analyzing"
     assert by_key["091000_300"]["data_state"]["screen"] == "failed"
     assert by_key["092000_300"]["data_state"]["screen"] == "analyzed"
-    assert not (dest / "default" / "092000_300" / ".analyzing_screen").exists()
+    assert (dest / "default" / "092000_300" / ".analyzing_screen").exists()
     assert by_key["093000_300"]["data_state"]["screen"] == "failed"
-    stale_payload = json.loads(
-        (dest / "default" / "093000_300" / ".analyze_failed_screen").read_text()
-    )
-    assert stale_payload["reason"] == "stale"
+    assert (dest / "default" / "093000_300" / ".analyzing_screen").exists()
+    assert not (dest / "default" / "093000_300" / ".analyze_failed_screen").exists()
     assert by_key["094000_300"]["data_state"] == {
         "audio": "pending",
         "screen": "pending",

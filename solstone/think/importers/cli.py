@@ -25,6 +25,7 @@ from solstone.think.importers.shared import (
 from solstone.think.importers.text import _read_transcript, process_transcript
 from solstone.think.importers.utils import save_import_segments
 from solstone.think.indexer.journal import index_file
+from solstone.think.journal_io import atomic_replace
 from solstone.think.segment import _touch_health_marker
 from solstone.think.streams import stream_name, update_stream, write_segment_stream
 from solstone.think.utils import (
@@ -224,7 +225,13 @@ def _run_muesli_sync() -> bool:
         return False
 
 
-def _run_sync(backend_name: str, *, dry_run: bool = True, **extra: Any) -> None:
+def _run_sync(
+    backend_name: str,
+    *,
+    dry_run: bool = True,
+    verbose: bool = False,
+    **extra: Any,
+) -> None:
     """Run sync for a named backend and print results."""
     import inspect
 
@@ -275,6 +282,7 @@ def _run_sync(backend_name: str, *, dry_run: bool = True, **extra: Any) -> None:
     skipped = result.get("skipped", 0)
     downloaded = result.get("downloaded", 0)
     errors = result.get("errors", [])
+    state = load_sync_state(journal_root, backend_name)
 
     # Print summary
     print()
@@ -282,7 +290,16 @@ def _run_sync(backend_name: str, *, dry_run: bool = True, **extra: Any) -> None:
     print(f"  Already imported:    {imported}")
     print(f"  Available to import: {available}")
     if skipped:
-        print(f"  Skipped:             {skipped}")
+        reason_counts: dict[str, int] = {}
+        for info in (state or {}).get("files", {}).values():
+            if info.get("status") == "skipped":
+                reason = (info.get("skip_reason") or "unknown").replace("_", " ")
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        if reason_counts:
+            breakdown = ", ".join(f"{n} {r}" for r, n in sorted(reason_counts.items()))
+            print(f"  Skipped:             {skipped} ({breakdown})")
+        else:
+            print(f"  Skipped:             {skipped}")
 
     if downloaded > 0:
         print(f"  Imported this run:   {downloaded}")
@@ -293,7 +310,6 @@ def _run_sync(backend_name: str, *, dry_run: bool = True, **extra: Any) -> None:
 
     # In dry-run mode, show available files
     if dry_run and available > 0:
-        state = load_sync_state(journal_root, backend_name)
         if state:
             files = state.get("files", {})
             avail_files = [
@@ -316,9 +332,30 @@ def _run_sync(backend_name: str, *, dry_run: bool = True, **extra: Any) -> None:
                         print(f"  - {name}")
                 print()
                 print("Run with --save to import:")
-                print(f"  sol import --sync {backend_name} --save")
+                src = sync_kwargs.get("source_path")
+                if src:
+                    print(f"  sol import --sync {backend_name} --save --path {src}")
+                else:
+                    print(f"  sol import --sync {backend_name} --save")
 
-    if not dry_run and available == 0 and downloaded == 0:
+    if verbose and state:
+        files = state.get("files", {})
+        if files:
+            print()
+            print("Files:")
+            for fid, info in files.items():
+                name = info.get("filename") or fid
+                status = info.get("status", "unknown")
+                line = f"  {status:<11}{name}"
+                reason = info.get("skip_reason")
+                if status == "skipped" and reason:
+                    line += f" — {reason.replace('_', ' ')}"
+                duration = info.get("duration")
+                if duration is not None:
+                    line += f" ({int(duration)}s)"
+                print(line)
+
+    if not dry_run and available == 0 and downloaded == 0 and not errors:
         print()
         print("Everything is up to date.")
 
@@ -401,6 +438,32 @@ def _import_one_from_args(args: argparse.Namespace) -> dict[str, Any] | None:
             if detected is not None:
                 _file_importer = detected
                 import_source = detected.name
+
+    # Source-level dedup for audio/text (before timestamp detection and before
+    # _setup_import rewrites args.media). Mirrors the file-importer dedup at the
+    # file-importer branch; skipped for --force and --dry-run (which still preview).
+    if _file_importer is None and not args.dry_run:
+        from solstone.think.importers.shared import (
+            find_manifest_by_hash,
+            hash_source,
+        )
+
+        _source_hash = hash_source(Path(args.media))
+        if not args.force:
+            existing = find_manifest_by_hash(Path(get_journal()), _source_hash)
+            if existing:
+                imported_at = existing.get("imported_at", "unknown date")
+                entry_count = existing.get("entry_count", 0)
+                print(
+                    f"This file was already imported on {imported_at} "
+                    f"({entry_count} entries). Use --force to re-import."
+                )
+                return {
+                    "skipped": True,
+                    "reason": "already_imported",
+                    "imported_at": imported_at,
+                    "entry_count": entry_count,
+                }
 
     # --- Timestamp resolution ---
     if _file_importer is not None and not args.timestamp:
@@ -1087,11 +1150,26 @@ def _import_one_from_args(args: argparse.Namespace) -> dict[str, Any] | None:
             [processing_results["target_day"], processing_results["target_day"]],
         )
 
+        # Write dedup manifest for audio/text imports. File importers already wrote
+        # theirs in the file-importer branch above (line ~887); guard prevents a
+        # double write since all branches fall through this common tail.
+        if _file_importer is None:
+            from solstone.think.importers.shared import write_manifest
+
+            write_manifest(
+                journal_root,
+                import_id=args.timestamp,
+                source_type=import_source,
+                source_hash=_source_hash,
+                entry_count=len(all_created_files),
+                files_created=all_created_files,
+                days_affected=[day],
+            )
+
         imported_path = import_dir / "imported.json"
         # Write imported.json with all processing metadata
         try:
-            with open(imported_path, "w", encoding="utf-8") as f:
-                json.dump(processing_results, f, indent=2)
+            atomic_replace(imported_path, json.dumps(processing_results, indent=2))
             logger.info(f"Saved import processing metadata: {imported_path}")
         except Exception as e:
             logger.warning(f"Failed to save imported.json: {e}")
@@ -1110,8 +1188,7 @@ def _import_one_from_args(args: argparse.Namespace) -> dict[str, Any] | None:
                 ]
                 import_meta["imported_json_path"] = str(imported_path)
                 import_meta["segments"] = created_segments
-                with open(import_metadata_path, "w", encoding="utf-8") as f:
-                    json.dump(import_meta, f, indent=2)
+                atomic_replace(import_metadata_path, json.dumps(import_meta, indent=2))
                 logger.info(f"Updated import metadata: {import_metadata_path}")
             except Exception as e:
                 logger.warning(f"Failed to update import metadata: {e}")
@@ -1178,8 +1255,7 @@ def _import_one_from_args(args: argparse.Namespace) -> dict[str, Any] | None:
 
         # Write error state to imported.json for persistent failure tracking
         try:
-            with open(imported_path, "w", encoding="utf-8") as f:
-                json.dump(error_results, f, indent=2)
+            atomic_replace(imported_path, json.dumps(error_results, indent=2))
             logger.info(f"Saved error state: {imported_path}")
         except Exception as write_err:
             logger.warning(f"Failed to write error state: {write_err}")
@@ -1353,7 +1429,8 @@ def main() -> None:
             extra["source_path"] = Path(os.path.expanduser(args.path))
         if args.force:
             extra["force"] = True
-        _run_sync(args.sync, dry_run=not args.save, **extra)
+        extra["auto"] = args.auto
+        _run_sync(args.sync, dry_run=not args.save, verbose=args.verbose, **extra)
         return
 
     if not args.media:
