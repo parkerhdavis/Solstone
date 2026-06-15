@@ -20,6 +20,10 @@ import signal
 from pathlib import Path
 from typing import Any, Callable
 
+from solstone.think.cogitate_contract import (
+    COGITATE_READ_TOOL_NAMES,
+    COGITATE_RUNTIME_PREAMBLE,
+)
 from solstone.think.providers.shared import JSONEventCallback, safe_raw
 from solstone.think.utils import get_project_root, now_ms
 
@@ -30,12 +34,7 @@ _TIMEOUT_LOG_DIR: Path = Path("/tmp")
 
 _QUOTA_TOKENS = ("QUOTA_EXHAUSTED", "TerminalQuotaError")
 _RETRY_DELAY_RE = re.compile(r'"?retryDelayMs"?\s*[:=]\s*"?([0-9]+(?:\.[0-9]+)?)')
-_READ_BUDGET_TOOL_NAMES: tuple[str, ...] = (
-    "read_file",
-    "glob",
-    "list_directory",
-    "grep_search",
-)
+_READ_BUDGET_TOOL_NAMES: tuple[str, ...] = COGITATE_READ_TOOL_NAMES
 _READ_BUDGET_TOOLS: frozenset[str] = frozenset(_READ_BUDGET_TOOL_NAMES)
 
 
@@ -114,10 +113,11 @@ def assemble_prompt(
     system_instruction = config.get("system_instruction") or None
     if sol_tool_name:
         hint = cogitate_sol_tool_hint(sol_tool_name)
+        parts = [COGITATE_RUNTIME_PREAMBLE.rstrip("\n")]
         if system_instruction:
-            system_instruction = f"{system_instruction}\n\n{hint}"
-        else:
-            system_instruction = hint
+            parts.append(system_instruction)
+        parts.append(hint)
+        system_instruction = "\n\n".join(parts)
     if config.get("read_scope"):
         scope_hint = (
             "Limit filesystem reads to today's segment dir unless the task explicitly requires broader history. "

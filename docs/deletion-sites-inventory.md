@@ -49,7 +49,7 @@ Inventory of every non-test, non-scratch, non-atomic-tmp destructive removal (`s
 | file:line | target | trigger | path validation | audit log | dry-run | class | why |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `solstone/think/importers/shared.py:361` | existing `imports/<timestamp>/` directory | `_setup_import(..., force=True)` | fixed `journal/imports/<timestamp>` path and `import_dir.exists()` gate | yes (`solstone/think/importers/shared.py:351-357`) | yes | `✅` | fixed in this sweep: per-file manifest is hashed and logged before `rmtree` |
-| `solstone/think/importers/plaud.py:196` | temporary download file | Plaud download write failure | exact `NamedTemporaryFile` path created in the same function | no | no | `⚠️` | temp download cleanup, not a journal-domain delete |
+| `solstone/think/importers/plaud.py:212` | temporary download file | Plaud download write failure | exact `NamedTemporaryFile` path created in the same function | no | no | `⚠️` | temp download cleanup, not a journal-domain delete |
 
 ## think/facets
 
@@ -136,7 +136,7 @@ Out of scope for this sweep; keep visible because it is a destructive journal-do
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `solstone/think/callosum.py:59,91` | `health/callosum.sock` | callosum server start/stop | fixed socket path and `exists()` checks | no | no | `⚠️` | IPC socket cleanup is out of scope for journal-domain parity |
 | `solstone/think/supervisor.py:870` | `health/callosum.sock` | supervisor pre-start stale-socket cleanup | fixed `server.socket_path` plus `exists()` check | no | no | `⚠️` | IPC socket race prevention, out of scope |
-| `solstone/think/heartbeat.py:91,101,138` | heartbeat PID file | stale/corrupt PID cleanup and final teardown | fixed PID path with stale/corrupt guards | no (logger only) | no | `⚠️` | service lifecycle cleanup, not journal-domain deletion |
+| `solstone/think/heartbeat.py:89,99,125` | heartbeat PID file | stale/corrupt PID cleanup and final teardown | fixed PID path with stale/corrupt guards | no (logger only) | no | `⚠️` | service lifecycle cleanup, not journal-domain deletion |
 | `solstone/think/service.py:199,215` | installed service plist/unit file | service uninstall | fixed platform-specific install path and `exists()` check | no | no | `⚠️` | installed-service artifact cleanup, out of scope |
 | `solstone/think/install_guard.py:147,168` | owned `sol` alias symlink | install/uninstall guard | alias ownership is checked before unlink | no | no | `⚠️` | user-bin alias management, not journal-domain deletion |
 

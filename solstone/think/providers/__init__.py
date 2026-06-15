@@ -21,7 +21,6 @@ Available providers:
 """
 
 import logging
-import os
 import shutil
 from importlib import import_module
 from types import ModuleType
@@ -77,6 +76,21 @@ PROVIDER_METADATA: Dict[str, Dict[str, Any]] = {
 }
 
 
+def managed_provider_env_keys() -> set[str]:
+    """Return the set of managed provider API-key environment-variable names.
+
+    Derived from ``PROVIDER_METADATA``: every non-empty ``env_key`` across the
+    registered providers (currently GOOGLE_API_KEY, OPENAI_API_KEY,
+    ANTHROPIC_API_KEY; ``local`` has no key). These are exactly the keys for which
+    journal config's ``env`` section is the authoritative and exclusive source — a
+    managed key absent from journal config is stripped from ``os.environ`` at CLI
+    startup (see :func:`solstone.think.utils.setup_cli`) so a shell-set value is
+    never used. Vertex/ADC auth vars (``vertex_env_keys``) are deliberately excluded:
+    they are file/ADC credentials a user may legitimately set in the shell.
+    """
+    return {m["env_key"] for m in PROVIDER_METADATA.values() if m.get("env_key")}
+
+
 def get_provider_module(provider: str) -> ModuleType:
     """Get the provider module for the given provider name.
 
@@ -127,19 +141,6 @@ def get_provider_list() -> List[Dict[str, Any]]:
     return providers
 
 
-def _env_key_configured(env_key: str) -> bool:
-    if not env_key:
-        return False
-    if os.getenv(env_key):
-        return True
-    try:
-        from solstone.think.journal_config import read_journal_config
-
-        return bool(read_journal_config().get("env", {}).get(env_key))
-    except Exception:
-        return False
-
-
 def build_provider_status(
     providers_list: List[Dict[str, Any]] | None = None,
     vertex_creds_configured: bool = False,
@@ -164,6 +165,8 @@ def build_provider_status(
 
     status = {}
     for provider in providers_list:
+        from solstone.think.providers import state as provider_state
+
         name = provider["name"]
         env_key = provider.get("env_key", "")
         meta = PROVIDER_METADATA.get(name, {})
@@ -171,60 +174,10 @@ def build_provider_status(
         issues: list[str] = []
 
         if name == "local":
-            from solstone.think.models import is_local_provider_needed
-            from solstone.think.providers import local_install, local_server
-
-            readiness = local_install.inspect_readiness()
-            binary_installed = bool(readiness["binary_installed"])
-            model_installed = bool(readiness["model_installed"])
-            ram_sufficient = bool(readiness["ram_sufficient"])
-            selected = is_local_provider_needed()
-            configured = binary_installed and model_installed and ram_sufficient
-
-            if not selected:
-                status[name] = {
-                    "configured": configured,
-                    "selected": False,
-                    "generate_ready": False,
-                    "cogitate_ready": False,
-                    "cogitate_cli": "llama-server",
-                    "cogitate_cli_found": binary_installed,
-                    "issues": [],
-                }
-                continue
-
-            server_healthy = local_server.is_healthy()
-            if not binary_installed:
-                issues.append("binary_missing")
-            if not model_installed:
-                issues.append("model_missing")
-            if not ram_sufficient:
-                issues.append("ram_insufficient")
-            if configured and not server_healthy:
-                runnable, detail = local_install.probe_binary_runnable(
-                    readiness["binary_path"]
-                )
-                if runnable:
-                    issues.append("server_unhealthy")
-                else:
-                    issues.append(f"failed to launch: {detail}")
-                    issues.append(f"run `{local_install.install_hint()}`")
-            if "binary_missing" in issues or "model_missing" in issues:
-                issues.append(f"run `{local_install.install_hint()}`")
-
-            ready = configured and server_healthy
-            status[name] = {
-                "configured": configured,
-                "selected": True,
-                "generate_ready": ready,
-                "cogitate_ready": ready,
-                "cogitate_cli": "llama-server",
-                "cogitate_cli_found": binary_installed,
-                "issues": issues,
-            }
+            status[name] = provider_state.local_status_dict()
             continue
         elif name in {"google", "anthropic", "openai"}:
-            configured = _env_key_configured(env_key)
+            configured = provider_state.cloud_key_configured(env_key)
             status[name] = {
                 "provider": name,
                 "configured": configured,
@@ -234,7 +187,7 @@ def build_provider_status(
             }
             continue
         else:
-            configured = _env_key_configured(env_key)
+            configured = provider_state.cloud_key_configured(env_key)
             if not configured and env_key:
                 issues.append(f"{env_key} not set")
 
@@ -343,4 +296,5 @@ __all__ = [
     "get_provider_models",
     "list_installed_local_models",
     "validate_key",
+    "managed_provider_env_keys",
 ]

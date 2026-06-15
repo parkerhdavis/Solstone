@@ -9,7 +9,6 @@ import logging
 import os
 import platform
 import re
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -23,29 +22,35 @@ from solstone.apps.chat.config import (
     save_chat_config,
 )
 from solstone.apps.settings import copy as settings_copy
-from solstone.apps.settings import install_copy, local_bootstrap
+from solstone.apps.settings import install_copy, local_bootstrap, transcribe_resource
 from solstone.apps.settings.copy import (
     CONVEY_REFUSE_NO_PASSWORD_NETWORK,
     CONVEY_REFUSE_NO_PASSWORD_TRUST,
+)
+from solstone.apps.settings.vertex_credentials import (
+    delete_vertex_credentials,
+    save_vertex_credentials,
 )
 from solstone.apps.utils import log_app_action
 from solstone.convey import chat_stream, state
 from solstone.convey import copy as convey_copy
 from solstone.convey.network_access import (
     NetworkAccessPasswordRequired,
-    NetworkAccessPasswordTooShort,
     set_network_access,
 )
+from solstone.convey.readiness_snapshot import build_readiness_snapshot
 from solstone.convey.reasons import (
     ACTIVITY_INVALID,
     ACTIVITY_NOT_FOUND,
     ACTIVITY_PROTECTED,
     FACET_ALREADY_EXISTS,
     FACET_NOT_FOUND,
+    FILE_NOT_FOUND,
     FILE_READ_FAILED,
     INVALID_CONFIG_VALUE,
     INVALID_JSON_REQUEST,
     INVALID_REQUEST_VALUE,
+    LOCAL_REQUEST_REQUIRED,
     MISSING_REQUEST_BODY,
     MISSING_REQUIRED_FIELD,
     NETWORK_SECURITY_REQUIRES_PASSWORD,
@@ -63,10 +68,11 @@ from solstone.convey.sol_initiated.settings import (
 from solstone.convey.sol_initiated.settings import (
     save_settings as save_sol_voice_settings,
 )
-from solstone.convey.utils import error_response
+from solstone.convey.utils import error_response, respond_collection
+from solstone.think import facets
+from solstone.think.journal_config import write_journal_config
 from solstone.think.models import LOCAL_MODEL
 from solstone.think.providers.google import validate_vertex_credentials
-from solstone.think.providers.local import LOCAL_MODEL_SPECS
 from solstone.think.retention import (
     _human_bytes,
     check_storage_health,
@@ -74,9 +80,14 @@ from solstone.think.retention import (
     load_retention_config,
     purge,
 )
+from solstone.think.schedule_config import read_schedules, set_schedule_entries
 from solstone.think.streams import list_streams
+from solstone.think.utils import (
+    CorruptConfigError,
+    get_journal,
+    now_ms,
+)
 from solstone.think.utils import get_config as get_journal_config
-from solstone.think.utils import get_journal, get_project_root, now_ms
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +117,15 @@ def _fresh_hardware() -> dict[str, Any] | None:
 
 GENERIC_SETTINGS_ERROR = (
     "something went wrong — try again, and if it persists, check the health dashboard"
+)
+FORWARDED_AUTHORITY_HEADERS = (
+    "Forwarded",
+    "X-Forwarded-For",
+    "X-Real-IP",
+    "X-Forwarded-Host",
+    "CF-Connecting-IP",
+    "True-Client-IP",
+    "Fly-Client-IP",
 )
 
 
@@ -156,6 +176,12 @@ def _compute_runtime_label() -> str:
 def _convey_password_is_set(config: dict[str, Any]) -> bool:
     password_hash = config.get("convey", {}).get("password_hash", "")
     return bool(str(password_hash or "").strip())
+
+
+def _request_has_local_authority() -> bool:
+    if request.remote_addr not in {"127.0.0.1", "::1"}:
+        return False
+    return not any(header in request.headers for header in FORWARDED_AUTHORITY_HEADERS)
 
 
 def _project_public_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -225,19 +251,20 @@ def get_config() -> Any:
     """
     try:
         return jsonify(_project_public_config(get_journal_config()))
+    except CorruptConfigError:
+        raise
     except Exception:
         logger.exception("error loading config")
         return _settings_operation_failed()
 
 
-@settings_bp.route("/api/config", methods=["PUT"])
+@settings_bp.route("/api/config", methods=["PUT", "POST"])
 def update_config() -> Any:
     """Update the journal configuration.
 
     Accepts JSON with a 'section' key and per-section config fields to update.
     Supported writes include identity and transcribe settings, convey security
-    settings (password, allow_network_access, trust_localhost), and API-key env
-    vars.
+    settings (password, trust_localhost), and API-key env vars.
     """
     try:
         request_data = request.get_json()
@@ -274,9 +301,9 @@ def update_config() -> Any:
                 "timezone",
             ],
             "transcribe": ["backend", "enrich", "preserve_all", "noise_upgrade"],
-            "convey": ["allow_network_access", "password", "trust_localhost"],
+            "convey": ["password", "trust_localhost"],
             "support": ["enabled", "proactive", "anonymous_feedback", "portal_url"],
-            "agent": ["name", "name_status", "named_date", "proposal_count"],
+            "agent": ["name", "name_status", "named_date"],
             "env": API_KEY_ENV_VARS,
         }
 
@@ -295,10 +322,6 @@ def update_config() -> Any:
                 detail=f"Unknown section: {section}",
             )
 
-        config_dir = Path(state.journal_root) / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        config_path = config_dir / "journal.json"
-
         # Load existing config
         old_config = get_journal_config()
         config = get_journal_config()
@@ -312,22 +335,10 @@ def update_config() -> Any:
         old_section = old_config.get(section, {})
 
         if section == "convey" and "allow_network_access" in data:
-            try:
-                result = set_network_access(
-                    enable=bool(data["allow_network_access"]),
-                    password=data.get("password"),
-                )
-            except NetworkAccessPasswordRequired:
-                return error_response(
-                    NETWORK_SECURITY_REQUIRES_PASSWORD,
-                    detail=CONVEY_REFUSE_NO_PASSWORD_NETWORK,
-                )
-            except NetworkAccessPasswordTooShort:
-                return error_response(
-                    INVALID_CONFIG_VALUE,
-                    detail="Password must be at least 8 characters",
-                )
-            return jsonify(result)
+            return error_response(
+                INVALID_CONFIG_VALUE,
+                detail=settings_copy.CONVEY_NETWORK_ACCESS_CONFIG_REJECTED,
+            )
 
         if section == "convey" and "password" in data:
             raw_password = data.pop("password") or ""
@@ -442,11 +453,7 @@ def update_config() -> Any:
                     else:
                         config["providers"]["key_validation"].pop(val_key, None)
 
-        # Write back to file
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
-            f.write("\n")
-        os.chmod(config_path, 0o600)
+        write_journal_config(config)
 
         # Log if something changed (don't log sensitive values)
         if changed_fields:
@@ -465,15 +472,6 @@ def update_config() -> Any:
                 params={"changed_fields": log_fields},
             )
 
-        if section in ("agent", "identity") and changed_fields:
-            project_root = Path(get_project_root())
-            subprocess.run(
-                ["make", "skills"],
-                cwd=project_root,
-                check=False,
-                capture_output=True,
-            )
-
         key_validation = config.get("providers", {}).get("key_validation", {})
         return jsonify(
             {
@@ -482,8 +480,154 @@ def update_config() -> Any:
                 "success": True,
             }
         )
+    except CorruptConfigError:
+        raise
     except Exception:
         logger.exception("error updating config")
+        return _settings_operation_failed()
+
+
+def _network_access_enabled(config: dict[str, Any]) -> bool:
+    return bool(config.get("convey", {}).get("allow_network_access", False))
+
+
+def _trust_localhost_enabled(config: dict[str, Any]) -> bool:
+    return bool(config.get("convey", {}).get("trust_localhost", True))
+
+
+def _host_url_status_value(config: dict[str, Any]) -> str:
+    from solstone.think.pairing.config import get_host_url
+
+    pairing_host_url = config.get("pairing", {}).get("host_url")
+    if isinstance(pairing_host_url, str) and pairing_host_url.strip():
+        return f"{get_host_url()} (manual override)"
+    if _network_access_enabled(config):
+        return f"{get_host_url()} (auto-detected)"
+    return f"{get_host_url()} (localhost — network access off)"
+
+
+@settings_bp.route("/api/convey/host-url", methods=["GET", "POST"])
+def convey_host_url() -> Any:
+    """Read or update the host URL advertised to remote devices."""
+
+    from solstone.think.pairing.config import (
+        InvalidHostUrl,
+        clear_host_url,
+        get_host_url,
+        set_host_url,
+        validate_host_url,
+    )
+
+    try:
+        if request.method == "GET":
+            return jsonify({"host_url": get_host_url()})
+
+        request_data = request.get_json()
+        if not isinstance(request_data, dict):
+            return error_response(
+                INVALID_REQUEST_VALUE,
+                detail="Expected JSON object with url or auto",
+            )
+
+        has_url = "url" in request_data and request_data.get("url") is not None
+        auto = bool(request_data.get("auto", False))
+        if sum((has_url, auto)) != 1:
+            return error_response(
+                INVALID_REQUEST_VALUE,
+                detail="Provide exactly one of url or auto",
+            )
+
+        if auto:
+            clear_host_url()
+            return jsonify({"host_url": get_host_url(), "cleared": True})
+
+        raw_url = request_data.get("url")
+        if not isinstance(raw_url, str):
+            return error_response(INVALID_REQUEST_VALUE, detail="url must be a string")
+        try:
+            canonical = validate_host_url(raw_url)
+        except InvalidHostUrl as exc:
+            return error_response(INVALID_CONFIG_VALUE, detail=str(exc))
+        set_host_url(canonical)
+        return jsonify({"host_url": canonical})
+    except Exception:
+        logger.exception("error updating convey host url")
+        return _settings_operation_failed()
+
+
+@settings_bp.route("/api/convey/network-access", methods=["POST"])
+def convey_network_access() -> Any:
+    """Update Convey network access from a local Settings session."""
+
+    request_data = request.get_json(silent=True)
+    if not isinstance(request_data, dict):
+        return error_response(MISSING_REQUEST_BODY, detail="No data provided")
+    if "enable" not in request_data:
+        return error_response(MISSING_REQUIRED_FIELD, detail="enable")
+    enable = request_data.get("enable")
+    if not isinstance(enable, bool):
+        return error_response(INVALID_REQUEST_VALUE, detail="enable must be a boolean")
+    if not _request_has_local_authority():
+        return error_response(LOCAL_REQUEST_REQUIRED)
+
+    try:
+        result = set_network_access(enable=enable, password=None)
+        return jsonify(result)
+    except NetworkAccessPasswordRequired:
+        return error_response(
+            NETWORK_SECURITY_REQUIRES_PASSWORD,
+            detail=CONVEY_REFUSE_NO_PASSWORD_NETWORK,
+        )
+    except Exception:
+        logger.exception("error updating convey network access")
+        return _settings_operation_failed()
+
+
+@settings_bp.route("/api/convey/network-access/capability")
+def convey_network_access_capability() -> Any:
+    """Return whether this request can change Convey network access."""
+
+    try:
+        writable = _request_has_local_authority()
+        config = get_journal_config()
+        return jsonify(
+            {
+                "can_change_network_access": writable,
+                "reason": None
+                if writable
+                else settings_copy.CONVEY_NETWORK_LOCAL_ONLY_REASON,
+                "network_access_enabled": _network_access_enabled(config),
+            }
+        )
+    except Exception:
+        logger.exception("error loading convey network access capability")
+        return _settings_operation_failed()
+
+
+@settings_bp.route("/api/convey/status")
+def convey_status() -> Any:
+    """Return formatted Convey network and host URL status."""
+
+    try:
+        from solstone.convey.cli import _resolve_bind_host
+        from solstone.think.service import DEFAULT_SERVICE_PORT
+        from solstone.think.utils import read_service_port
+
+        config = get_journal_config()
+        bind_host = _resolve_bind_host()
+        port = read_service_port("convey") or DEFAULT_SERVICE_PORT
+        status_text = convey_copy.format_convey_status(
+            bind=f"{bind_host}:{port}",
+            host_url=_host_url_status_value(config),
+            network_access="on"
+            if _network_access_enabled(config)
+            else "localhost only",
+            password="set" if _convey_password_is_set(config) else "not set",
+            trust_localhost="yes" if _trust_localhost_enabled(config) else "no",
+        )
+        return jsonify({"status_text": status_text})
+    except Exception:
+        logger.exception("error loading convey status")
         return _settings_operation_failed()
 
 
@@ -500,6 +644,7 @@ def get_transcribe() -> Any:
         - backends: List of available backends with metadata
         - api_keys: Boolean status for each backend's API key
         - config: Current transcribe config from journal
+        - resource: Memory/platform display payload for the unset default
     """
     try:
         from solstone.observe.transcribe import get_backend_list
@@ -570,6 +715,16 @@ def get_transcribe() -> Any:
                 api_keys[backend["name"]] = bool(os.getenv(env_key))
             else:
                 api_keys[backend["name"]] = True  # Local backends always available
+        google_key_present = bool(api_keys.get("gemini"))
+        configured_backend = transcribe_config.get("backend")
+        try:
+            resource = transcribe_resource.get_transcribe_resource_payload(
+                google_key_present=google_key_present,
+                configured_backend=configured_backend,
+            )
+        except Exception:
+            logger.exception("error loading transcribe resource payload")
+            resource = transcribe_resource.fallback_transcribe_resource_payload()
 
         return jsonify(
             {
@@ -578,6 +733,7 @@ def get_transcribe() -> Any:
                 "config": transcribe_config,
                 "runtime_label": runtime_label,
                 "hardware": hardware_payload,
+                "resource": resource,
             }
         )
     except Exception:
@@ -686,11 +842,11 @@ def get_sol_voice_throttled() -> Any:
 
     log_path = Path(get_journal()) / "push" / "nudge_log.jsonl"
     if not log_path.exists():
-        return jsonify([])
+        return respond_collection([])
 
     try:
         rows = _read_sol_voice_throttled_rows(log_path, limit)
-        return jsonify(rows)
+        return respond_collection(rows)
     except Exception:
         logger.exception("error loading sol voice throttled log")
         return error_response(FILE_READ_FAILED, detail="unable to load throttled log")
@@ -744,9 +900,6 @@ def _sol_voice_response(settings: SolVoiceSettings) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 VALID_TIERS = {1, 2, 3}
-LOCAL_MODEL_LABELS = {
-    LOCAL_MODEL: "qwen3.6 35B-A3B VLM — 48 GB",
-}
 
 
 def _local_model_error(model: str) -> Any:
@@ -754,15 +907,16 @@ def _local_model_error(model: str) -> Any:
         INVALID_REQUEST_VALUE,
         detail=(
             f"Unknown local model: {model}. "
-            f"Must be one of: {', '.join(LOCAL_MODEL_SPECS.keys())}"
+            f"Must be one of: {', '.join(local_bootstrap.local_model_ids())}"
         ),
     )
 
 
 def _local_model_from_request() -> tuple[str | None, Any | None]:
-    model = request.args.get("model") or LOCAL_MODEL
-    if model not in LOCAL_MODEL_SPECS:
-        return None, _local_model_error(model)
+    raw = request.args.get("model")
+    model = local_bootstrap.accepted_request_model(raw)
+    if model is None:
+        return None, _local_model_error(raw or LOCAL_MODEL)
     return model, None
 
 
@@ -814,17 +968,7 @@ def get_local_bootstrap_status() -> Any:
 @settings_bp.route("/api/local/models")
 def get_local_models() -> Any:
     try:
-        return jsonify(
-            [
-                {
-                    "name": name,
-                    "label": LOCAL_MODEL_LABELS[name],
-                    "min_ram_gb": spec.min_ram_bytes // 1024**3,
-                    "size_bytes": spec.size_bytes,
-                }
-                for name, spec in LOCAL_MODEL_SPECS.items()
-            ]
-        )
+        return jsonify(local_bootstrap.list_local_models())
     except Exception:
         logger.exception("error loading local provider models")
         return _settings_operation_failed()
@@ -922,15 +1066,21 @@ def get_providers() -> Any:
                 pass
 
         provider_status = build_provider_status(providers_list, vertex_creds_configured)
-        local_model_id = request.args.get("local_model") or LOCAL_MODEL
-        if local_model_id not in LOCAL_MODEL_SPECS:
-            return _local_model_error(local_model_id)
+        raw_local_model = request.args.get("local_model")
+        local_model_id = local_bootstrap.accepted_request_model(raw_local_model)
+        if local_model_id is None:
+            return _local_model_error(raw_local_model or LOCAL_MODEL)
         local_status = local_bootstrap.get_state(local_model_id)
+        ai_readiness = build_readiness_snapshot(
+            local_model_id=local_model_id,
+            include_local=not local_bootstrap._is_mlx_backend(),
+        )
 
         return jsonify(
             {
                 "providers": providers_list,
                 "provider_status": provider_status,
+                "ai_readiness": ai_readiness,
                 "generate": type_settings["generate"],
                 "cogitate": type_settings["cogitate"],
                 "contexts": contexts,
@@ -938,6 +1088,9 @@ def get_providers() -> Any:
                 "api_keys": api_keys,
                 "key_validation": key_validation,
                 "local": local_status,
+                "local_backend": "mlx"
+                if local_bootstrap._is_mlx_backend()
+                else "local",
                 "google_backend": providers_config.get("google_backend", "auto"),
                 "vertex_credentials_configured": vertex_creds_configured,
                 "vertex_credentials_email": vertex_creds_email,
@@ -1174,75 +1327,79 @@ def get_local_provider_status() -> Any:
         return _settings_operation_failed()
 
 
-@settings_bp.route("/api/validate-keys", methods=["POST"])
+def _compute_key_validation(config: dict[str, Any]) -> dict[str, Any]:
+    """Validate configured provider and service keys without mutating config."""
+
+    from solstone.think.providers import PROVIDER_METADATA
+    from solstone.think.providers import validate_key as _validate_key
+
+    env_config = config.get("env", {})
+
+    # Build reverse map: env_key -> provider name
+    env_to_provider = {
+        meta["env_key"]: name
+        for name, meta in PROVIDER_METADATA.items()
+        if "env_key" in meta
+    }
+
+    key_validation = {}
+
+    for env_var, provider in env_to_provider.items():
+        api_key = env_config.get(env_var, "")
+        if api_key:
+            result = _validate_key(provider, api_key)
+            result["timestamp"] = datetime.now(timezone.utc).isoformat()
+            key_validation[provider] = result
+
+    # Validate service tokens (Rev.ai, Plaud)
+    service_token_validators = {
+        "REVAI_ACCESS_TOKEN": ("revai", "solstone.observe.transcribe.revai"),
+        "PLAUD_ACCESS_TOKEN": ("plaud", "solstone.think.importers.plaud"),
+    }
+    for env_var, (val_key, module_path) in service_token_validators.items():
+        api_key = env_config.get(env_var, "")
+        if api_key:
+            import importlib
+
+            mod = importlib.import_module(module_path)
+            result = mod.validate_token(api_key)
+            result["timestamp"] = datetime.now(timezone.utc).isoformat()
+            key_validation[val_key] = result
+
+    # Validate vertex credentials if configured
+    providers_config = config.get("providers", {})
+    if providers_config.get("google_backend") == "vertex" and providers_config.get(
+        "vertex_credentials"
+    ):
+        from solstone.think.providers.google import validate_vertex_credentials
+
+        result = validate_vertex_credentials(
+            providers_config["vertex_credentials"],
+        )
+        result["timestamp"] = datetime.now(timezone.utc).isoformat()
+        key_validation["google"] = result
+
+    return key_validation
+
+
+@settings_bp.route("/api/validate-keys", methods=["GET", "POST"])
 def validate_all_keys() -> Any:
     """Re-validate all configured provider API keys.
 
     Reads keys from journal.json config (not environment), validates each
-    against the provider API, and stores results in providers.key_validation.
+    against the provider API, and stores results on POST only.
     """
     try:
-        from solstone.think.providers import PROVIDER_METADATA
-        from solstone.think.providers import validate_key as _validate_key
-
         config = get_journal_config()
-        env_config = config.get("env", {})
+        key_validation = _compute_key_validation(config)
 
-        # Build reverse map: env_key -> provider name
-        env_to_provider = {
-            meta["env_key"]: name
-            for name, meta in PROVIDER_METADATA.items()
-            if "env_key" in meta
-        }
+        if request.method == "GET":
+            return jsonify({"key_validation": key_validation})
 
         if "providers" not in config:
             config["providers"] = {}
-        key_validation = {}
-
-        for env_var, provider in env_to_provider.items():
-            api_key = env_config.get(env_var, "")
-            if api_key:
-                result = _validate_key(provider, api_key)
-                result["timestamp"] = datetime.now(timezone.utc).isoformat()
-                key_validation[provider] = result
-
-        # Validate service tokens (Rev.ai, Plaud)
-        SERVICE_TOKEN_VALIDATORS = {
-            "REVAI_ACCESS_TOKEN": ("revai", "solstone.observe.transcribe.revai"),
-            "PLAUD_ACCESS_TOKEN": ("plaud", "solstone.think.importers.plaud"),
-        }
-        for env_var, (val_key, module_path) in SERVICE_TOKEN_VALIDATORS.items():
-            api_key = env_config.get(env_var, "")
-            if api_key:
-                import importlib
-
-                mod = importlib.import_module(module_path)
-                result = mod.validate_token(api_key)
-                result["timestamp"] = datetime.now(timezone.utc).isoformat()
-                key_validation[val_key] = result
-
-        # Validate vertex credentials if configured
-        providers_config = config.get("providers", {})
-        if providers_config.get("google_backend") == "vertex" and providers_config.get(
-            "vertex_credentials"
-        ):
-            from solstone.think.providers.google import validate_vertex_credentials
-
-            result = validate_vertex_credentials(
-                providers_config["vertex_credentials"],
-            )
-            result["timestamp"] = datetime.now(timezone.utc).isoformat()
-            key_validation["google"] = result
-
         config["providers"]["key_validation"] = key_validation
-
-        config_dir = Path(state.journal_root) / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        config_path = config_dir / "journal.json"
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
-            f.write("\n")
-        os.chmod(config_path, 0o600)
+        write_journal_config(config)
 
         return jsonify({"success": True, "key_validation": key_validation})
     except Exception:
@@ -1250,7 +1407,7 @@ def validate_all_keys() -> Any:
         return _settings_operation_failed()
 
 
-@settings_bp.route("/api/providers", methods=["PUT"])
+@settings_bp.route("/api/providers", methods=["PUT", "POST"])
 def update_providers() -> Any:
     """Update providers configuration.
 
@@ -1269,10 +1426,6 @@ def update_providers() -> Any:
         request_data = request.get_json()
         if not request_data:
             return error_response(MISSING_REQUEST_BODY, detail="No data provided")
-
-        config_dir = Path(state.journal_root) / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        config_path = config_dir / "journal.json"
 
         # Load existing config
         config = get_journal_config()
@@ -1458,13 +1611,10 @@ def update_providers() -> Any:
                     )
 
                 # Save credentials file
-                creds_dir = Path(state.journal_root) / ".config"
-                creds_dir.mkdir(parents=True, exist_ok=True)
-                creds_file = creds_dir / "vertex-credentials.json"
-                with open(creds_file, "w", encoding="utf-8") as f:
-                    json.dump(creds_data, f, indent=2, ensure_ascii=False)
-                    f.write("\n")
-                os.chmod(creds_file, 0o600)
+                creds_file = save_vertex_credentials(
+                    creds_data,
+                    Path(state.journal_root),
+                )
 
                 # Store path in config
                 old_val = old_providers.get("vertex_credentials", "")
@@ -1501,24 +1651,13 @@ def update_providers() -> Any:
                         "new": None,
                     }
                     # Only delete the file we created, not arbitrary paths
-                    canonical = (
-                        Path(state.journal_root) / ".config" / "vertex-credentials.json"
-                    )
-                    if Path(old_path).resolve() == canonical.resolve():
-                        try:
-                            canonical.unlink(missing_ok=True)
-                        except OSError:
-                            pass
+                    delete_vertex_credentials(old_path, Path(state.journal_root))
                     config["providers"].pop("vertex_credentials", None)
                     # Clear validation
                     kv = config["providers"].get("key_validation", {})
                     kv.pop("google_vertex", None)
 
-        # Write back to file
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
-            f.write("\n")
-        os.chmod(config_path, 0o600)
+        write_journal_config(config)
 
         # Log if something changed
         if changed_fields:
@@ -1534,6 +1673,65 @@ def update_providers() -> Any:
 
     except Exception:
         logger.exception("error saving providers")
+        return _settings_operation_failed()
+
+
+@settings_bp.route("/api/vertex-credentials/import", methods=["POST"])
+def import_vertex_credentials() -> Any:
+    """Import Vertex service-account credentials from a server-side path."""
+
+    try:
+        request_data = request.get_json()
+        if not isinstance(request_data, dict):
+            return error_response(MISSING_REQUEST_BODY, detail="No data provided")
+
+        raw_path = request_data.get("path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            return error_response(MISSING_REQUIRED_FIELD, detail="path")
+
+        source = Path(raw_path)
+        if not source.exists():
+            return error_response(FILE_NOT_FOUND, detail=raw_path)
+
+        try:
+            creds_data = json.loads(source.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return error_response(INVALID_JSON_REQUEST, detail=raw_path)
+        except OSError:
+            return error_response(FILE_READ_FAILED, detail=raw_path)
+
+        required_fields = ("type", "project_id", "client_email", "private_key")
+        missing = [field for field in required_fields if field not in creds_data]
+        if missing:
+            return error_response(
+                MISSING_REQUIRED_FIELD,
+                detail=", ".join(missing),
+            )
+
+        creds_file = save_vertex_credentials(creds_data, Path(get_journal()))
+        config = get_journal_config()
+        config.setdefault("providers", {})
+        config["providers"]["vertex_credentials"] = str(creds_file)
+
+        validation = None
+        if not bool(request_data.get("skip_validation", False)):
+            validation = validate_vertex_credentials(str(creds_file))
+            validation["timestamp"] = datetime.now(timezone.utc).isoformat()
+            config["providers"].setdefault("key_validation", {})
+            config["providers"]["key_validation"]["google_vertex"] = validation
+
+        write_journal_config(config)
+
+        return jsonify(
+            {
+                "configured": True,
+                "email": creds_data.get("client_email", ""),
+                "path": str(creds_file),
+                "validation": validation,
+            }
+        )
+    except Exception:
+        logger.exception("error importing vertex credentials")
         return _settings_operation_failed()
 
 
@@ -1609,10 +1807,6 @@ def update_generators() -> Any:
         if not request_data:
             return error_response(MISSING_REQUEST_BODY, detail="No data provided")
 
-        config_dir = Path(state.journal_root) / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        config_path = config_dir / "journal.json"
-
         # Load existing config
         config = get_journal_config()
         old_providers = copy.deepcopy(config.get("providers", {}))
@@ -1663,11 +1857,7 @@ def update_generators() -> Any:
                     }
                 config["providers"]["contexts"][context_key] = ctx_config
 
-        # Write back to file
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
-            f.write("\n")
-        os.chmod(config_path, 0o600)
+        write_journal_config(config)
 
         # Log if something changed
         if changed_fields:
@@ -1752,10 +1942,6 @@ def update_vision() -> Any:
         request_data = request.get_json()
         if not request_data:
             return error_response(MISSING_REQUEST_BODY, detail="No data provided")
-
-        config_dir = Path(state.journal_root) / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        config_path = config_dir / "journal.json"
 
         # Load existing config
         config = get_journal_config()
@@ -1865,11 +2051,7 @@ def update_vision() -> Any:
                         }
                     config["describe"]["categories"][name] = cat_config
 
-        # Write back to file
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
-            f.write("\n")
-        os.chmod(config_path, 0o600)
+        write_journal_config(config)
 
         # Log if something changed
         if changed_fields:
@@ -1936,7 +2118,7 @@ def get_observe() -> Any:
         return _settings_operation_failed()
 
 
-@settings_bp.route("/api/observe", methods=["PUT"])
+@settings_bp.route("/api/observe", methods=["PUT", "POST"])
 def update_observe() -> Any:
     """Update observe configuration.
 
@@ -1949,10 +2131,6 @@ def update_observe() -> Any:
         request_data = request.get_json()
         if not request_data:
             return error_response(MISSING_REQUEST_BODY, detail="No data provided")
-
-        config_dir = Path(state.journal_root) / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        config_path = config_dir / "journal.json"
 
         # Load existing config
         config = get_journal_config()
@@ -2016,10 +2194,7 @@ def update_observe() -> Any:
 
         # Save config if changed
         if changed_fields:
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(config, f, indent=2, ensure_ascii=False)
-                f.write("\n")
-            os.chmod(config_path, 0o600)
+            write_journal_config(config)
 
             log_app_action(
                 app="settings",
@@ -2100,25 +2275,21 @@ def create_facet() -> Any:
         slug = re.sub(r"[^a-z0-9]+", "-", title.lower())
         slug = slug.strip("-")  # Remove leading/trailing hyphens
 
-        if not slug:
+        if not slug or not re.fullmatch(r"[a-z][a-z0-9_-]*", slug):
             return error_response(
                 INVALID_REQUEST_VALUE,
-                detail="Title must contain at least one letter or number",
+                detail="Title must start with a letter.",
             )
 
         # Check for conflicts with existing facets
-        from solstone.think.facets import get_facets
-
-        existing = get_facets()
+        existing = facets.get_facets()
         if slug in existing:
             return error_response(
                 FACET_ALREADY_EXISTS,
                 detail=f"Facet '{slug}' already exists",
             )
 
-        # Create facet directory and config
-        facet_path = Path(state.journal_root) / "facets" / slug
-        facet_path.mkdir(parents=True, exist_ok=True)
+        facets.create_facet(title, emoji=emoji, color=color)
 
         config = {
             "title": title,
@@ -2127,21 +2298,10 @@ def create_facet() -> Any:
             "emoji": emoji,
         }
 
-        config_file = facet_path / "facet.json"
-        with open(config_file, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
-            f.write("\n")
-
-        # Log the creation
-        log_app_action(
-            app="settings",
-            facet=slug,
-            action="facet_create",
-            params={"title": title, "emoji": emoji, "color": color},
-        )
-
         return jsonify({"success": True, "facet": slug, "config": config}), 201
 
+    except ValueError as e:
+        return error_response(INVALID_REQUEST_VALUE, detail=str(e))
     except Exception:
         logger.exception("error creating facet")
         return _settings_operation_failed()
@@ -2171,46 +2331,27 @@ def update_facet_config(facet_name: str) -> Any:
         if not data:
             return error_response(MISSING_REQUEST_BODY, detail="No data provided")
 
-        # Build path to facet config file
-        facet_path = Path(state.journal_root) / "facets" / facet_name
-        config_file = facet_path / "facet.json"
-
-        if not facet_path.exists():
+        if facet_name not in facets.get_facets():
             return error_response(FACET_NOT_FOUND, detail="Facet not found")
 
-        # Read existing config or create new one
-        if config_file.exists():
-            with open(config_file, "r", encoding="utf-8") as f:
-                config = json.load(f)
-        else:
-            config = {}
+        update_fields = {
+            key: data[key]
+            for key in ("title", "description", "color", "emoji")
+            if key in data
+        }
+        if update_fields:
+            facets.update_facet(facet_name, **update_fields)
+        if "muted" in data:
+            facets.set_facet_muted(facet_name, bool(data["muted"]))
 
-        # Track changes for logging
-        changed_fields = {}
-        allowed_fields = ["title", "description", "color", "emoji", "muted"]
-        for field in allowed_fields:
-            if field in data:
-                old_value = config.get(field)
-                new_value = data[field]
-                if old_value != new_value:
-                    changed_fields[field] = {"old": old_value, "new": new_value}
-                config[field] = new_value
-
-        # Write back to file
-        with open(config_file, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
-            f.write("\n")
-
-        # Log only if something actually changed
-        if changed_fields:
-            log_app_action(
-                app="settings",
-                facet=facet_name,
-                action="facet_update",
-                params={"changed_fields": changed_fields},
-            )
-
+        config = {
+            key: value
+            for key, value in facets.get_facets()[facet_name].items()
+            if key != "path"
+        }
         return jsonify({"success": True, "facet": facet_name, "config": config})
+    except FileNotFoundError:
+        return error_response(FACET_NOT_FOUND, detail="Facet not found")
     except Exception:
         logger.exception("error saving facet config")
         return _settings_operation_failed()
@@ -2614,17 +2755,9 @@ def update_sync() -> Any:
         if not request_data:
             return error_response(MISSING_REQUEST_BODY, detail="No data provided")
 
-        config_dir = Path(state.journal_root) / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        schedules_path = config_dir / "schedules.json"
-
-        # Load existing schedules
-        schedules = {}
-        if schedules_path.exists():
-            with open(schedules_path, "r", encoding="utf-8") as f:
-                schedules = json.load(f)
-
+        schedules = read_schedules()
         changed_fields = {}
+        changed_entries: dict[str, dict[str, Any]] = {}
 
         # Handle plaud sync toggle
         if "plaud" in request_data:
@@ -2655,6 +2788,7 @@ def update_sync() -> Any:
                         }
                     schedules["sync:plaud"]["enabled"] = enabled
                     changed_fields["plaud.enabled"] = enabled
+                    changed_entries["sync:plaud"] = schedules["sync:plaud"]
 
         # Handle granola sync toggle
         if "granola" in request_data:
@@ -2690,6 +2824,7 @@ def update_sync() -> Any:
                         }
                     schedules["sync:granola"]["enabled"] = enabled
                     changed_fields["granola.enabled"] = enabled
+                    changed_entries["sync:granola"] = schedules["sync:granola"]
 
         # Handle obsidian sync toggle
         if "obsidian" in request_data:
@@ -2725,11 +2860,10 @@ def update_sync() -> Any:
                         }
                     schedules["sync:obsidian"]["enabled"] = enabled
                     changed_fields["obsidian.enabled"] = enabled
+                    changed_entries["sync:obsidian"] = schedules["sync:obsidian"]
 
         if changed_fields:
-            with open(schedules_path, "w", encoding="utf-8") as f:
-                json.dump(schedules, f, indent=2, ensure_ascii=False)
-                f.write("\n")
+            set_schedule_entries(changed_entries)
 
             log_app_action(
                 app="settings",
@@ -2861,14 +2995,7 @@ def update_storage() -> Any:
                 }
             retention["per_stream"] = new_per_stream
 
-        config_dir = Path(state.journal_root) / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        config_path = config_dir / "journal.json"
-
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
-            f.write("\n")
-        os.chmod(config_path, 0o600)
+        write_journal_config(config)
 
         if changed:
             log_app_action(
@@ -2949,6 +3076,8 @@ def run_purge() -> Any:
             )
 
         return jsonify(response)
+    except CorruptConfigError:
+        raise
     except Exception:
         logger.exception("error running purge")
         return _settings_operation_failed()

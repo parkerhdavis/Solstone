@@ -3,13 +3,59 @@
 
 """Tests for health app routes."""
 
+import json
 import os
+import re
+import time
 from datetime import date
 
+from solstone.apps.health import routes as health_routes
 from solstone.convey.reasons import REPROCESS_ALREADY_COMPLETE
+from solstone.think.talent_runs import AgentFailure, AgentFailureScan
 
 DAY = "20250115"
 SEGMENT = "120000_300"
+
+
+def test_errors_today_label_pluralizes_count():
+    assert health_routes._errors_today_label(1) == "error today"
+    assert health_routes._errors_today_label(0) == "errors today"
+    assert health_routes._errors_today_label(2) == "errors today"
+    assert health_routes._errors_today_label(None) == "errors today"
+
+
+def _readiness_snapshot(severity: str = "neutral") -> dict:
+    return {
+        "summary": {
+            "status": "unknown" if severity == "neutral" else "blocked",
+            "severity": severity,
+            "active_groups": 1 if severity in {"blocker", "attention"} else 0,
+            "blocked_count": 1 if severity == "blocker" else 0,
+        },
+        "interfaces": {},
+        "groups": [
+            {
+                "semantic_key": "provider_key_missing:anthropic:",
+                "work_key": None,
+                "status": "blocked",
+                "severity": severity,
+                "reason_code": "provider_key_missing",
+                "provider": "anthropic",
+                "model": None,
+                "context": None,
+                "interface": "generate",
+                "summary": "Anthropic needs credentials before it can read your screen descriptions",
+                "detail": "Open provider setup.",
+                "recovery_action": {
+                    "label": "Open Settings",
+                    "href": "/app/settings/#providers",
+                },
+                "operator_detail": "reason_code=provider_key_missing provider=anthropic",
+            }
+        ]
+        if severity in {"blocker", "attention"}
+        else [],
+    }
 
 
 def _seed_reprocess_segment(journal, day=DAY):
@@ -80,7 +126,43 @@ class TestLogRoute:
 
 
 class TestInfoRoute:
-    def test_returns_hostname(self, health_env):
+    def test_build_agent_error_seed_shape(self):
+        from solstone.apps.health.routes import _build_agent_error_seed
+
+        scan = AgentFailureScan(
+            [
+                AgentFailure(
+                    use_id="agent-1",
+                    name="flow",
+                    ts=1770000000000,
+                    reason_code="provider_key_missing",
+                    provider="anthropic",
+                    model="claude-test",
+                )
+            ],
+            ok=True,
+        )
+
+        assert _build_agent_error_seed(scan) == [
+            {
+                "type": "agent",
+                "id": "agent-1",
+                "name": "flow",
+                "ts": 1770000000000,
+                "service": "cortex",
+                "error": "talent error",
+                "reason_code": "provider_key_missing",
+                "provider": "anthropic",
+                "model": "claude-test",
+            }
+        ]
+
+    def test_returns_hostname_and_readiness(self, health_env, monkeypatch):
+        snapshot = _readiness_snapshot("blocker")
+        monkeypatch.setattr(
+            "solstone.apps.health.routes.build_readiness_snapshot",
+            lambda: snapshot,
+        )
         env = health_env()
         response = env.client.get("/app/health/api/info")
         assert response.status_code == 200
@@ -88,6 +170,113 @@ class TestInfoRoute:
         assert "hostname" in data
         assert isinstance(data["hostname"], str)
         assert len(data["hostname"]) > 0
+        assert data["readiness"] == snapshot
+
+    def test_info_readiness_degrades_when_snapshot_raises(
+        self, health_env, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "solstone.apps.health.routes.build_readiness_snapshot",
+            lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        env = health_env()
+
+        response = env.client.get("/app/health/api/info")
+
+        assert response.status_code == 200
+        readiness = response.get_json()["readiness"]
+        assert readiness["unavailable"] is True
+        assert readiness["summary"]["severity"] == "neutral"
+
+    def test_index_injects_readiness_bootstrap(self, health_env, monkeypatch):
+        snapshot = _readiness_snapshot("blocker")
+        monkeypatch.setattr(
+            "solstone.apps.health.routes.build_readiness_snapshot",
+            lambda: snapshot,
+        )
+        env = health_env()
+
+        response = env.client.get("/app/health/")
+
+        assert response.status_code == 200
+        html = response.get_data(as_text=True)
+        assert "window.HEALTH_READINESS" in html
+        assert "provider_key_missing:anthropic:" in html
+
+    def test_index_injects_agent_error_bootstrap(self, health_env):
+        env = health_env()
+        today = date.today().strftime("%Y%m%d")
+        now_ms = int(time.time() * 1000)
+        talents = env.journal / "talents"
+        talents.mkdir()
+        (talents / f"{today}.jsonl").write_text(
+            json.dumps(
+                {
+                    "use_id": "agent-1",
+                    "name": "flow",
+                    "day": today,
+                    "ts": now_ms,
+                    "status": "error",
+                    "reason_code": "provider_key_missing",
+                    "provider": "anthropic",
+                    "model": "claude-test",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        response = env.client.get("/app/health/")
+
+        assert response.status_code == 200
+        html = response.get_data(as_text=True)
+        assert "window.HEALTH_AGENT_ERRORS" in html
+        assert "window.HEALTH_AGENT_ERRORS_OK = true" in html
+        assert '"id": "agent-1"' in html
+        assert '"name": "flow"' in html
+        assert '"service": "cortex"' in html
+        assert '"error": "talent error"' in html
+        assert '"reason_code": "provider_key_missing"' in html
+        assert re.search(r'id="glanceErrorsValue">1</span>', html)
+
+    def test_index_agent_error_scan_degraded_bootstrap(self, health_env, monkeypatch):
+        monkeypatch.setattr(
+            "solstone.apps.health.routes.read_unresolved_agent_failures",
+            lambda: AgentFailureScan([], ok=False),
+        )
+        env = health_env()
+
+        response = env.client.get("/app/health/")
+
+        assert response.status_code == 200
+        html = response.get_data(as_text=True)
+        assert "window.HEALTH_AGENT_ERRORS = []" in html
+        assert "window.HEALTH_AGENT_ERRORS_OK = false" in html
+        assert re.search(r'id="glanceErrorsValue">—</span>', html)
+        assert "couldn't check talent errors today." in html
+        assert not re.search(r'id="glanceErrorsValue">0</span>', html)
+        assert (
+            "empty.textContent = !state.agentErrorsOk\n"
+            '        ? "couldn\'t check talent errors today."\n'
+            "        : (state.recentErrorsFilter ? 'no matching recent errors yet.' : "
+            "'no recent errors.');"
+        ) in html
+
+    def test_index_readiness_degrades_when_snapshot_raises(
+        self, health_env, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "solstone.apps.health.routes.build_readiness_snapshot",
+            lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        env = health_env()
+
+        response = env.client.get("/app/health/")
+
+        assert response.status_code == 200
+        html = response.get_data(as_text=True)
+        assert '"unavailable": true' in html
+        assert '"severity": "neutral"' in html
 
 
 class TestRestartObserverRoute:

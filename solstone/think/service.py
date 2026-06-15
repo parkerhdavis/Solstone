@@ -13,7 +13,7 @@ Usage:
     journal service logs                   View service logs
     journal service logs -f                Follow service logs
 
-    journal up                             Install (if needed), start, and show status
+    journal up                             Start (if not running) and show status — service must already be installed
     journal down                           Stop the background service
 
 Default convey port for installed services is 5015.
@@ -45,7 +45,9 @@ DEFAULT_SERVICE_PORT = 5015
 READY_TIMEOUT_SECONDS = 60.0
 SERVICE_FILE_DESCRIPTOR_LIMIT = 4096
 _LAUNCHD_UNLOAD_POLL_INTERVAL_S = 0.1
-_LAUNCHD_UNLOAD_TIMEOUT_S = 2.0
+_LAUNCHD_UNLOAD_TIMEOUT_S = 30.0
+_LAUNCHD_BOOTSTRAP_MAX_ATTEMPTS = 5
+_LAUNCHD_BOOTSTRAP_RETRY_WAIT_S = 1.0
 
 logger = logging.getLogger(__name__)
 
@@ -533,60 +535,6 @@ def remove_stale_plists() -> tuple[int, int]:
     return (removed, failed)
 
 
-def _systemd_unit_references_solstone(path: Path, lines: list[str]) -> bool:
-    if path.name == f"{SYSTEMD_UNIT}.service":
-        return True
-    return any(
-        line.startswith("Description=") and "solstone" in line.lower() for line in lines
-    )
-
-
-def remove_stale_systemd_units() -> tuple[int, int]:
-    """Remove stale systemd user units from prior installs."""
-    if not sys.platform.startswith("linux"):
-        return (0, 0)
-
-    scan_dir = _unit_path().parent
-    if not scan_dir.is_dir():
-        return (0, 0)
-
-    current_wrappers = {_managed_wrapper("sol"), _managed_wrapper("journal")}
-    removed = 0
-    failed = 0
-
-    for path in sorted(scan_dir.glob("*.service")):
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-        except OSError as exc:
-            print(f"skipping {path}: {type(exc).__name__}: {exc}", file=sys.stderr)
-            continue
-        if not _systemd_unit_references_solstone(path, lines):
-            continue
-        parts = _exec_start_parts_from_lines(path, lines)
-        if parts is None:
-            continue
-
-        extracted = parts[0]
-        if (
-            Path(extracted).name not in {"sol", "journal"}
-            or extracted not in current_wrappers
-        ):
-            try:
-                path.unlink()
-            except (OSError, PermissionError) as exc:
-                print(f"failed to remove {path}: {exc}", file=sys.stderr)
-                failed += 1
-                continue
-
-            print(
-                f"Removed stale systemd unit {path} "
-                f"(referenced {extracted}, current wrappers are {sorted(current_wrappers)})"
-            )
-            removed += 1
-
-    return (removed, failed)
-
-
 def _generate_systemd_unit(
     env: dict[str, str],
     *,
@@ -642,6 +590,47 @@ def _check_linger() -> None:
         pass
 
 
+def _is_launchd_eio(result: subprocess.CompletedProcess) -> bool:
+    """True iff a launchctl result is the known async-unload EIO race.
+
+    `launchctl bootout` is async; bootstrapping while the old label is still
+    loaded intermittently fails with "Bootstrap failed: 5: Input/output error".
+    Match the EIO strerror specifically so unrelated launchd failures
+    (permission, plist-format, already-bootstrapped) still fail fast.
+    """
+    return "Input/output error" in (result.stderr or "")
+
+
+def _bootstrap_launchd(uid: int, path: Path) -> subprocess.CompletedProcess:
+    """Bootstrap the plist, retrying through the async-unload EIO race.
+
+    On the EIO race we reprobe the label, wait briefly, and retry up to
+    `_LAUNCHD_BOOTSTRAP_MAX_ATTEMPTS`. Any non-EIO failure fails fast on the
+    first attempt. Bounded by attempt count regardless of label state.
+    """
+    result: subprocess.CompletedProcess | None = None
+    for attempt in range(_LAUNCHD_BOOTSTRAP_MAX_ATTEMPTS):
+        if attempt > 0:
+            try:
+                subprocess.run(
+                    ["launchctl", "print", f"gui/{uid}/{SERVICE_LABEL}"],
+                    capture_output=True,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass
+            time.sleep(_LAUNCHD_BOOTSTRAP_RETRY_WAIT_S)
+        result = subprocess.run(
+            ["launchctl", "bootstrap", f"gui/{uid}", str(path)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 or not _is_launchd_eio(result):
+            return result
+    assert result is not None  # loop runs >= 1 time; satisfies the type checker
+    return result
+
+
 def _install(port: int = DEFAULT_SERVICE_PORT) -> int:
     platform = _platform()
     env = _collect_env()
@@ -663,9 +652,9 @@ def _install(port: int = DEFAULT_SERVICE_PORT) -> int:
             check=False,
         )
 
-        # bootout is async; bootstrapping over a still-loaded label intermittently
-        # fails with "Bootstrap failed: 5: Input/output error". Wait (bounded) for the
-        # label to disappear before writing the plist and bootstrapping.
+        # bootout is async; wait (bounded) for launchd to drop the old label
+        # before writing the plist. Any residual unload race is handled by the
+        # bounded bootstrap retry below.
         deadline = time.monotonic() + _LAUNCHD_UNLOAD_TIMEOUT_S
         while time.monotonic() < deadline:
             try:
@@ -679,27 +668,23 @@ def _install(port: int = DEFAULT_SERVICE_PORT) -> int:
             if probe.returncode != 0:
                 break
             time.sleep(_LAUNCHD_UNLOAD_POLL_INTERVAL_S)
-        else:
-            logger.warning(
-                "Timed out waiting for launchd label %s to unload; bootstrapping anyway",
-                SERVICE_LABEL,
-            )
 
         path.write_bytes(plist_data)
         print(f"Wrote {path}")
 
-        result = subprocess.run(
-            ["launchctl", "bootstrap", f"gui/{uid}", str(path)],
-            capture_output=True,
-            text=True,
-        )
+        result = _bootstrap_launchd(uid, path)
         if result.returncode != 0:
+            if _is_launchd_eio(result):
+                logger.warning(
+                    "launchd label %s did not unload after %d bootstrap attempts; giving up",
+                    SERVICE_LABEL,
+                    _LAUNCHD_BOOTSTRAP_MAX_ATTEMPTS,
+                )
             print(f"Error loading service: {result.stderr.strip()}", file=sys.stderr)
             return 1
         print("Service loaded into launchd")
 
     else:
-        remove_stale_systemd_units()
         unit_content = _generate_systemd_unit(env, port=port, journal_path=journal_path)
         path = _unit_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -876,9 +861,7 @@ def _status() -> int:
 
     if not service_is_installed():
         print("Service: not installed")
-        print(
-            "Run 'journal service install' to install, or 'journal up' to install and start."
-        )
+        print("Run 'journal setup' or 'journal service install' to install it.")
         return 1
 
     print("Service: installed")
@@ -927,13 +910,15 @@ def _logs(follow: bool = False) -> int:
         return 0
 
 
-def _up(port: int = DEFAULT_SERVICE_PORT) -> int:
-    """Install if needed, start if not running, show status."""
+def _up() -> int:
+    """Start if not running and show status. Requires an installed service unit."""
     if not service_is_installed():
-        print("Installing service...")
-        rc = _install(port=port)
-        if rc != 0:
-            return rc
+        print(
+            "Error: service not installed. Run 'journal setup' or "
+            "'journal service install' to install it first.",
+            file=sys.stderr,
+        )
+        return 1
 
     if not service_is_running():
         print("Starting service...")
@@ -981,7 +966,9 @@ def _print_usage() -> None:
         "       journal service restart [--if-installed]  "
         "(restart; --if-installed noops if not installed)"
     )
-    print("       journal up [--port PORT]               (install + start + status)")
+    print(
+        "       journal up                             (start + status; service must be installed)"
+    )
     print("       journal down                           (stop)")
 
 
@@ -1025,7 +1012,7 @@ def main() -> None:
     if subcmd == "install":
         sys.exit(_install(port=_parse_port(rest)))
     elif subcmd == "up":
-        sys.exit(_up(port=_parse_port(rest)))
+        sys.exit(_up())
     elif subcmd == "restart":
         if_installed = "--if-installed" in rest
         sys.exit(_restart(if_installed=if_installed))

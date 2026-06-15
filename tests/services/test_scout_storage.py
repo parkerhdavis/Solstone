@@ -5,13 +5,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import stat
 import threading
 
 import pytest
 
-from solstone.think import journal_config
 from solstone.think.journal_config import write_journal_config
+from solstone.think.services import scout as scout_module
 from solstone.think.services.scout import (
     KEY_FINGERPRINT_FIELD,
     DisableOutcome,
@@ -20,6 +21,7 @@ from solstone.think.services.scout import (
     is_manual_key_present,
     is_scout_enabled,
     provision_scout_handoff,
+    record_scout_pending,
     scout_provenance,
 )
 
@@ -68,6 +70,38 @@ def test_provision_scout_handoff_round_trip_preserves_config(journal_copy) -> No
     assert stat.S_IMODE(_config_path(journal_copy).stat().st_mode) == 0o600
 
 
+def test_redact_handoff_redacts_secrets_keeps_nonsecrets() -> None:
+    payload = {
+        "google_api_key": "google-secret",
+        "dispatch_token": "dispatch-secret",
+        "account_id": "acct-visible",
+        "created_at": 1716508800,
+    }
+
+    redacted = scout_module._redact_handoff(payload)
+
+    assert redacted["google_api_key"] == "***redacted***"
+    assert redacted["dispatch_token"] == "***redacted***"
+    assert redacted["account_id"] == "acct-visible"
+    assert redacted["created_at"] == 1716508800
+    assert isinstance(redacted["created_at"], int)
+    assert "google-secret" not in redacted.values()
+    assert "dispatch-secret" not in redacted.values()
+
+
+def test_provision_scout_handoff_debug_log_redacts_payload(
+    journal_copy, caplog
+) -> None:
+    caplog.set_level(logging.DEBUG)
+
+    provision_scout_handoff(_payload())
+
+    assert "received scout handoff payload" in caplog.text
+    assert "***redacted***" in caplog.text
+    assert "google-one" not in caplog.text
+    assert "dispatch-one" not in caplog.text
+
+
 def test_scout_three_state_matrix(journal_copy) -> None:
     config = _read_config(journal_copy)
     config.setdefault("env", {}).pop("GOOGLE_API_KEY", None)
@@ -86,6 +120,72 @@ def test_scout_three_state_matrix(journal_copy) -> None:
     provision_scout_handoff(_payload("two"))
     assert is_scout_enabled()
     assert not is_manual_key_present()
+
+
+def test_pending_marker_alone_predicates(journal_copy) -> None:
+    config = _read_config(journal_copy)
+    config.setdefault("env", {}).pop("GOOGLE_API_KEY", None)
+    config.pop("services", None)
+    write_journal_config(config)
+
+    record_scout_pending("acct-p", 1_700_000_000_000)
+
+    assert not is_scout_enabled()
+    assert not is_manual_key_present()
+    saved = _read_config(journal_copy)
+    assert "GOOGLE_API_KEY" not in saved.get("env", {})
+    scout = dict(saved["services"]["scout"])
+    checked_at = scout.pop("checked_at")
+    assert isinstance(checked_at, str)
+    assert scout == {
+        "state": "pending",
+        "account_id": "acct-p",
+        "since": 1_700_000_000_000,
+    }
+    assert scout_provenance() == saved["services"]["scout"]
+
+
+def test_pending_marker_with_manual_key_predicates(journal_copy) -> None:
+    config = _read_config(journal_copy)
+    config.setdefault("env", {})["GOOGLE_API_KEY"] = "manual"
+    config.pop("services", None)
+    write_journal_config(config)
+
+    record_scout_pending("acct-p", 1_700_000_000_000)
+
+    assert not is_scout_enabled()
+    assert is_manual_key_present()
+    saved = _read_config(journal_copy)
+    assert saved["env"]["GOOGLE_API_KEY"] == "manual"
+
+
+def test_record_scout_pending_requires_account_id(journal_copy) -> None:
+    config = _read_config(journal_copy)
+    config.setdefault("env", {}).pop("GOOGLE_API_KEY", None)
+    config.pop("services", None)
+    write_journal_config(config)
+
+    with pytest.raises(ValueError):
+        record_scout_pending("", 123)
+    with pytest.raises(ValueError):
+        record_scout_pending(None, 123)
+
+    assert "scout" not in _read_config(journal_copy).get("services", {})
+
+
+def test_record_scout_pending_writes_no_google_api_key(journal_copy) -> None:
+    config = _read_config(journal_copy)
+    config.setdefault("env", {}).pop("GOOGLE_API_KEY", None)
+    config.pop("services", None)
+    write_journal_config(config)
+
+    record_scout_pending("acct-p", 1_700_000_000_000)
+
+    saved = _read_config(journal_copy)
+    assert "GOOGLE_API_KEY" not in saved.get("env", {})
+    scout = saved["services"]["scout"]
+    assert "google_api_key" not in scout
+    assert "dispatch_token" not in scout
 
 
 @pytest.mark.parametrize("field", list(_payload().keys()))
@@ -253,11 +353,10 @@ def test_atomic_write_leaves_existing_config_on_replace_failure(
     def fail_replace(_tmp, _path) -> None:
         raise OSError("replace failed")
 
-    monkeypatch.setattr(journal_config.os, "replace", fail_replace)
+    monkeypatch.setattr("solstone.think.journal_io.atomic.os.replace", fail_replace)
 
     with pytest.raises(OSError, match="replace failed"):
         write_journal_config(config)
 
     assert _config_path(journal_copy).read_text() == original_text
-    tmp_path = _config_path(journal_copy).with_suffix(".json.tmp")
-    assert json.loads(tmp_path.read_text())["env"]["GOOGLE_API_KEY"] == "after"
+    assert list(_config_path(journal_copy).parent.glob(".tmp_*")) == []

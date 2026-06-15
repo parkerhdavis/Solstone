@@ -29,10 +29,11 @@ from solstone.think.activities import (
 from solstone.think.activity_state_machine import ActivityStateMachine
 from solstone.think.callosum import CallosumConnection
 from solstone.think.cluster import cluster_segments
+from solstone.think.cogitate_policy import DETERMINISTIC_FAILURE_THRESHOLD
 from solstone.think.cortex_client import (
     CortexSpawnUnavailable,
     cortex_request,
-    read_use_provider_model,
+    read_use_provider_model_reason,
     wait_for_uses,
 )
 from solstone.think.facets import (
@@ -40,10 +41,14 @@ from solstone.think.facets import (
     get_enabled_facets,
     load_segment_facets,
 )
+from solstone.think.journal_io import atomic_replace
 from solstone.think.pipeline_health import (
     SEGMENT_FLOOR_TALENTS,
+    DeterministicFailure,
     classify_segment_completion,
+    read_completed_since,
     read_completed_units,
+    read_daily_deterministic_failures,
     read_segment_progress,
 )
 from solstone.think.runner import run_task
@@ -119,9 +124,32 @@ def _jsonl_log(event: str, **fields) -> None:
         _jsonl.log(event, **fields)
 
 
+def load_cadence_state() -> dict[str, int]:
+    """Read health/cadence.json per-talent last-run timestamps."""
+    path = Path(get_journal()) / "health" / "cadence.json"
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError) as exc:
+        logging.warning("Failed to load cadence state: %s", exc)
+        return {}
+
+
+def save_cadence_state(state: dict[str, int]) -> None:
+    """Persist cadence state to health/cadence.json atomically."""
+    path = Path(get_journal()) / "health" / "cadence.json"
+    atomic_replace(path, json.dumps(state, indent=2))
+
+
 def _provider_model_fields(use_id: str) -> dict[str, str | None]:
-    provider, model = read_use_provider_model(use_id)
-    return {"provider": provider, "model": model}
+    provider, model, reason_code = read_use_provider_model_reason(use_id)
+    fields = {"provider": provider, "model": model}
+    if reason_code:
+        fields["reason_code"] = reason_code
+    return fields
 
 
 def _log_skip(name: str, reason: str, detail: str, **extra) -> None:
@@ -244,7 +272,6 @@ def check_callosum_available() -> bool:
 
 
 _SKIPPED: object = object()
-NEVER_SKIP_DAILY = frozenset({"pulse", "awareness_tender"})
 _SEND_RETRY_DELAYS = (0.5, 1.0)  # seconds between retries (3 attempts total)
 
 
@@ -300,7 +327,7 @@ def _drain_priority_batch(
 
     Returns:
         Tuple of (success_count, failed_count, failed_names) where
-        failed_names contains descriptions like "digest (error)" or
+        failed_names contains descriptions like "flow (error)" or
         "recap/work (timeout)".
     """
     if not spawned:
@@ -460,14 +487,6 @@ def _load_json_file(path: Path, default: object) -> object:
         return default
 
 
-def _write_json_atomic(path: Path, data: object) -> None:
-    """Atomically write JSON data to a file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f"{path.suffix}.tmp")
-    tmp.write_text(json.dumps(data), encoding="utf-8")
-    tmp.replace(path)
-
-
 def _has_audio_embeddings(seg_dir: Path) -> bool:
     """Return True when a segment has audio embedding files."""
     for npz_path in seg_dir.glob("*.npz"):
@@ -482,17 +501,20 @@ def _check_daily_skip(
     *,
     mode: str,
     completed: set[tuple[str, str, str | None]],
-    never_skip: frozenset[str],
+    deterministic_failures: dict[tuple[str, str | None], DeterministicFailure],
+    retry_on_deterministic_failure: bool = False,
     from_scratch: bool = False,
 ) -> tuple[bool, str | None]:
     if mode != "daily":
-        return (False, None)
-    if name in never_skip:
         return (False, None)
     if from_scratch:
         return (False, None)
     if (mode, name, facet) in completed:
         return (True, "already_complete")
+    if not retry_on_deterministic_failure:
+        failure = deterministic_failures.get((name, facet))
+        if failure is not None and failure.count >= DETERMINISTIC_FAILURE_THRESHOLD:
+            return (True, "deterministic_failure_no_retry")
     return (False, None)
 
 
@@ -598,8 +620,6 @@ def run_segment_sense(
 
     day_dir = day_path(day)
     seg_dir = _segment_dir(day, segment, stream)
-    pulse_config = _cfg("pulse")
-
     start_time = time.time()
     total_success = 0
     total_failed = 0
@@ -812,11 +832,11 @@ def run_segment_sense(
                             for facet, entry in state_machine.state.items()
                         },
                     }
-                    _write_json_atomic(
+                    atomic_replace(
                         state_machine.journal_root
                         / "awareness"
                         / "activity_state.json",
-                        snapshot,
+                        json.dumps(snapshot),
                     )
                 except Exception:
                     logging.debug(
@@ -929,10 +949,7 @@ def run_segment_sense(
                 segment=segment,
             )
 
-    total_expected = 1 + len(agents_to_run)
-    if recommend.get("pulse_update") and pulse_config:
-        total_expected += 1
-    _update_status(agents_total=total_expected)
+    _update_status(agents_total=1 + len(agents_to_run))
 
     spawned: list[tuple[str, str, dict, str | None]] = []
     for agent_name, config in agents_to_run:
@@ -1054,9 +1071,9 @@ def run_segment_sense(
                         for facet, entry in state_machine.state.items()
                     },
                 }
-                _write_json_atomic(
+                atomic_replace(
                     state_machine.journal_root / "awareness" / "activity_state.json",
-                    snapshot,
+                    json.dumps(snapshot),
                 )
             except Exception:
                 logging.debug("Failed to write activity state snapshot", exc_info=True)
@@ -1092,124 +1109,6 @@ def run_segment_sense(
                 max_concurrency=max_concurrency,
             )
 
-    awareness_tender_config = _cfg("awareness_tender")
-    if awareness_tender_config:
-        at_agent_id = _dispatch_agent("awareness_tender", awareness_tender_config)
-        if at_agent_id is None:
-            _log_skip(
-                "awareness_tender",
-                "send_failed",
-                "All cortex request attempts failed for awareness_tender",
-                mode=target_schedule,
-                day=day,
-                segment=segment,
-            )
-            total_failed += 1
-            all_failed_names.append("awareness_tender (send)")
-            _update_status(agents_completed=total_success + total_failed)
-        elif at_agent_id is not _SKIPPED:
-            emit(
-                "talent_started",
-                mode=target_schedule,
-                day=day,
-                segment=segment,
-                name="awareness_tender",
-                use_id=at_agent_id,
-            )
-            _jsonl_log(
-                "talent.dispatch",
-                mode=target_schedule,
-                day=day,
-                segment=segment,
-                name="awareness_tender",
-                use_id=at_agent_id,
-                **({"stream": stream} if stream else {}),
-            )
-            _update_status(current_agents=["awareness_tender"])
-            s, f, fn = _drain_priority_batch(
-                [(at_agent_id, "awareness_tender", awareness_tender_config, None)],
-                target_schedule,
-                day,
-                segment,
-                stream,
-                timeout,
-            )
-            total_success += s
-            total_failed += f
-            all_failed_names.extend(fn)
-            _update_status(
-                agents_completed=total_success + total_failed,
-                current_agents=[],
-            )
-
-    if recommend.get("pulse_update") and pulse_config:
-        pulse_agent_id = _dispatch_agent("pulse", pulse_config)
-        if pulse_agent_id is None:
-            _log_skip(
-                "pulse",
-                "send_failed",
-                "All cortex request attempts failed for pulse",
-                mode=target_schedule,
-                day=day,
-                segment=segment,
-            )
-            total_failed += 1
-            all_failed_names.append("pulse (send)")
-            _update_status(agents_completed=total_success + total_failed)
-        elif pulse_agent_id is not _SKIPPED:
-            emit(
-                "talent_started",
-                mode=target_schedule,
-                day=day,
-                segment=segment,
-                name="pulse",
-                use_id=pulse_agent_id,
-            )
-            _jsonl_log(
-                "talent.dispatch",
-                mode=target_schedule,
-                day=day,
-                segment=segment,
-                name="pulse",
-                use_id=pulse_agent_id,
-                **({"stream": stream} if stream else {}),
-            )
-            _update_status(current_agents=["pulse"])
-            s, f, fn = _drain_priority_batch(
-                [(pulse_agent_id, "pulse", pulse_config, None)],
-                target_schedule,
-                day,
-                segment,
-                stream,
-                timeout,
-            )
-            total_success += s
-            total_failed += f
-            all_failed_names.extend(fn)
-            _update_status(
-                agents_completed=total_success + total_failed,
-                current_agents=[],
-            )
-    elif not recommend.get("pulse_update"):
-        _log_skip(
-            "pulse",
-            "not_recommended",
-            "pulse_update not recommended by sense",
-            mode=target_schedule,
-            day=day,
-            segment=segment,
-        )
-    elif not pulse_config:
-        _log_skip(
-            "pulse",
-            "no_config",
-            "pulse config not found",
-            mode=target_schedule,
-            day=day,
-            segment=segment,
-            **({"stream": stream} if stream else {}),
-        )
-
     duration_ms = int((time.time() - start_time) * 1000)
     emit(
         "completed",
@@ -1241,8 +1140,21 @@ def _apply_output_persistence(
     ``refresh`` (so the output-exists guard in _run_talent is bypassed and the
     talent regenerates). Cogitate talents with no declared output are left
     untouched — they do not persist. ``refresh`` is left absent when not
-    forcing, matching the existing dispatch-config representation.
+    forcing, matching the existing dispatch-config representation. Talents that
+    declare ``accumulate`` persist from their post-hook and suppress this
+    single-file output path.
     """
+    # Accumulate talents persist via their post-hook's day_accumulator.append_record
+    # (chronicle/<day>/talents/<name>.jsonl). Suppress the framework's single-file
+    # write by leaving request_config["output"] unset -> prepare_config computes no
+    # output_path -> talent_emit_event skips _write_output. The talent still declares
+    # output:json + schema: in frontmatter, so config validation passes and the JSON
+    # schema still reaches the model. NOTE: this covers schedules that route through
+    # _apply_output_persistence (cadence + daily/weekly); segment/activity/flush set
+    # output directly and are not covered — intentional, no consumer needs them.
+    if config.get("accumulate"):
+        return
+
     is_generate = config["type"] == "generate"
     if is_generate or config.get("output"):
         request_config["output"] = config.get("output") or "md"
@@ -1274,7 +1186,7 @@ def run_daily_prompts(
 
     Returns:
         Tuple of (success_count, fail_count, failed_names, applicable_units) where
-        failed_names contains descriptions like "digest (error)" and
+        failed_names contains descriptions like "flow (error)" and
         applicable_units contains (name, facet) daily units that survived
         structural filters.
     """
@@ -1288,6 +1200,7 @@ def run_daily_prompts(
         return (0, 0, [], set())
 
     completed_units = read_completed_units(day)
+    deterministic_failures = read_daily_deterministic_failures(day)
 
     # Group prompts by priority
     priority_groups: dict[int, list[tuple[str, dict]]] = {}
@@ -1330,6 +1243,7 @@ def run_daily_prompts(
     all_failed_names: list[str] = []
     applicable_units: set[tuple[str, str | None]] = set()
     already_complete_skips = 0
+    deterministic_skips = 0
 
     # Process each priority group in order
     for priority in sorted(priority_groups.keys()):
@@ -1403,15 +1317,30 @@ def run_daily_prompts(
                             facet_name,
                             mode=target_schedule,
                             completed=completed_units,
-                            never_skip=NEVER_SKIP_DAILY,
+                            deterministic_failures=deterministic_failures,
+                            retry_on_deterministic_failure=config.get(
+                                "retry_on_deterministic_failure", False
+                            ),
                             from_scratch=from_scratch,
                         )
                         if skip:
-                            reason = reason or "already_complete"
+                            if reason == "deterministic_failure_no_retry":
+                                failure = deterministic_failures[
+                                    (prompt_name, facet_name)
+                                ]
+                                detail = (
+                                    f"{failure.count} same-day deterministic failures "
+                                    f"({failure.reason_code}); not re-dispatching"
+                                )
+                                deterministic_skips += 1
+                            else:
+                                reason = reason or "already_complete"
+                                detail = "unit already complete in health log"
+                                already_complete_skips += 1
                             _log_skip(
                                 prompt_name,
                                 reason,
-                                "unit already complete in health log",
+                                detail,
                                 mode=target_schedule,
                                 day=day,
                                 facet=facet_name,
@@ -1422,7 +1351,6 @@ def run_daily_prompts(
                                 facet_name,
                                 reason,
                             )
-                            already_complete_skips += 1
                             continue
 
                         logging.info(f"Spawning {prompt_name} for facet: {facet_name}")
@@ -1517,20 +1445,32 @@ def run_daily_prompts(
                         None,
                         mode=target_schedule,
                         completed=completed_units,
-                        never_skip=NEVER_SKIP_DAILY,
+                        deterministic_failures=deterministic_failures,
+                        retry_on_deterministic_failure=config.get(
+                            "retry_on_deterministic_failure", False
+                        ),
                         from_scratch=from_scratch,
                     )
                     if skip:
-                        reason = reason or "already_complete"
+                        if reason == "deterministic_failure_no_retry":
+                            failure = deterministic_failures[(prompt_name, None)]
+                            detail = (
+                                f"{failure.count} same-day deterministic failures "
+                                f"({failure.reason_code}); not re-dispatching"
+                            )
+                            deterministic_skips += 1
+                        else:
+                            reason = reason or "already_complete"
+                            detail = "unit already complete in health log"
+                            already_complete_skips += 1
                         _log_skip(
                             prompt_name,
                             reason,
-                            "unit already complete in health log",
+                            detail,
                             mode=target_schedule,
                             day=day,
                         )
                         logging.debug("Skipping %s: %s", prompt_name, reason)
-                        already_complete_skips += 1
                         continue
 
                     logging.info(f"Spawning {prompt_name}")
@@ -1648,6 +1588,11 @@ def run_daily_prompts(
         logging.info(
             "Daily idempotency: skipped %d already-complete unit(s)",
             already_complete_skips,
+        )
+    if deterministic_skips:
+        logging.info(
+            "Daily idempotency: skipped %d deterministic-failure unit(s) (no retry)",
+            deterministic_skips,
         )
 
     duration_ms = int((time.time() - start_time) * 1000)
@@ -2039,6 +1984,119 @@ def run_weekly_prompts(
 
     logging.info(f"Prompts completed: {total_success} succeeded, {total_failed} failed")
     return (total_success, total_failed, all_failed_names)
+
+
+def run_cadence_prompts(
+    day: str,
+    refresh: bool,
+    verbose: bool,
+    max_concurrency: int = 2,
+    stream: str | None = None,
+    timeout: int | None = 610,
+) -> tuple[int, int, list[str]]:
+    """Run cadence-scheduled prompts whose completion gate is open."""
+    all_prompts = get_talent_configs(schedule="cadence")
+    if not all_prompts:
+        logging.info("cadence: no cadence talents configured")
+        return (0, 0, [])
+
+    cadence_state = load_cadence_state()
+    dirty = False
+    total_success = 0
+    total_failed = 0
+    failed_names: list[str] = []
+    fired = 0
+    skipped = 0
+
+    for name, config in sorted(
+        all_prompts.items(), key=lambda item: (item[1]["priority"], item[0])
+    ):
+        now = now_ms()
+        cadence_minutes = config.get("cadence_minutes", 5)
+        last = cadence_state.get(name)
+        if last is not None and now - last < cadence_minutes * 60_000:
+            _log_skip(
+                name,
+                "interval_not_elapsed",
+                f"{(now - last) // 1000}s since last < {cadence_minutes}m",
+                mode="cadence",
+                day=day,
+            )
+            skipped += 1
+            continue
+
+        since_ms = last or 0
+        window = read_completed_since(day, since_ms)
+        if not window.segments and not window.activities:
+            _log_skip(
+                name,
+                "no_new_work",
+                "no segment/activity completed since last cadence run",
+                mode="cadence",
+                day=day,
+            )
+            skipped += 1
+            continue
+
+        is_generate = config["type"] == "generate"
+        request_config: dict = {
+            "day": day,
+            "schedule": "cadence",
+            "env": {"SOL_DAY": day},
+            "cadence_window": {
+                "since_ms": since_ms,
+                "segments": list(window.segments),
+                "activities": list(window.activities),
+            },
+        }
+        _apply_output_persistence(request_config, config, force_refresh=refresh)
+        prompt = "" if is_generate else f"Running cadence task for {iso_date(day)}."
+
+        use_id = _cortex_request_with_retry(
+            prompt=prompt,
+            name=name,
+            config=request_config,
+        )
+        if use_id is None:
+            _log_skip(
+                name,
+                "send_failed",
+                f"All cortex request attempts failed for {name}",
+                mode="cadence",
+                day=day,
+            )
+            total_failed += 1
+            failed_names.append(f"{name} (send)")
+            continue
+
+        emit("talent_started", mode="cadence", day=day, name=name, use_id=use_id)
+        _jsonl_log(
+            "talent.dispatch",
+            mode="cadence",
+            day=day,
+            name=name,
+            use_id=use_id,
+        )
+        s, f, fn = _drain_priority_batch(
+            [(use_id, name, config, None)], "cadence", day, None, stream, timeout
+        )
+        total_success += s
+        total_failed += f
+        failed_names.extend(fn)
+        if s == 1 and f == 0:
+            cadence_state[name] = now
+            dirty = True
+            fired += 1
+
+    if dirty:
+        save_cadence_state(cadence_state)
+    logging.info(
+        "cadence: %d fired, %d skipped (no new work or interval), %d failed",
+        fired,
+        skipped,
+        total_failed,
+    )
+    return (total_success, total_failed, failed_names)
 
 
 def run_activity_prompts(
@@ -2659,6 +2717,7 @@ def dry_run(
     refresh: bool = False,
     stream: str | None = None,
     weekly: bool = False,
+    cadence: bool = False,
 ) -> None:
     """Print what think would execute without spawning any agents."""
     day_formatted = iso_date(day)
@@ -2690,7 +2749,6 @@ def dry_run(
                 "speaker_attribution",
                 "if recommend.speaker_attribution + audio embeddings",
             ),
-            ("pulse", "if recommend.pulse_update"),
         ]:
             cfg = prompts.get(name)
             if not cfg:
@@ -2726,6 +2784,36 @@ def dry_run(
             print("No prompts for schedule: weekly")
         else:
             _print_prompt_table(all_prompts, day, refresh=refresh, stream=stream)
+        return
+
+    if cadence:
+        all_prompts = get_talent_configs(schedule="cadence")
+        print(f"Day {day_formatted} — cadence agents\n")
+        if not all_prompts:
+            print("No prompts for schedule: cadence")
+            return
+        cadence_state = load_cadence_state()
+        now = now_ms()
+        for name, config in sorted(
+            all_prompts.items(), key=lambda item: (item[1]["priority"], item[0])
+        ):
+            cadence_minutes = config.get("cadence_minutes", 5)
+            last = cadence_state.get(name)
+            if last is not None and now - last < cadence_minutes * 60_000:
+                print(
+                    f"  skip  {name} — interval not elapsed "
+                    f"({(now - last) // 1000}s < {cadence_minutes}m)"
+                )
+                continue
+            window = read_completed_since(day, last or 0)
+            count = len(window.segments) + len(window.activities)
+            if count == 0:
+                print(f"  no-op {name} — no new work since last cadence run")
+            else:
+                print(
+                    f"  fire  {name} — window: {len(window.segments)} segment(s), "
+                    f"{len(window.activities)} activity(ies)"
+                )
         return
 
     if segments:
@@ -2954,7 +3042,7 @@ def parse_args() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--day",
-        help="Day folder in YYYYMMDD format (defaults to yesterday)",
+        help="Day folder in YYYYMMDD format (defaults to yesterday, or today with --cadence)",
     )
     parser.add_argument(
         "--segment",
@@ -3021,9 +3109,9 @@ def parse_args() -> argparse.ArgumentParser:
         default="",
         help=(
             "Comma-separated segment-scheduled talent names to suppress during "
-            "--segments/--segment runs (e.g., 'awareness_tender,pulse' for "
+            "--segments/--segment runs (e.g., 'screen,speaker_attribution' for "
             "realizer-backfill speedup). Recognized: sense, entities, documents, "
-            "screen, speaker_attribution, awareness_tender, pulse. Skipping 'sense' "
+            "screen, speaker_attribution. Skipping 'sense' "
             "relies on a cached talents/sense.json from a prior run."
         ),
     )
@@ -3049,6 +3137,11 @@ def parse_args() -> argparse.ArgumentParser:
         "--weekly",
         action="store_true",
         help="Run weekly-scheduled agents (incompatible with --segment, --segments, --activity, --flush)",
+    )
+    parser.add_argument(
+        "--cadence",
+        action="store_true",
+        help="Run cadence-scheduled agents on completed segments/activities (incompatible with --segment, --segments, --activity, --flush, --weekly)",
     )
     parser.add_argument(
         "--dry-run",
@@ -3083,6 +3176,8 @@ def main() -> None:
             incompatible.append("--flush")
         if args.segments:
             incompatible.append("--segments")
+        if args.cadence:
+            incompatible.append("--cadence")
         if incompatible:
             parser.error(f"--updated is incompatible with {', '.join(incompatible)}")
         today = date.today().strftime("%Y%m%d")
@@ -3092,7 +3187,11 @@ def main() -> None:
 
     day = args.day
     if day is None:
-        day = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+        day = (
+            date.today().strftime("%Y%m%d")
+            if args.cadence
+            else (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+        )
     day_dir = day_path(day)
 
     if not day_dir.is_dir():
@@ -3133,6 +3232,13 @@ def main() -> None:
             "--weekly is incompatible with --segment, --segments, --activity, and --flush"
         )
 
+    if args.cadence and (
+        args.segment or args.segments or args.activity or args.flush or args.weekly
+    ):
+        parser.error(
+            "--cadence is incompatible with --segment, --segments, --activity, --flush, and --weekly"
+        )
+
     if args.dry_run:
         dry_run(
             day,
@@ -3144,6 +3250,7 @@ def main() -> None:
             refresh=args.refresh,
             stream=args.stream,
             weekly=args.weekly,
+            cadence=args.cadence,
         )
         sys.exit(0)
 
@@ -3155,10 +3262,16 @@ def main() -> None:
         _run_mode = "segment"
     elif args.weekly:
         _run_mode = "weekly"
+    elif args.cadence:
+        _run_mode = "cadence"
     elif args.segment:
         _run_mode = "segment"
     else:
         _run_mode = "daily"
+
+    if args.cadence and not get_talent_configs(schedule="cadence"):
+        logging.info("cadence: no cadence talents configured")
+        sys.exit(0)
 
     _run_ref = str(now_ms())
     _run_start_time = time.time()
@@ -3311,6 +3424,31 @@ def main() -> None:
             if fail_count > 0:
                 names = ", ".join(failed_names)
                 logging.error(f"{fail_count} weekly prompt(s) failed: {names}")
+                sys.exit(1)
+            sys.exit(0)
+
+        # Handle cadence mode — dispatch only agents whose completion gate is open
+        if args.cadence:
+            success_count, fail_count, failed_names = run_cadence_prompts(
+                day=day,
+                refresh=args.refresh,
+                verbose=args.verbose,
+                max_concurrency=args.jobs,
+                stream=args.stream,
+            )
+
+            duration_ms = int((time.time() - start_time) * 1000)
+            logging.info(
+                f"Cadence think completed in {duration_ms}ms: "
+                f"{success_count} succeeded, {fail_count} failed"
+            )
+            day_log(day, f"think --cadence failed={fail_count}")
+            _run_result["success"] = success_count
+            _run_result["failed"] = fail_count
+
+            if fail_count > 0:
+                names = ", ".join(failed_names)
+                logging.error(f"{fail_count} cadence prompt(s) failed: {names}")
                 sys.exit(1)
             sys.exit(0)
 

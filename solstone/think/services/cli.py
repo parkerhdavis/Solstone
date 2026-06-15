@@ -6,32 +6,32 @@
 from __future__ import annotations
 
 import argparse
-import os
-import platform
+import logging
 import sys
 import time
 import webbrowser
+from datetime import datetime, timezone
+from typing import Any
 
 from solstone.think.journal_config import get_journal_config_path
 from solstone.think.services import portal_client, scout, spl
+from solstone.think.services.constants import SERVICE_SCOUT
+
+logger = logging.getLogger(__name__)
 
 MIN_WAIT_SECONDS = 60
 MAX_WAIT_SECONDS = 3600
 
-STDOUT_OPENING = "Opening services.solstone.app to enable scout..."
+STDOUT_LINK_TEMPLATE = "To enable scout, open this link in any browser:\n\n    {url}\n"
+STDOUT_OPENED_BROWSER = "Opening it in your browser now."
 STDOUT_WAITING = "Waiting for you to finish in the browser (up to 15 minutes)..."
 STDOUT_SUCCESS = "Scout enabled."
-STDOUT_DEVICE_CODE_TEMPLATE = (
-    "Open this URL in any browser:\n"
-    "\n"
-    "    {url}\n"
-    "\n"
-    "Then enter this code when prompted:\n"
-    "\n"
-    "    {code}\n"
-    "\n"
-    "Waiting for you to finish in the browser (up to 15 minutes)..."
+STDOUT_PENDING = "Scout request applied — pending review (submitted {since})."
+STDOUT_REVOKED = "Scout access has ended."
+STDOUT_REVOKED_PRESERVED_MANUAL_KEY = (
+    "Scout access has ended — your manually-pasted key was preserved."
 )
+STDOUT_REFRESH = "Re-pulled scout status."
 STDOUT_DISABLE_SUCCESS = "Scout disabled."
 STDOUT_DISABLE_PRESERVED_MANUAL_KEY = (
     "Scout disabled — your manually-pasted key was preserved."
@@ -61,6 +61,10 @@ ERROR_MESSAGES: dict[str, str] = {
     "unexpected_payload": (
         "The services response shape was unexpected. Update solstone and try again."
     ),
+    "scout_server_bad_payload": (
+        "services.solstone.app returned an incomplete scout approval. "
+        "Retry shortly; if it persists, the portal is at fault."
+    ),
     "write_failed": (
         "Scout was approved, but journal config was not saved. "
         "Check <journal>/config permissions and retry."
@@ -70,7 +74,6 @@ ERROR_MESSAGES: dict[str, str] = {
         "A manual Gemini key is already present in journal config. "
         "Use --force to overwrite with a portal-provisioned key."
     ),
-    "rate_limited": "too many enable attempts from this network — wait an hour and try again.",
     "already_disabled": "solstone scout is not enabled on this machine.",
     "spl_already_enabled": "sol private link is already enabled. No change needed.",
     "spl_already_disabled": "sol private link is not enabled on this machine.",
@@ -92,9 +95,10 @@ EXIT_CODES: dict[str, int] = {
 
 
 class _CliError(Exception):
-    def __init__(self, token: str):
+    def __init__(self, token: str, detail: str | None = None):
         super().__init__(token)
         self.token = token
+        self.detail = detail
 
 
 class _ServicesArgumentParser(argparse.ArgumentParser):
@@ -105,8 +109,21 @@ class _ServicesArgumentParser(argparse.ArgumentParser):
         super().error(message)
 
 
-def _print_error(token: str) -> None:
-    print(f"{token}: {ERROR_MESSAGES[token]}", file=sys.stderr)
+_verbose_parent = argparse.ArgumentParser(add_help=False)
+_verbose_parent.add_argument(
+    "-v",
+    "--verbose",
+    action="store_true",
+    default=argparse.SUPPRESS,
+    help="Enable DEBUG logging for this command.",
+)
+
+
+def _print_error(token: str, detail: str | None = None) -> None:
+    message = f"{token}: {ERROR_MESSAGES[token]}"
+    if detail:
+        message += f" ({detail})"
+    print(message, file=sys.stderr)
 
 
 def _wait_seconds(value: str) -> int:
@@ -117,8 +134,20 @@ def _wait_seconds(value: str) -> int:
     return max(MIN_WAIT_SECONDS, min(MAX_WAIT_SECONDS, seconds))
 
 
+def _format_since(since: Any) -> str:
+    try:
+        return datetime.fromtimestamp(int(since) / 1000, tz=timezone.utc).strftime(
+            "%Y-%m-%d"
+        )
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "recently"
+
+
 def _build_parser() -> argparse.ArgumentParser:
-    parser = _ServicesArgumentParser(description="Manage optional solstone services.")
+    parser = _ServicesArgumentParser(
+        description="Manage optional solstone services.",
+        parents=[_verbose_parent],
+    )
     subparsers = parser.add_subparsers(
         dest="command",
         title="commands",
@@ -128,6 +157,7 @@ def _build_parser() -> argparse.ArgumentParser:
     enable_parser = subparsers.add_parser(
         "enable",
         help="enable an optional service",
+        parents=[_verbose_parent],
     )
     service_parsers = enable_parser.add_subparsers(
         dest="service",
@@ -138,6 +168,7 @@ def _build_parser() -> argparse.ArgumentParser:
     scout_parser = service_parsers.add_parser(
         "scout",
         help="enable scout",
+        parents=[_verbose_parent],
     )
     scout_parser.add_argument(
         "--force",
@@ -157,12 +188,14 @@ def _build_parser() -> argparse.ArgumentParser:
     spl_parser = service_parsers.add_parser(
         "spl",
         help="enable sol private link",
+        parents=[_verbose_parent],
     )
     spl_parser.set_defaults(handler=_enable_spl)
 
     disable_parser = subparsers.add_parser(
         "disable",
         help="disable an optional service",
+        parents=[_verbose_parent],
     )
     disable_service_parsers = disable_parser.add_subparsers(
         dest="service",
@@ -173,42 +206,72 @@ def _build_parser() -> argparse.ArgumentParser:
     disable_scout_parser = disable_service_parsers.add_parser(
         "scout",
         help="disable scout",
+        parents=[_verbose_parent],
     )
     disable_scout_parser.set_defaults(handler=_disable_scout)
     disable_spl_parser = disable_service_parsers.add_parser(
         "spl",
         help="disable sol private link",
+        parents=[_verbose_parent],
     )
     disable_spl_parser.set_defaults(handler=_disable_spl)
+
+    refresh_parser = subparsers.add_parser(
+        "refresh",
+        help="refresh optional service status",
+        parents=[_verbose_parent],
+    )
+    refresh_service_parsers = refresh_parser.add_subparsers(
+        dest="service",
+        metavar="{scout}",
+        title="services",
+        parser_class=_ServicesArgumentParser,
+    )
+    refresh_scout_parser = refresh_service_parsers.add_parser(
+        "scout",
+        help="refresh scout",
+        parents=[_verbose_parent],
+    )
+    refresh_scout_parser.add_argument(
+        "--wait",
+        type=_wait_seconds,
+        default=portal_client.DEFAULT_WAIT_SECONDS,
+        metavar="SECONDS",
+        help=(
+            "Owner-patience budget for the browser flow, clamped to 60-3600 seconds."
+        ),
+    )
+    refresh_scout_parser.set_defaults(handler=_refresh_scout)
     return parser
 
 
-def _is_headless() -> bool:
-    if os.environ.get("SSH_TTY"):
-        return True
-    return (
-        platform.system() == "Linux"
-        and not os.environ.get("DISPLAY")
-        and not os.environ.get("WAYLAND_DISPLAY")
-    )
-
-
 def _open_browser(url: str) -> bool:
-    return webbrowser.open(url, new=2)
+    try:
+        return bool(webbrowser.open(url, new=2))
+    except Exception as exc:
+        logger.warning("scout browser open failed: %s", exc)
+        return False
 
 
-def _print_device_code_instructions(url: str, code: str) -> None:
-    print(STDOUT_DEVICE_CODE_TEMPLATE.format(url=url, code=code))
-
-
-def _poll_handoff(base_url: str, nonce: str, wait_seconds: int) -> dict:
+def _poll_handoff(
+    base_url: str,
+    nonce: str,
+    wait_seconds: int,
+    *,
+    service: str = SERVICE_SCOUT,
+) -> dict:
     deadline = time.monotonic() + wait_seconds
     while time.monotonic() < deadline:
         timeout = min(
             portal_client.POLL_TIMEOUT_SECONDS,
             max(0.1, deadline - time.monotonic()),
         )
-        outcome = portal_client.poll_handoff_once(base_url, nonce, timeout=timeout)
+        outcome = portal_client.poll_handoff_once(
+            base_url,
+            nonce,
+            timeout=timeout,
+            service=service,
+        )
         if outcome.kind == "success":
             return outcome.payload or {}
         if outcome.kind == "continue":
@@ -220,18 +283,23 @@ def _poll_handoff(base_url: str, nonce: str, wait_seconds: int) -> dict:
     raise _CliError("consent_timeout")
 
 
-def _enable_scout_device_code(base_url: str, wait_seconds: int) -> None:
-    outcome = portal_client.mint_device_code(base_url)
-    if outcome.kind == "failed":
-        raise _CliError(outcome.reason or "unexpected_payload")
-    if not outcome.nonce or not outcome.code:
-        raise _CliError("unexpected_payload")
-    _print_device_code_instructions(
-        portal_client.device_code_entry_url(base_url),
-        outcome.code,
-    )
-    payload = _poll_handoff(base_url, outcome.nonce, wait_seconds)
-    scout.provision_scout_handoff(payload)
+def _apply_handoff(payload: dict) -> str:
+    """Interpret a portal handoff payload by state and apply it.
+
+    Returns the STDOUT message; raises _CliError for known bad-payload tokens.
+    """
+
+    try:
+        result = scout.apply_scout_state(payload)
+    except scout.ScoutPayloadError as exc:
+        raise _CliError(exc.token, exc.detail) from exc
+    if result.kind == "approved":
+        return STDOUT_SUCCESS
+    if result.kind == "pending":
+        return STDOUT_PENDING.format(since=_format_since(result.since))
+    if result.env_key_preserved:
+        return STDOUT_REVOKED_PRESERVED_MANUAL_KEY
+    return STDOUT_REVOKED
 
 
 def _enable_scout(args: argparse.Namespace) -> int:
@@ -249,32 +317,73 @@ def _enable_scout(args: argparse.Namespace) -> int:
 
     base_url = portal_client.portal_base_url()
     try:
-        if _is_headless():
-            _enable_scout_device_code(base_url, args.wait)
-        else:
-            nonce = portal_client.mint_nonce()
-            browser_url = portal_client.browser_url(base_url, nonce)
-            print(STDOUT_OPENING)
-            if _open_browser(browser_url):
-                print(STDOUT_WAITING)
-                payload = _poll_handoff(base_url, nonce, args.wait)
-                scout.provision_scout_handoff(payload)
-            else:
-                _enable_scout_device_code(base_url, args.wait)
+        nonce = portal_client.mint_nonce()
+        browser_url = portal_client.browser_url(
+            base_url,
+            nonce,
+            service=SERVICE_SCOUT,
+        )
+        print(STDOUT_LINK_TEMPLATE.format(url=browser_url))
+        if _open_browser(browser_url):
+            print(STDOUT_OPENED_BROWSER)
+        print(STDOUT_WAITING)
+        payload = _poll_handoff(
+            base_url,
+            nonce,
+            args.wait,
+            service=SERVICE_SCOUT,
+        )
+        message = _apply_handoff(payload)
     except _CliError as exc:
-        _print_error(exc.token)
+        _print_error(exc.token, exc.detail)
         return EXIT_CODES.get(exc.token, 1)
     except scout.JournalNotInitializedError:
         _print_error("journal_not_initialized")
         return 1
-    except ValueError:
-        _print_error("unexpected_payload")
-        return 1
-    except Exception:
-        _print_error("write_failed")
+    except Exception as exc:
+        _print_error("write_failed", str(exc))
         return 1
 
-    print(STDOUT_SUCCESS)
+    print(message)
+    return 0
+
+
+def _refresh_scout(args: argparse.Namespace) -> int:
+    if not get_journal_config_path().exists():
+        _print_error("journal_not_initialized")
+        return 1
+
+    base_url = portal_client.portal_base_url()
+    try:
+        nonce = portal_client.mint_nonce()
+        browser_url = portal_client.browser_url(
+            base_url,
+            nonce,
+            service=SERVICE_SCOUT,
+        )
+        print(STDOUT_LINK_TEMPLATE.format(url=browser_url))
+        if _open_browser(browser_url):
+            print(STDOUT_OPENED_BROWSER)
+        print(STDOUT_WAITING)
+        payload = _poll_handoff(
+            base_url,
+            nonce,
+            args.wait,
+            service=SERVICE_SCOUT,
+        )
+        message = _apply_handoff(payload)
+    except _CliError as exc:
+        _print_error(exc.token, exc.detail)
+        return EXIT_CODES.get(exc.token, 1)
+    except scout.JournalNotInitializedError:
+        _print_error("journal_not_initialized")
+        return 1
+    except Exception as exc:
+        _print_error("write_failed", str(exc))
+        return 1
+
+    print(STDOUT_REFRESH)
+    print(message)
     return 0
 
 
@@ -347,6 +456,8 @@ def _disable_spl(_args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    if getattr(args, "verbose", False):
+        logging.basicConfig(level=logging.DEBUG)
     if not hasattr(args, "handler"):
         parser.print_help()
         return 0

@@ -5,7 +5,7 @@ This file is the **developer guide** for the solstone repository. Read it before
 Audience:
 
 - **Coders** (cwd = repo root, editing `solstone/observe/`, `solstone/think/`, `solstone/convey/`, `solstone/apps/`, `solstone/talent/`, `tests/`) — you're in the right place.
-- **Cogitate talents** (cwd = `journal/`, running inside the live system) — your entry is `solstone/talent/journal/SKILL.md`, installed into `journal/.claude/skills/journal/` and `journal/.agents/skills/journal/`.
+- **Cogitate talents** (cwd = `journal/`, running inside the live system) — your journal-side entry is `solstone/talent/journal/SKILL.md`, installed into `journal/.claude/skills/journal/` and `journal/.agents/skills/journal/` alongside the `sol` router skill. The runtime contract you operate under — tools, reads vs writes, finalization, access tiers, and what is *not* in your context — is `docs/COGITATE.md`.
 - **Operators** debugging a running system — see `docs/DOCTOR.md`.
 
 For the journal-side runtime entry point, see `journal/AGENTS.md`.
@@ -35,10 +35,10 @@ Read, in order, when you enter the repo for a coding task:
 |-----|---------|--------------|-----------|
 | `solstone/think/sol_cli.py` | CLI entry point — `COMMANDS` / `ALIASES` / `GROUPS` dicts | adding a top-level `sol <cmd>` | `docs/SOLCLI.md` |
 | `solstone/observe/` | Multimodal capture — screen, audio, transcribe, describe, sense, transfer | capture-side bugs, new input modalities | `docs/OBSERVE.md` |
-| `solstone/think/` | Post-processing core — cortex, talent, callosum, indexer, entities, facets, activities, scheduler, heartbeat, supervisor | anything downstream of capture; most coder work lives here | `docs/THINK.md`, `docs/CORTEX.md`, `docs/CALLOSUM.md` |
+| `solstone/think/` | Post-processing core — cortex, talent, callosum, indexer, entities, facets, activities, scheduler, heartbeat, supervisor | anything downstream of capture; most coder work lives here | `docs/THINK.md`, `docs/CORTEX.md`, `docs/COGITATE.md`, `docs/CALLOSUM.md` |
 | `solstone/convey/` | Web app framework — app discovery, routing, bridge | layout / framework-level UI changes | `docs/CONVEY.md` |
 | `solstone/apps/` | Convey apps — each self-contained (`call.py` Typer sub-app + `routes.py` + `templates/`) | adding a user-facing feature, a `sol call <app>` verb, a UI surface | `docs/APPS.md` (required reading before modifying `solstone/apps/`) |
-| `solstone/talent/` | AI talent configs (markdown prompts + optional `.py` post-hooks) + `SKILL.md`s (journal, partner, …) | defining or tuning a talent; adding a journal-side skill | `solstone/talent/journal/SKILL.md`, `docs/PROMPT_TEMPLATES.md` |
+| `solstone/talent/` | AI talent configs (markdown prompts + optional `.py` post-hooks) + installed router skills (`sol`, `journal`); app fragments feed generated router references | defining or tuning a talent; updating router guidance | `solstone/talent/journal/SKILL.md`, `docs/PROMPT_TEMPLATES.md` |
 | `scripts/` | Repo maintenance scripts — `check_layer_hygiene.py` | tooling that guards the codebase; wired into `make ci` | (none) |
 | `tests/` | Pytest suites + `tests/fixtures/journal/` mock journal | writing tests; debugging flakiness; `make dev` / `make sandbox` use fixtures as the journal | `docs/testing.md` |
 | `docs/` | All longform documentation | reference lookups; never your first stop | §10 below |
@@ -88,7 +88,7 @@ Verified against `Makefile`. Grouped by use.
 | Target | When to use |
 |--------|-------------|
 | `make install` | First setup and whenever `pyproject.toml` or `uv.lock` changes. Creates `.venv/`, syncs deps, runs `make skills`. |
-| `make skills` | After adding or renaming a `SKILL.md` under `solstone/talent/` or `solstone/apps/*/talent/`. Rewrites the `.claude/` + `.agents/` skill symlinks into `journal/`. (`make install` depends on this; rarely run alone.) |
+| `make skills` | Regenerate generated router references, then rewrite the `sol` + `journal` router skill symlinks into `journal/`. (`make install` depends on this; rarely run alone.) |
 | `make update` | Upgrade all deps to latest, regenerate `uv.lock`. Expect test churn. |
 | `make update-prices` | Refresh genai-prices model-cost data when adding a new provider model or when pricing tests fail. |
 | `make clean` | Remove build artifacts, caches, and the skill symlinks. Does not touch `.venv/`. |
@@ -125,10 +125,6 @@ Verified against `Makefile`. Grouped by use.
 |--------|-------------|
 | `make verify-api` | Start a sandbox, run `tests/verify_api.py` against its convey port, stop the sandbox. API-regression check. |
 | `make update-api-baselines` | Same, but update the baseline fixtures instead of failing on diff. Run after intentional API changes. |
-| `make verify-browser` | Start a sandbox, run `tests/verify_browser.py` (pinchtab-driven browser scenarios), stop the sandbox. UI-regression check. |
-| `make update-browser-baselines` | Browser-baselines equivalent of `update-api-baselines`. |
-| `make review` | Full product verification: sandbox + API verify + browser verify, in one command. Pre-ship gate for anything user-visible. Requires pinchtab. |
-| `make install-pinchtab` | One-time install of the pinchtab browser driver used by `make review` / `make verify-browser`. |
 
 ### Service management (systemd / launchd)
 
@@ -157,7 +153,7 @@ Verified against `Makefile`. Grouped by use.
 - **Fixture journal:** `tests/fixtures/journal/` — a complete mock journal with facets, entities, segments, index state. The autouse `set_test_journal_path` fixture in `tests/conftest.py` sets `SOLSTONE_JOURNAL` to this path for unit tests. Individual tests may override it with `monkeypatch.setenv` when they need an isolated tmp journal (see §8).
 - **Run one test:** `make test-only TEST=tests/test_utils.py::test_foo` or `TEST="-k test_foo"`. **One app:** `make test-app APP=<name>`.
 - **`make test` runs everything** — `tests/` and every `solstone/apps/*/tests/` in one parallel run. App tests are not a separate step.
-- **All tests are fast unit/component tests** — no real browser, no live network, no API keys. There is no integration/e2e test tier; tests that would need those were removed in favor of live verification via `make sandbox` / `make verify-browser`.
+- **All tests are fast unit/component tests** — no real browser, no live network, no API keys. There is no integration/e2e test tier; tests that would need those were removed in favor of live verification via `make sandbox`.
 - **After editing `solstone/convey/` or `solstone/apps/`:** `journal restart-convey` to reload code in a running stack.
 - **`make dev` + `make sandbox`** both write runtime artifacts into the fixtures journal; `tests/fixtures/journal/.gitignore` covers those — never commit them.
 - **Test invariants, not snapshots.** A test asserts what must hold in *every* valid state of the system — not what happens to be true today. Never pin a test to hand-edited prose (CHANGELOG / README / docs), to a value the system is *designed* to change (a version, a date, a growing count), or to a transient state. The tell: if doing the correct next thing — cut a release, rename a label, graduate a shipped changelog entry — turns the test red, the test is wrong, not the system. And test the code that *produces* a fact, never the rendered text about it. (A `[Unreleased]`-pinned changelog test was exactly this anti-pattern — its pass condition required the release process to *not* run; removed 2026-05-30.)
@@ -180,16 +176,47 @@ Each domain has exactly **one** write-owning module (or one tightly-scoped famil
 
 | Domain | Write-owning module(s) |
 |--------|------------------------|
-| Entities (`entities/*/entity.json`, `entities/*/*.npz`) | `solstone/think/entities/journal.py` + `solstone/think/entities/consolidation.py` + `solstone/think/entities/saving.py` + `solstone/think/entities/merge.py` + `solstone/apps/entities/call.py` |
-| Entity merge candidates (`entities/review-candidates.jsonl`) | `solstone/think/entities/review_candidates.py` + `solstone/apps/entities/call.py` |
+| Entities (`entities/*/entity.json`, `entities/*/*.npz`) | `solstone/think/entities/journal.py` + `solstone/think/entities/relationships.py` + `solstone/think/entities/consolidation.py` + `solstone/think/entities/saving.py` + `solstone/think/entities/merge.py` + `solstone/think/entities/voiceprints.py` + `solstone/apps/speakers/owner.py` + `solstone/apps/speakers/routes.py` |
+| Owner voice candidate (`awareness/owner_candidate.npz`) | `solstone/apps/speakers/owner.py` |
+| Speaker discovery clusters (`awareness/discovery_clusters.json`, `awareness/discovery_clusters.resolved.json`) | `solstone/apps/speakers/discovery.py` |
+| Speaker candidate pool (`awareness/speaker_candidates.json`) | `solstone/apps/speakers/candidate_tracker.py` |
+| Entity merge candidates (`entities/review-candidates.jsonl`) | `solstone/think/entities/review_candidates.py` |
 | Facet review candidates (`facets/review-candidates.jsonl`) | `solstone/think/facet_review_candidates.py` |
+| Speaker review candidates (`speakers/review-candidates.jsonl`) | `solstone/think/speaker_review_candidates.py` |
 | Facets (`facets/*/facet.json`, `facets/*/relationships/`) | `solstone/think/facets.py` + `solstone/apps/facets/*` (if/when created) |
 | Observations (`observations.jsonl`) | `solstone/think/entities/observations.py` |
 | Activities (`facets/*/activities/*.jsonl`) | `solstone/think/activities.py` |
+| Timeline (`chronicle/<day>/timeline.json`, `chronicle/**/<seg>/timeline.json`, root `timeline.json`) | `solstone/apps/timeline/maintenance.py` + `solstone/apps/timeline/talent/segment_summary.py` |
+| Per-segment sense outputs (`chronicle/**/<seg>/talents/{sense.json,facets.json,speakers.json,density.json,activity.md,sense.md}`) | `solstone/think/sense_splitter.py` |
+| Awareness (`awareness/current.json`, `awareness/YYYYMMDD.jsonl`) | `solstone/think/awareness.py` |
+| Awareness activity state (`awareness/activity_state.json`) | `solstone/think/thinking.py` |
+| Identity (`identity/*.md`, `identity/history.jsonl` audit log) | `solstone/think/identity.py` |
+| Todos (`facets/*/todos/*.jsonl`) | `solstone/apps/todos/todo.py` |
+| Chronicle chat stream (`chronicle/**/chat/<seg>/chat.jsonl`) | `solstone/convey/chat_stream.py` |
+| Day talent-output accumulator (`chronicle/<day>/talents/<name>.jsonl`) | `solstone/think/day_accumulator.py` |
+| Config (`config/journal.json`) | `solstone/think/journal_config.py` |
+| Schedules (`config/schedules.json`) | `solstone/think/schedule_config.py` |
+| Push devices (`config/push_devices.json`) | `solstone/think/push/devices.py` |
+| Convey config (`config/convey.json`) | `solstone/convey/config.py` + `solstone/think/facets.py` |
+| Chat config (`config/chat.json`) | `solstone/apps/chat/config.py` |
+| Vertex credentials (`.config/vertex-credentials.json`) | `solstone/apps/settings/vertex_credentials.py` |
+| Speaker labels (`chronicle/**/talents/speaker_labels.json`) | `solstone/apps/speakers/attribution.py` |
+| Speaker corrections (`chronicle/**/talents/speaker_corrections.json`) | `solstone/apps/speakers/attribution.py` |
+| Stream identity (`chronicle/**/<seg>/stream.json` marker + `streams/<name>.json` state) | `solstone/think/streams.py` |
+| Link service state (`link/ca/cert.pem`, `link/ca/private.pem`, `link/nonces.json`, `link/authorized_clients.json`, `link/state.json`, `link/tokens/account.json`, `link/totp.json`) | `solstone/think/link/ca.py` + `solstone/think/link/nonces.py` + `solstone/think/link/auth.py` + `solstone/think/link/paths.py` |
 | Chronicle day content (`chronicle/YYYYMMDD/**`) | The capturing module (observer, importer) per its declared outputs |
 | Index (SQLite, `indexer/*`) | `solstone/think/indexer/*` |
+| Observer registry and sync history (`apps/observer/observers/*.json`, `apps/observer/observers/*/hist/*.jsonl`) | `solstone/apps/observer/utils.py` |
+| Import ingest/resolve staging (`imports/**`) | `solstone/apps/import/ingest.py` + `solstone/apps/import/resolve.py` + `solstone/apps/import/facet_ingest.py` + `solstone/apps/import/journal_sources.py` — HTTP-ingest + resolve staging state, plus the remote-ingest bundle under `imports/<id>/`. `journal_sources.py` owns only its `create_state_directory` `imports/` initializers; its source registry is app-storage. Import-bundle and sync-cursor content under `imports/<id>/` and `imports/<backend>.json` is written by `solstone/think/importers/{utils,cli,shared,sync}.py` (local/CLI import flows + sync cursor), and `solstone/think/importers/plaud.py` installs streamed imported audio onto `imports/<id>/<name>` via journal_io's `install_file` primitive, as importer declared outputs (L7). |
 
 If you're about to write to a domain from a module not in this table, stop and route through the owner.
+
+**`sol call <app> <verb>` handlers are pure Convey HTTP clients.** Each
+journal-data `solstone/apps/*/call.py` reaches the journal only over the Convey
+HTTP client (`solstone.think.convey_client`) — never importing a journal/domain
+module or touching the filesystem directly. `scripts/check_call_http_only.py`
+enforces this for every journal-data `call.py` with no documented exceptions:
+the gate's excluded-file set and its allowlist are both empty.
 
 ### L3 — Naming is a contract
 
@@ -282,6 +309,7 @@ Bare links don't motivate clicking. Each entry below says when you actually need
 | `docs/APPS.md` | **Required before modifying `solstone/apps/`** — pattern catalog for Convey apps, hook-idempotency guidance, Typer sub-app conventions, `maint` commands for data migrations |
 | `docs/THINK.md` | Understanding the think-layer pipeline (importers, indexer, segment/stream processing) |
 | `docs/CORTEX.md` | Modifying talent execution, cortex lifecycle, talent process management |
+| `docs/COGITATE.md` | The cogitate talent runtime contract — cwd/workspace, the `sol`-CLI-authoritative journal access, raw-read bound, access tiers, finalization, disallowed assumptions, and the in-context preamble constant. Read before authoring/editing a talent prompt. |
 | `docs/CALLOSUM.md` | Adding a new tract/event, debugging message flow |
 | `docs/CONVEY.md` | Framework-level web changes (as opposed to an individual app) |
 | `docs/OBSERVE.md` | Capture-side work: new modalities, transcription, sensing |

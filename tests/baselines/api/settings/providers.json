@@ -1,4 +1,106 @@
 {
+  "ai_readiness": {
+    "groups": [
+      {
+        "context": null,
+        "detail": "Open provider setup and add credentials, then try again.",
+        "interface": "cogitate",
+        "model": "gpt-5.4-mini",
+        "operator_detail": "reason_code=provider_key_missing; provider=openai; status=blocked; model=gpt-5.4-mini; interface=cogitate; message=OPENAI_API_KEY not set",
+        "provider": "openai",
+        "reason_code": "provider_key_missing",
+        "recovery_action": {
+          "href": "/app/settings/#providers",
+          "label": "Open Settings"
+        },
+        "semantic_key": "provider_key_missing:openai:",
+        "severity": "blocker",
+        "status": "blocked",
+        "summary": "OpenAI needs credentials before it can read your screen descriptions",
+        "work_key": null
+      },
+      {
+        "context": null,
+        "detail": "Open provider setup and add credentials, then try again.",
+        "interface": "generate",
+        "model": "gemini-custom-flash-test",
+        "operator_detail": "reason_code=provider_key_missing; provider=google; status=blocked; model=gemini-custom-flash-test; interface=generate; message=GOOGLE_API_KEY not set",
+        "provider": "google",
+        "reason_code": "provider_key_missing",
+        "recovery_action": {
+          "href": "/app/settings/#providers",
+          "label": "Open Settings"
+        },
+        "semantic_key": "provider_key_missing:google:",
+        "severity": "blocker",
+        "status": "blocked",
+        "summary": "Gemini needs credentials before it can read your screen descriptions",
+        "work_key": null
+      }
+    ],
+    "interfaces": {
+      "cogitate": {
+        "context": null,
+        "detail": "Open provider setup and add credentials, then try again.",
+        "interface": "cogitate",
+        "model": "gpt-5.4-mini",
+        "operator_detail": "reason_code=provider_key_missing; provider=openai; status=blocked; model=gpt-5.4-mini; interface=cogitate; message=OPENAI_API_KEY not set",
+        "provider": "openai",
+        "reason_code": "provider_key_missing",
+        "recovery_action": {
+          "href": "/app/settings/#providers",
+          "label": "Open Settings"
+        },
+        "semantic_key": "provider_key_missing:openai:",
+        "severity": "blocker",
+        "status": "blocked",
+        "summary": "OpenAI needs credentials before it can read your screen descriptions",
+        "work_key": null
+      },
+      "generate": {
+        "context": null,
+        "detail": "Open provider setup and add credentials, then try again.",
+        "interface": "generate",
+        "model": "gemini-custom-flash-test",
+        "operator_detail": "reason_code=provider_key_missing; provider=google; status=blocked; model=gemini-custom-flash-test; interface=generate; message=GOOGLE_API_KEY not set",
+        "provider": "google",
+        "reason_code": "provider_key_missing",
+        "recovery_action": {
+          "href": "/app/settings/#providers",
+          "label": "Open Settings"
+        },
+        "semantic_key": "provider_key_missing:google:",
+        "severity": "blocker",
+        "status": "blocked",
+        "summary": "Gemini needs credentials before it can read your screen descriptions",
+        "work_key": null
+      }
+    },
+    "local": {
+      "context": null,
+      "detail": "Finish local model setup, then try the request again.",
+      "interface": "generate",
+      "model": "local/qwen3.5-4b",
+      "operator_detail": "reason_code=local_model_missing; provider=local; status=blocked; model=local/qwen3.5-4b; interface=generate",
+      "provider": "local",
+      "reason_code": "local_model_missing",
+      "recovery_action": {
+        "href": "/app/settings/#providers",
+        "label": "Open Local Model Setup"
+      },
+      "semantic_key": "local_model_missing:local:local/qwen3.5-4b",
+      "severity": "blocker",
+      "status": "blocked",
+      "summary": "local model setup is not finished",
+      "work_key": null
+    },
+    "summary": {
+      "active_groups": 2,
+      "blocked_count": 2,
+      "severity": "blocker",
+      "status": "blocked"
+    }
+  },
   "api_keys": {
     "anthropic": false,
     "google": false,
@@ -132,7 +234,7 @@
       "group": "Entities",
       "label": "Entity Description",
       "tier": 2,
-      "type": "cogitate"
+      "type": "generate"
     },
     "talent.entities.entity_observer": {
       "disabled": false,
@@ -142,62 +244,10 @@
       "tier": 2,
       "type": "generate"
     },
-    "talent.import.review": {
-      "disabled": false,
-      "group": "Import",
-      "label": "Import Review",
-      "tier": 2,
-      "type": "cogitate"
-    },
-    "talent.import.review_config": {
-      "disabled": false,
-      "group": "Import",
-      "label": "Import Config Reviewer",
-      "tier": 2,
-      "type": "cogitate"
-    },
-    "talent.import.review_entities": {
-      "disabled": false,
-      "group": "Import",
-      "label": "Import Entity Reviewer",
-      "tier": 2,
-      "type": "cogitate"
-    },
-    "talent.import.review_facets": {
-      "disabled": false,
-      "group": "Import",
-      "label": "Import Facet Reviewer",
-      "tier": 2,
-      "type": "cogitate"
-    },
-    "talent.skills.skill_editor": {
-      "disabled": false,
-      "group": "Think",
-      "label": "Skill Editor",
-      "schedule": "daily",
-      "tier": 2,
-      "type": "generate"
-    },
-    "talent.skills.skill_observer": {
-      "disabled": false,
-      "group": "Skills",
-      "label": "Skill Observer",
-      "schedule": "daily",
-      "tier": 2,
-      "type": "cogitate"
-    },
     "talent.support.support": {
       "disabled": false,
       "group": "Think",
       "label": "Support",
-      "tier": 2,
-      "type": "cogitate"
-    },
-    "talent.system.awareness_tender": {
-      "disabled": false,
-      "group": "Think",
-      "label": "Awareness Tender",
-      "schedule": "segment",
       "tier": 2,
       "type": "cogitate"
     },
@@ -223,14 +273,6 @@
       "schedule": "daily",
       "tier": 2,
       "type": "generate"
-    },
-    "talent.system.digest": {
-      "disabled": false,
-      "group": "Think",
-      "label": "Digest",
-      "schedule": "none",
-      "tier": 2,
-      "type": "cogitate"
     },
     "talent.system.documents": {
       "disabled": false,
@@ -269,15 +311,7 @@
       "label": "Facet Newsletter Generator",
       "schedule": "daily",
       "tier": 2,
-      "type": "cogitate"
-    },
-    "talent.system.heartbeat": {
-      "disabled": false,
-      "group": "Think",
-      "label": "Heartbeat",
-      "schedule": "none",
-      "tier": 2,
-      "type": "cogitate"
+      "type": "generate"
     },
     "talent.system.morning_briefing": {
       "disabled": false,
@@ -285,14 +319,7 @@
       "label": "Morning Briefing",
       "schedule": "daily",
       "tier": 2,
-      "type": "cogitate"
-    },
-    "talent.system.naming": {
-      "disabled": false,
-      "group": "Think",
-      "label": "Naming",
-      "tier": 2,
-      "type": "cogitate"
+      "type": "generate"
     },
     "talent.system.participation": {
       "disabled": false,
@@ -314,22 +341,14 @@
       "disabled": false,
       "group": "Think",
       "label": "Pulse",
-      "schedule": "segment",
-      "tier": 2,
-      "type": "cogitate"
+      "schedule": "cadence",
+      "tier": 3,
+      "type": "generate"
     },
-    "talent.system.reflection": {
+    "talent.system.read": {
       "disabled": false,
       "group": "Think",
-      "label": "Reflection",
-      "tier": 2,
-      "type": "cogitate"
-    },
-    "talent.system.routine": {
-      "disabled": false,
-      "group": "Think",
-      "label": "Routine",
-      "schedule": "none",
+      "label": "Read",
       "tier": 2,
       "type": "cogitate"
     },
@@ -369,9 +388,9 @@
       "disabled": false,
       "group": "Think",
       "label": "Steward",
-      "schedule": "daily",
-      "tier": 2,
-      "type": "cogitate"
+      "schedule": "cadence",
+      "tier": 3,
+      "type": "generate"
     },
     "talent.system.weekly_reflection": {
       "disabled": false,
@@ -396,29 +415,6 @@
       "schedule": "segment",
       "tier": 3,
       "type": "generate"
-    },
-    "talent.todos.daily": {
-      "disabled": false,
-      "group": "Todos",
-      "label": "Daily TODO Curator",
-      "schedule": "daily",
-      "tier": 2,
-      "type": "cogitate"
-    },
-    "talent.todos.todo": {
-      "disabled": false,
-      "group": "Todos",
-      "label": "TODO Detector",
-      "schedule": "activity",
-      "tier": 2,
-      "type": "cogitate"
-    },
-    "talent.todos.weekly": {
-      "disabled": false,
-      "group": "Todos",
-      "label": "TODO Weekly Scout",
-      "tier": 2,
-      "type": "cogitate"
     }
   },
   "contexts": {
@@ -470,6 +466,7 @@
     "progress_bytes_received": null,
     "progress_bytes_total": null
   },
+  "local_backend": "local",
   "provider_status": {
     "anthropic": {
       "cogitate_ready": false,

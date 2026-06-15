@@ -181,7 +181,8 @@ def _patch_minimal_pulse_context(monkeypatch, pipeline_status):
         "solstone.apps.home.routes._load_flow_md", lambda today: (None, None)
     )
     monkeypatch.setattr(
-        "solstone.apps.home.routes._load_pulse_md", lambda: (None, None, [])
+        "solstone.apps.home.routes._load_pulse_narrative",
+        lambda today: (None, None, []),
     )
     monkeypatch.setattr(
         "solstone.apps.home.routes._load_briefing_md", lambda today: ({}, None, [])
@@ -192,12 +193,13 @@ def _patch_minimal_pulse_context(monkeypatch, pipeline_status):
     monkeypatch.setattr(
         "solstone.apps.home.routes._collect_activities", lambda today: []
     )
-    monkeypatch.setattr("solstone.apps.home.routes._collect_todos", lambda today: [])
-    monkeypatch.setattr("solstone.apps.home.routes._collect_routines", lambda: [])
-    monkeypatch.setattr("solstone.apps.home.routes._collect_skills", lambda: [])
     monkeypatch.setattr(
         "solstone.apps.home.routes.read_steward_health",
         lambda: pipeline_status,
+    )
+    monkeypatch.setattr(
+        "solstone.apps.home.routes.read_steward_summary",
+        lambda *a, **k: None,
     )
     monkeypatch.setattr(
         "solstone.apps.home.routes._summarize_yesterday_processing",
@@ -650,7 +652,8 @@ def test_build_pulse_context_includes_yesterday_processing(monkeypatch):
         "solstone.apps.home.routes._load_flow_md", lambda today: (None, None)
     )
     monkeypatch.setattr(
-        "solstone.apps.home.routes._load_pulse_md", lambda: (None, None, [])
+        "solstone.apps.home.routes._load_pulse_narrative",
+        lambda today: (None, None, []),
     )
     monkeypatch.setattr(
         "solstone.apps.home.routes._load_briefing_md", lambda today: ({}, None, [])
@@ -661,9 +664,6 @@ def test_build_pulse_context_includes_yesterday_processing(monkeypatch):
     monkeypatch.setattr(
         "solstone.apps.home.routes._collect_activities", lambda today: []
     )
-    monkeypatch.setattr("solstone.apps.home.routes._collect_todos", lambda today: [])
-    monkeypatch.setattr("solstone.apps.home.routes._collect_routines", lambda: [])
-    monkeypatch.setattr("solstone.apps.home.routes._collect_skills", lambda: [])
     monkeypatch.setattr("solstone.apps.home.routes.read_steward_health", lambda: None)
     monkeypatch.setattr(
         "solstone.apps.home.routes._summarize_yesterday_processing",
@@ -699,3 +699,26 @@ def test_build_pulse_context_pipeline_status_surfaces_steward_warning(monkeypatc
     ctx = _build_pulse_context()
 
     assert ctx["pipeline_status"] == status
+
+
+def test_build_pulse_context_pipeline_status_enriched_with_summary(monkeypatch):
+    status = {"status": "warning", "message": "Foo bar"}
+    _patch_minimal_pulse_context(monkeypatch, status)
+    monkeypatch.setattr(
+        "solstone.apps.home.routes.read_steward_summary",
+        lambda *a, **k: {
+            "headline": "Pipeline gap",
+            "summary_sentence": "Two segments awaiting thinking.",
+            "suggested_action": "open_health_detail",
+        },
+    )
+
+    ctx = _build_pulse_context()
+
+    assert ctx["pipeline_status"]["headline"] == "Pipeline gap"
+    assert (
+        ctx["pipeline_status"]["summary_sentence"] == "Two segments awaiting thinking."
+    )
+    assert ctx["pipeline_status"]["suggested_action"] == "open_health_detail"
+    # The deterministic warning signal is preserved.
+    assert ctx["pipeline_status"]["message"] == "Foo bar"

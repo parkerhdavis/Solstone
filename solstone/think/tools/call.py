@@ -44,6 +44,7 @@ from solstone.think.importers.utils import (
 )
 from solstone.think.indexer.journal import search_counts as search_counts_impl
 from solstone.think.indexer.journal import search_journal as search_journal_impl
+from solstone.think.journal_config import write_journal_config
 from solstone.think.utils import (
     day_path,
     get_journal,
@@ -356,7 +357,7 @@ def delete(
     if not yes:
         typer.echo(
             f"This will permanently delete facet '{name}' and all its data "
-            "(entities, todos, events, logs, news).\n"
+            "(entities, events, logs, news).\n"
             "Use --yes to confirm."
         )
         raise typer.Exit(1)
@@ -380,7 +381,6 @@ def merge(
     ),
 ) -> None:
     """Merge all data from SOURCE facet into DEST facet, then delete SOURCE."""
-    from solstone.apps.todos import todo as todo_module
     from solstone.think.entities.observations import (
         load_observations,
         save_observations,
@@ -407,15 +407,6 @@ def merge(
 
     entity_slugs = scan_facet_relationships(source)
 
-    open_todos: list[tuple[str, int, todo_module.TodoItem]] = []
-    todos_dir = src_path / "todos"
-    if todos_dir.is_dir():
-        for todo_file in sorted(todos_dir.glob("*.jsonl")):
-            checklist = todo_module.TodoChecklist.load(todo_file.stem, source)
-            for item in checklist.items:
-                if not item.completed and not item.cancelled:
-                    open_todos.append((todo_file.stem, item.index, item))
-
     news_to_copy: list[tuple[Path, Path]] = []
     src_news_dir = src_path / "news"
     dst_news_dir = dst_path / "news"
@@ -427,8 +418,8 @@ def merge(
 
     typer.echo(
         f"Merging '{source}' into '{dest}': "
-        f"{len(entity_slugs)} entities, {len(open_todos)} open todos, "
-        f"{len(news_to_copy)} news files. This cannot be undone. Proceeding..."
+        f"{len(entity_slugs)} entities, {len(news_to_copy)} news files. "
+        "This cannot be undone. Proceeding..."
     )
 
     for entity_id in entity_slugs:
@@ -459,35 +450,6 @@ def merge(
             dst_dir.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(src_dir), str(dst_dir))
 
-    for day, line_number, item in open_todos:
-        captured_item = item
-
-        def _append_todo(
-            checklist: todo_module.TodoChecklist,
-        ) -> tuple[todo_module.TodoChecklist, todo_module.TodoItem]:
-            new_item = checklist.append_entry(
-                captured_item.text,
-                captured_item.nudge,
-                created_at=captured_item.created_at,
-            )
-            return checklist, new_item
-
-        captured_line_number = line_number
-        captured_dest = dest
-
-        def _cancel_todo(
-            checklist: todo_module.TodoChecklist,
-        ) -> tuple[todo_module.TodoChecklist, todo_module.TodoItem]:
-            cancelled_item = checklist.cancel_entry(
-                captured_line_number,
-                cancelled_reason="moved_to_facet",
-                moved_to=captured_dest,
-            )
-            return checklist, cancelled_item
-
-        todo_module.TodoChecklist.locked_modify(day, dest, _append_todo)
-        todo_module.TodoChecklist.locked_modify(day, source, _cancel_todo)
-
     if news_to_copy:
         dst_news_dir.mkdir(parents=True, exist_ok=True)
     for src_file, dest_file in news_to_copy:
@@ -497,7 +459,6 @@ def merge(
         "source": source,
         "dest": dest,
         "entity_count": len(entity_slugs),
-        "todo_count": len(open_todos),
         "news_count": len(news_to_copy),
     }
     if consent:
@@ -953,10 +914,8 @@ def config(
     ),
 ) -> None:
     """Show or update retention configuration."""
-    import os
-
     from solstone.think.retention import load_retention_config
-    from solstone.think.utils import get_config, get_journal
+    from solstone.think.utils import get_config
 
     if mode is None and days is None and not clear:
         cfg = load_retention_config()
@@ -1027,14 +986,7 @@ def config(
             params={"mode": mode, "days": days},
         )
 
-    config_dir = Path(get_journal()) / "config"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    config_path = config_dir / "journal.json"
-
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(journal_config, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-    os.chmod(config_path, 0o600)
+    write_journal_config(journal_config)
 
     cfg = load_retention_config()
     result = {

@@ -12,22 +12,15 @@ $facets
 # Partner Profile
 
 You are updating sol's partner profile — a behavioral model of the journal owner
-built from observed patterns. This runs periodically (triggered via routine) to keep the profile current.
+built from observed patterns. This runs on a weekly cadence to keep the profile current.
 
 This is not a conversation. Gather data, observe patterns, update the profile, then call `emit_final`.
 
 ## Step 1: Read current state
 
-```bash
-journal identity partner
-```
+Read `identity/partner.md` with the `read_file` tool.
 
 Note which sections have real observations vs `[observing]` placeholders.
-Also read your own identity for context:
-
-```bash
-journal identity self
-```
 
 ## Step 2: Gather recent data
 
@@ -36,7 +29,6 @@ and query each source. If a source returns empty or errors, skip it — gaps are
 
 1. For each of the past 7 days:
    - `sol call activities list --source anticipated --day YYYYMMDD` — scheduled activity patterns
-   - `sol call todos list -d YYYYMMDD` — task patterns
 2. For each active facet (from `sol call journal facets`):
    - `sol call journal news FACET --day YYYYMMDD` (most recent day available) — work themes
 3. `sol call journal search "" --day-from YYYYMMDD -a pulse -n 10` — pulse narratives for behavioral patterns
@@ -46,18 +38,19 @@ and query each source. If a source returns empty or errors, skip it — gaps are
 
 For each of the five profile sections, analyze the gathered data and write
 observations if you have sufficient evidence. Use `journal identity partner --update-section`
-for each section you update.
+for each section you update — it is the owned write command for `partner.md`
+(there is no `sol call` verb for it yet).
 
 ### Section guidance
 
 **work patterns** — When do they work? How do they structure their day? Do they
 batch meetings or spread them out? Do they context-switch frequently or deep-focus?
-What times are they most active? Evidence: calendar density, todo completion timing,
-segment activity patterns.
+What times are they most active? Evidence: calendar density, segment activity patterns,
+and pulse/news timing.
 
 **communication style** — How do they express themselves? Brief or detailed? Do they
-prefer async (todos, notes) or sync (meetings, calls)? How do they frame requests
-vs decisions? Evidence: meeting frequency, todo phrasing patterns, entity interaction
+prefer async written work or sync meetings and calls? How do they frame requests
+vs decisions? Evidence: meeting frequency, journal phrasing patterns, entity interaction
 frequency.
 
 **relationship priorities** — Who matters most to them right now? Which relationships
@@ -114,7 +107,7 @@ For each section with new observations, write it:
 ```bash
 journal identity partner --update-section 'work patterns' --value 'My partner tends to batch meetings before noon and protects afternoon blocks for focused work. Calendar data from March 25-31 shows 85% of meetings before 12:00 (sol://20260328/archon/091500_300).
 
-Deep work sessions typically run 2-3 hours — todo completion spikes correlate with these blocks.'
+Deep work sessions typically run 2-3 hours — calendar and activity signals show fewer interruptions during these blocks.'
 ```
 
 Only update sections where you have meaningful new evidence. Leave `[observing]`

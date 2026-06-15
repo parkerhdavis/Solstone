@@ -17,6 +17,7 @@ Examples:
 from __future__ import annotations
 
 import importlib
+import logging
 import os
 import sys
 from importlib.metadata import PackageNotFoundError
@@ -75,12 +76,14 @@ SOL_HELP_GROUP_ALIASES = "Aliases"
 
 COMMANDS: dict[str, Command] = {
     # think package - daily processing and analysis
+    "backup": Command("solstone.think.backup_cli", "service"),
     "import": Command("solstone.think.importers.cli", "access"),
     "think": Command("solstone.think.thinking", "service"),
     "indexer": Command("solstone.think.indexer", "service"),
     "start": Command("solstone.think.start", "service"),
     "supervisor": Command("solstone.think.supervisor", "service"),
     "schedule": Command("solstone.think.scheduler", "service"),
+    "maintenance": Command("solstone.think.maintenance_cli", "service"),
     "top": Command("solstone.think.top", "service"),
     "health": Command("solstone.think.health_cli", "service"),
     "notify": Command("solstone.think.notify_cli", "access"),
@@ -90,6 +93,7 @@ COMMANDS: dict[str, Command] = {
     "install-provider": Command("solstone.think.install_provider", "service"),
     "skills": Command("solstone.think.skills_cli", "access"),
     "password": Command("solstone.think.password_cli", "service"),
+    "settings": Command("solstone.think.settings_cli", "service"),
     "streams": Command("solstone.think.streams", "service"),
     "segment": Command("solstone.think.segment", "service"),
     "journal-stats": Command("solstone.think.journal_stats", "service"),
@@ -113,7 +117,6 @@ COMMANDS: dict[str, Command] = {
     "spl": Command("solstone.think.spl", "service"),
     "call": Command("solstone.think.call", "access"),
     "navigate": Command("solstone.think.tools.navigate", "service"),
-    "routines": Command("solstone.think.tools.routines", "service"),
     "identity": Command("solstone.think.tools.sol", "service"),
     "engage": Command("solstone.think.engage", "service"),
     "chat": Command("solstone.think.chat_cli", "access"),
@@ -355,6 +358,16 @@ def _dispatch(binary: str, allowed_surfaces: frozenset[str] | None) -> None:
         else:
             print_help()
         return
+
+    if sys.argv[1] in ("-v", "--verbose"):
+        logging.basicConfig(level=logging.DEBUG)
+        del sys.argv[1]
+        if len(sys.argv) < 2:
+            if binary == "journal":
+                print_journal_help()
+            else:
+                print_help()
+            return
 
     cmd = sys.argv[1]
 

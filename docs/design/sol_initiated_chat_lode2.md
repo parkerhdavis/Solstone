@@ -115,6 +115,8 @@ reconnect quickly and the next `sol_chat_request` repopulates the value.
 
 ### D3. `/app/chat` page-load `record_owner_chat_open`
 
+> **Superseded:** the `/app/chat` page-load open is now recorded by a front-end POST-on-load to `POST /api/chat/sol_chat_request/open`; the GET handler is read-only and no longer writes `owner_chat_open`.
+
 Add server-side open recording in `solstone/apps/chat/routes.py::day(day)`.
 
 Current route shape:
@@ -320,8 +322,7 @@ Design:
 
 Testability:
 
-- There is no pinchtab fake-clock primitive. `tests/verify_browser.py:514-515`
-  supports `evaluate`, so the chat-bar time source should allow a tiny optional
+- The chat-bar time source should allow a tiny optional
   `window.__solChatTestClock` function. Tests can monkey-patch that function
   without waiting 30 real seconds.
 - Keep the hook optional and local to the chat-bar code path. Production code
@@ -434,7 +435,7 @@ Add or extend:
 - `tests/test_sol_initiated_constants_locked.py`: include
   `solstone/convey/static/sol_initiated_constants.js` and assert JS/Python
   constants match.
-- Browser verification/manual smoke: sol-ping renders, pulse clears after the
+- Manual smoke: sol-ping renders, pulse clears after the
   test clock advances, open navigates to `/app/chat/<day>#event-<idx>`, dismiss
   clears all tabs.
 

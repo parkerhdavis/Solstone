@@ -11,6 +11,8 @@ from datetime import date
 from flask import Flask, g, request, url_for
 
 from solstone.apps import AppRegistry
+from solstone.convey.provider_readiness import is_blocking_reason, present_for_reason
+from solstone.think.talent_runs import AgentFailure, read_unresolved_agent_failures
 
 
 def _get_facets_data() -> list[dict]:
@@ -88,55 +90,63 @@ def _resolve_attention(awareness_current: dict) -> AttentionItem | None:
     """Check attention sources P0-P3, return highest priority or None."""
     # P0: Cortex errors
     try:
-        import json
-        from datetime import datetime
-        from pathlib import Path
+        scan = read_unresolved_agent_failures()
+        if scan.ok and scan.failures:
+            latest_by_name: dict[str, AgentFailure] = {}
+            for failure in scan.failures:
+                current = latest_by_name.get(failure.name)
+                if current is None or failure.ts > current.ts:
+                    latest_by_name[failure.name] = failure
 
-        from solstone.think.utils import get_journal
-
-        journal = Path(get_journal())
-        today = datetime.now().strftime("%Y%m%d")
-        day_index = journal / "talents" / f"{today}.jsonl"
-        if day_index.exists():
-            errors: dict[str, float] = {}
-            successes: dict[str, float] = {}
-            for line in day_index.read_text().splitlines():
-                if not line.strip():
+            readiness_blockers = []
+            for name in sorted(latest_by_name):
+                failure = latest_by_name[name]
+                reason_code = failure.reason_code
+                if not is_blocking_reason(reason_code or ""):
                     continue
-                try:
-                    entry = json.loads(line)
-                    name = entry.get("name", "")
-                    ts = entry.get("ts", 0)
-                    if entry.get("status") == "error":
-                        if ts > errors.get(name, 0):
-                            errors[name] = ts
-                    elif entry.get("status") == "completed":
-                        if ts > successes.get(name, 0):
-                            successes[name] = ts
-                except (json.JSONDecodeError, TypeError):
-                    continue
-            unresolved = [
-                name
-                for name, err_ts in errors.items()
-                if successes.get(name, 0) <= err_ts
-            ]
-            if unresolved:
-                count = len(unresolved)
-                names = ", ".join(sorted(unresolved)[:3])
-                suffix = f" (+{count - 3} more)" if count > 3 else ""
-                placeholder = (
-                    f"{count} agent error{'s' if count != 1 else ''} today"
-                    " — ask what happened"
+                view = present_for_reason(
+                    reason_code,
+                    provider=failure.provider or "",
+                    model=failure.model,
+                    status="unhealthy",
                 )
-                context = [
-                    f"System health: {count} unresolved agent error(s) today: "
-                    f"{names}{suffix}. If user asks what needs attention, "
-                    "summarize which agents failed."
-                ]
+                priority = 0 if view.severity == "blocker" else 1
+                readiness_blockers.append((priority, name, view))
+            if readiness_blockers:
+                _priority, name, view = sorted(readiness_blockers)[0]
+                placeholder = view.summary
+                if len(placeholder) > 90:
+                    placeholder = "Provider setup needs attention — ask how to fix it"
                 return AttentionItem(
                     placeholder_text=placeholder,
-                    context_lines=context,
+                    context_lines=[
+                        (
+                            f"System health: {name} is blocked by provider "
+                            "readiness. Guide the owner to fix provider setup "
+                            "before retrying."
+                        ),
+                        f"Readiness: {view.summary}.",
+                        f"Operator detail: {view.operator_detail}.",
+                    ],
                 )
+
+            count = len(scan.failures)
+            names = sorted({failure.name for failure in scan.failures})
+            names_display = ", ".join(names[:3])
+            suffix = f" (+{len(names) - 3} more)" if len(names) > 3 else ""
+            placeholder = (
+                f"{count} agent error{'s' if count != 1 else ''} today"
+                " — ask what happened"
+            )
+            context = [
+                f"System health: {count} unresolved agent error(s) today: "
+                f"{names_display}{suffix}. If user asks what needs attention, "
+                "summarize which agents failed."
+            ]
+            return AttentionItem(
+                placeholder_text=placeholder,
+                context_lines=context,
+            )
     except Exception:
         pass
 
@@ -288,6 +298,7 @@ def register_app_context(app: Flask, registry: AppRegistry) -> None:
                     if agent_name:
                         apps_dict["sol"]["label"] = agent_name
             except Exception:
+                # Intended fail-closed-on-unreadable-config: keep the default label.
                 pass  # Keep default label on any error
 
         # Get starred apps list
@@ -310,8 +321,8 @@ def register_app_context(app: Flask, registry: AppRegistry) -> None:
             pass  # Default placeholder on any error
 
         today = date.today().strftime("%Y%m%d")
-        from solstone.convey.chat_reasons import render_chat_reason
         from solstone.convey.chat_stream import read_chat_events
+        from solstone.convey.provider_readiness import chat_view
         from solstone.convey.sol_initiated.state import (
             latest_unresolved_sol_chat_request,
         )
@@ -333,7 +344,7 @@ def register_app_context(app: Flask, registry: AppRegistry) -> None:
             "chat_bar_attention": chat_bar_attention,
             "chat_bar_sol_request": chat_bar_sol_request,
             # Shared renderer keeps chat error SSR in parity with chat chrome JS.
-            "render_chat_reason": render_chat_reason,
+            "chat_view": chat_view,
             "convey_settings": {"reporting_enabled": reporting_enabled()},
             "CONVEY_COPY": {
                 name.removeprefix("CONVEY_"): getattr(convey_copy, name)

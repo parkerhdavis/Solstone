@@ -7,7 +7,8 @@
   "output": "md",
   "degradation_check": true,
   "read_scope_span": 7,
-  "max_turns": 100
+  "max_turns": 100,
+  "max_run_cost_usd": 5.00
 }
 
 $facets
@@ -18,11 +19,24 @@ This is not a conversation. Gather what you need, synthesize the week, and retur
 
 `$day_YYYYMMDD` is the canonical Sunday that starts the week under review. Cover that Sunday through the following Saturday.
 
-Follow the provenance pattern from `solstone/talent/patterns/provenance.md`, including:
-- a coverage preamble with source counts and gaps
-- `sol://` attribution for consequential claims
-- confidence-graded language that distinguishes observation from inference
-- safe handling of tool errors and missing data
+Apply these provenance rules — they keep the reflection honest about what is
+well-sourced versus inferred:
+
+- **Coverage preamble** — open with source counts and gaps (the `sources:`
+  frontmatter plus a 1–2 sentence summary). Name every source that returned zero
+  results or errored as a gap.
+- **Source attribution** — give high-consequence claims (commitments, decisions,
+  deadlines) an inline `sol://` link to their origin. Don't attribute
+  self-evident items or general syntheses.
+- **Confidence-graded language** — match wording to evidence strength. High
+  (multiple corroborating sources, explicit statement, or upstream confidence
+  ≥ 0.85): assert plainly. Medium (single clear source, or 0.50–0.84): attribute
+  and state directly. Low (inference, single passing mention, or < 0.50): hedge
+  ("appears to," "may," "possible"). Never hedge strong evidence; never assert
+  weak evidence.
+- **Tool-error guard** — if a tool errors, record it as a gap; never treat the
+  error text as data; continue with whatever data succeeded; never fabricate to
+  fill a gap.
 
 ## Gather
 
@@ -35,15 +49,13 @@ Suggested sources:
 4. `sol call journal search "" --day-from $day_YYYYMMDD --day-to <+6> -a decisions -n 12`
 5. `sol call journal search "" --day-from $day_YYYYMMDD --day-to <+6> -a followups -n 12`
 6. `sol call activities list --source anticipated --from $day_YYYYMMDD --to <+6>`
-7. `sol call todos list`
-8. Entity or relationship lookups only when they materially improve the reflection
+7. Entity or relationship lookups only when they materially improve the reflection
 
 Before writing, audit your coverage:
 - `newsletters`
 - `activities`
 - `decisions`
 - `followups`
-- `todos`
 - `relationship_signals`
 - `gaps`
 
@@ -70,7 +82,6 @@ sources:
   activities: [count]
   decisions: [count]
   followups: [count]
-  todos: [count]
   relationship_signals: [count]
 gaps: [list of gap descriptions, or []]
 ---

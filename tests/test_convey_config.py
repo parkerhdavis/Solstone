@@ -52,6 +52,22 @@ def test_seed_default_app_navigation_seeds_absent_apps():
     assert config["apps"]["order"] == DEFAULT_APP_ORDER
 
 
+def test_curation_pinned_in_default_rail():
+    from solstone.convey.config import DEFAULT_APP_ORDER, DEFAULT_RAIL_APPS
+
+    assert "curation" in DEFAULT_RAIL_APPS
+    assert DEFAULT_RAIL_APPS.index("curation") == 3
+    assert "curation" in DEFAULT_APP_ORDER
+
+
+def test_services_default_unstarred_after_news():
+    from solstone.convey.config import DEFAULT_APP_ORDER, DEFAULT_RAIL_APPS
+
+    assert "services" not in DEFAULT_RAIL_APPS
+    assert "services" in DEFAULT_APP_ORDER
+    assert DEFAULT_APP_ORDER.index("news") < DEFAULT_APP_ORDER.index("services")
+
+
 def test_seed_default_app_navigation_preserves_present_empty_lists():
     from solstone.convey.config import seed_default_app_navigation
 
@@ -145,7 +161,11 @@ def test_init_finalize_logs_convey_seed_persist_failure(
     from solstone.convey import root as root_module
 
     (journal_copy / "config" / "convey.json").unlink()
-    monkeypatch.setattr(root_module, "save_convey_config", lambda _config: False)
+
+    def _fail_seed(_transform):
+        raise OSError("simulated persist failure")
+
+    monkeypatch.setattr(root_module, "locked_modify_convey_config", _fail_seed)
     caplog.set_level(logging.ERROR, logger="solstone.convey.root")
     app = create_app(str(journal_copy))
     app.config["TESTING"] = True

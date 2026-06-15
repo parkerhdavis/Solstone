@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "solstone"
-version = "0.4.10"
+version = "0.5.4"
 description = "Navigate Life Intelligently"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -45,10 +45,15 @@ dependencies = [
     "av",
 
     "openai>=1.2.0",
-    "openhands-sdk==1.23.*",
-    # openhands-sdk 1.23 pulls lmnr's OpenTelemetry beta stack. Pin the
-    # matching line so pip does not mix newer 1.42/0.63 packages with lmnr's
-    # 0.60b1 semantic-conventions pin.
+    "openhands-sdk==1.27.*",
+    # Pinned to >=1.27.1: that release reverts the Gemini prompt-cache markers
+    # (upstream PR #3586 / issue #3585). Emitting cache_control on Gemini froze
+    # its cache at the static prefix and disabled Google's implicit caching
+    # (~6-14x cost); our default gemini-flash-latest never matched the allowlist,
+    # but the bump removes the latent trap for any explicit gemini-2.5/3 pin.
+    # openhands-sdk pulls lmnr's OpenTelemetry beta stack. Pin the matching line
+    # so pip does not mix newer 1.42/0.63 packages with lmnr's 0.60b1
+    # semantic-conventions pin.
     "opentelemetry-api==1.39.1",
     "opentelemetry-sdk==1.39.1",
     "opentelemetry-exporter-otlp-proto-grpc==1.39.1",
@@ -57,7 +62,9 @@ dependencies = [
     "opentelemetry-instrumentation-threading==0.60b1",
     "opentelemetry-semantic-conventions==0.60b1",
     "anthropic",
-    "mlx-vlm>=0.5.0,<1; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    # 0.6.2 = validated continuous-batching-fix baseline; <0.7 pins it
+    # so on-device builds don't float past the soak-validated server-wedge fix.
+    "mlx-vlm>=0.6.2,<0.7; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "mlx>=0.31.2,<1; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "huggingface-hub>=0.24",
     "httpx",
@@ -87,6 +94,10 @@ dependencies = [
     # base and raise the onnxruntime floor only on supported Linux hosts.
     "onnx-asr>=0.11.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "onnxruntime>=1.25.0,!=1.24.1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    # Linux/aarch64 default-STT (whisper) ride-along: faster-whisper bundles its
+    # own CTranslate2 runtime; the base onnxruntime floor already covers VAD +
+    # the WeSpeaker embedder, so no onnxruntime bump here.
+    "faster-whisper>=1.0.0; sys_platform == 'linux' and platform_machine == 'aarch64'",
     "kaldi-native-fbank>=1.22",
     # solstone/apps/speakers/{owner,discovery}.py use sklearn.cluster.HDBSCAN. Previously
     # pulled transitively via resemblyzer; now a direct dep.

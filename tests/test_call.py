@@ -9,8 +9,14 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+import solstone.think.call as call_module
 from solstone.think.call import call_app
-from solstone.think.utils import resolve_sol_day, resolve_sol_facet, resolve_sol_segment
+from solstone.think.utils import (
+    CorruptConfigError,
+    resolve_sol_day,
+    resolve_sol_facet,
+    resolve_sol_segment,
+)
 
 runner = CliRunner()
 
@@ -93,13 +99,6 @@ def merge_journal(tmp_path, monkeypatch):
         encoding="utf-8",
     )
 
-    src_todos_dir = src_dir / "todos"
-    src_todos_dir.mkdir(parents=True)
-    (src_todos_dir / "20260101.jsonl").write_text(
-        json.dumps({"text": "Move the roadmap", "created_at": 1000}) + "\n",
-        encoding="utf-8",
-    )
-
     src_news_dir = src_dir / "news"
     dst_news_dir = dst_dir / "news"
     src_news_dir.mkdir(parents=True)
@@ -128,16 +127,28 @@ def merge_journal(tmp_path, monkeypatch):
 class TestDiscovery:
     """Tests for app CLI discovery."""
 
+    def test_main_prints_corrupt_config_and_exits_nonzero(self, monkeypatch, capsys):
+        """main() should surface corrupt config in owner voice."""
+
+        def raise_corrupt_config():
+            raise CorruptConfigError("/x/config/journal.json")
+
+        monkeypatch.setattr(call_module, "call_app", raise_corrupt_config)
+
+        with pytest.raises(typer.Exit) as exc_info:
+            call_module.main()
+
+        assert exc_info.value.exit_code == 1
+        captured = capsys.readouterr()
+        assert "I couldn't read your settings file at /x/config/journal.json." in (
+            captured.err
+        )
+        assert "Your settings were NOT changed." in captured.err
+
     def test_no_args_shows_help(self):
         """Running 'sol call' with no args shows help."""
         result = runner.invoke(call_app, [])
         assert "Call app functions" in result.output
-
-    def test_todos_app_discovered(self):
-        """The todos app should be auto-discovered."""
-        result = runner.invoke(call_app, ["todos", "--help"])
-        assert result.exit_code == 0
-        assert "list" in result.output
 
     def test_unknown_app_fails(self):
         """Unknown app name should produce an error."""
@@ -726,37 +737,6 @@ class TestFacetMerge:
             "Dest fact",
         }
 
-    def test_merge_moves_open_todos(self, merge_journal, monkeypatch):
-        """Merge appends open todos to destination and cancels them in source."""
-        self._mock_indexer(monkeypatch)
-        import solstone.think.tools.call as call_module
-
-        monkeypatch.setattr(call_module, "delete_facet", lambda *args, **kwargs: None)
-
-        result = runner.invoke(
-            call_app,
-            ["journal", "facet", "merge", "src-facet", "--into", "dst-facet"],
-        )
-
-        assert result.exit_code == 0
-        dst_todos = (
-            (merge_journal / "facets" / "dst-facet" / "todos" / "20260101.jsonl")
-            .read_text(encoding="utf-8")
-            .splitlines()
-        )
-        assert any(json.loads(line)["text"] == "Move the roadmap" for line in dst_todos)
-        src_payloads = [
-            json.loads(line)
-            for line in (
-                merge_journal / "facets" / "src-facet" / "todos" / "20260101.jsonl"
-            )
-            .read_text(encoding="utf-8")
-            .splitlines()
-        ]
-        assert src_payloads[0]["cancelled"] is True
-        assert src_payloads[0]["cancelled_reason"] == "moved_to_facet"
-        assert src_payloads[0]["moved_to"] == "dst-facet"
-
     def test_merge_copies_news_skips_conflicts(self, merge_journal, monkeypatch):
         """Merge copies unique news files and preserves destination conflicts."""
         self._mock_indexer(monkeypatch)
@@ -812,7 +792,6 @@ class TestFacetMerge:
         assert merge_entry["params"]["source"] == "src-facet"
         assert merge_entry["params"]["dest"] == "dst-facet"
         assert merge_entry["params"]["entity_count"] == 1
-        assert merge_entry["params"]["todo_count"] == 1
         assert merge_entry["params"]["news_count"] == 1
 
     def test_merge_same_facet_error(self, merge_journal):

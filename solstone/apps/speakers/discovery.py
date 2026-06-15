@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 from sklearn.cluster import HDBSCAN
 
-from solstone.think.entities.core import atomic_write
+from solstone.think.journal_io import atomic_replace
 from solstone.think.utils import day_dirs, day_path, get_journal, now_ms, segment_path
 
 logger = logging.getLogger(__name__)
@@ -29,12 +29,10 @@ MAX_UNMATCHED_EMBEDDINGS = 10000
 def _routes_helpers():
     """Load speakers route helpers lazily to avoid import cycles."""
     from solstone.apps.speakers.routes import (
-        _append_speaker_correction,
         _check_owner_contamination,
         _load_embeddings_file,
         _load_speaker_labels,
         _normalize_embedding,
-        _save_speaker_labels,
         _scan_segment_embeddings,
     )
 
@@ -42,9 +40,7 @@ def _routes_helpers():
         _load_embeddings_file,
         _load_speaker_labels,
         _normalize_embedding,
-        _save_speaker_labels,
         _scan_segment_embeddings,
-        _append_speaker_correction,
         _check_owner_contamination,
     )
 
@@ -97,7 +93,7 @@ def _write_resolved_cluster(cluster_id: int, entity_id: str, label: str) -> None
         "label": label,
         "ts": datetime.utcnow().isoformat(timespec="seconds") + "Z",
     }
-    atomic_write(path, json.dumps(data, indent=2, sort_keys=True), prefix=".discovery_")
+    atomic_replace(path, json.dumps(data, indent=2, sort_keys=True))
 
 
 def _get_sentence_text(segment_dir: Path, source: str, sentence_id: int) -> str | None:
@@ -128,9 +124,7 @@ def discover_unknown_speakers() -> dict[str, Any]:
         load_embeddings_file,
         load_speaker_labels,
         normalize_embedding,
-        _,
         scan_segment_embeddings,
-        _,
         _,
     ) = _routes_helpers()
 
@@ -340,6 +334,10 @@ def identify_cluster(
     cluster_id: int, name: str, entity_id: str | None = None
 ) -> dict[str, Any]:
     """Identify a discovered unknown speaker cluster."""
+    from solstone.apps.speakers.attribution import (
+        append_speaker_correction,
+        apply_label_patches,
+    )
     from solstone.think.entities import (
         load_existing_voiceprint_keys,
         save_voiceprints_batch,
@@ -349,9 +347,7 @@ def identify_cluster(
         load_embeddings_file,
         load_speaker_labels,
         normalize_embedding,
-        save_speaker_labels,
         _scan,
-        append_speaker_correction,
         check_owner_contamination,
     ) = _routes_helpers()
 
@@ -489,6 +485,7 @@ def identify_cluster(
         }
 
         updated = False
+        patches: dict[int, dict[str, Any]] = {}
         for sentence_id in sorted(set(sentence_ids)):
             original = labels_by_sid.get(sentence_id, {})
             new_label = {
@@ -500,7 +497,11 @@ def identify_cluster(
             if original != new_label:
                 updated = True
                 sentences_attributed += 1
-            labels_by_sid[sentence_id] = new_label
+                patches[sentence_id] = {
+                    "speaker": entity_id,
+                    "confidence": "high",
+                    "method": "user_identified",
+                }
 
             correction_key = (sentence_id, entity_id)
             if correction_key in existing_correction_keys:
@@ -519,12 +520,24 @@ def identify_cluster(
             existing_correction_keys.add(correction_key)
 
         if updated:
-            labels_data["labels"] = sorted(
-                labels_by_sid.values(),
-                key=lambda label: int(label["sentence_id"]),
-            )
-            save_speaker_labels(seg_dir, labels_data)
+            apply_label_patches(seg_dir, patches, allow_insert=True)
             segments_updated += 1
+
+    if vp_batch:
+        try:
+            cluster_centroid = normalize_embedding(
+                np.mean([embedding for embedding, _ in vp_batch], axis=0)
+            )
+            if cluster_centroid is not None:
+                from solstone.apps.speakers.candidate_tracker import CandidateTracker
+
+                CandidateTracker().retroactive_confirm(cluster_centroid, entity_id)
+        except Exception as exc:
+            logger.warning(
+                "Failed to retroactively confirm speaker candidate for %s: %s",
+                entity_id,
+                exc,
+            )
 
     _write_resolved_cluster(cluster_id, entity_id, entity_name)
 

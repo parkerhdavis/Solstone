@@ -8,14 +8,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import re
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from flask import abort, g, jsonify, request
+from flask import g, jsonify, request
 from werkzeug.utils import secure_filename
 
 from solstone.convey import emit, state
@@ -38,11 +36,11 @@ from solstone.think.entities.journal import (
     save_journal_entity,
 )
 from solstone.think.entities.matching import find_matching_entity
+from solstone.think.journal_io import append_text, atomic_replace
 from solstone.think.utils import DEFAULT_STREAM, STREAM_RE, day_path
 
 from .journal_sources import (
     get_state_directory,
-    journal_source_state_prefix,
     require_journal_source,
     save_journal_source,
 )
@@ -70,20 +68,12 @@ _IDENTITY_PATHS = frozenset(
 
 def _append_decision(log_path: Path, entry: dict) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(log_path, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    append_text(log_path, json.dumps(entry, ensure_ascii=False))
 
 
 def _write_state_atomic(state_path: Path, state_data: dict) -> None:
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=state_path.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(state_data, handle, indent=2)
-        Path(tmp_path).rename(state_path)
-    except Exception:
-        Path(tmp_path).unlink(missing_ok=True)
-        raise
+    atomic_replace(state_path, json.dumps(state_data, indent=2))
 
 
 def _flatten_config(cfg: dict, prefix: str = "") -> dict[str, Any]:
@@ -116,9 +106,6 @@ def register_ingest_routes(bp) -> None:
     @bp.route("/journal/<key_prefix>/ingest/segments", methods=["POST"])
     @require_journal_source
     def ingest_segments(key_prefix: str):
-        if journal_source_state_prefix(g.journal_source) != key_prefix:
-            abort(403, description="Key prefix mismatch")
-
         metadata_raw = request.form.get("metadata")
         if not metadata_raw:
             return error_response(MISSING_REQUIRED_FIELD, detail="Missing metadata")
@@ -143,7 +130,7 @@ def register_ingest_routes(bp) -> None:
                 MISSING_REQUIRED_FIELD, detail="Missing segments array"
             )
 
-        log_path = get_state_directory(key_prefix) / "segments" / "log.jsonl"
+        log_path = get_state_directory(g.derived_prefix) / "segments" / "log.jsonl"
         pair_mode = g.journal_source.get("pair_mode")
         sender_fingerprint = (
             g.journal_source["fingerprint"] if pair_mode == "pl" else None
@@ -310,7 +297,9 @@ def register_ingest_routes(bp) -> None:
                 )
 
         if new_state:
-            state_path = get_state_directory(key_prefix) / "segments" / "state.json"
+            state_path = (
+                get_state_directory(g.derived_prefix) / "segments" / "state.json"
+            )
             state_path.parent.mkdir(parents=True, exist_ok=True)
             try:
                 existing = json.loads(state_path.read_text(encoding="utf-8"))
@@ -348,9 +337,6 @@ def register_ingest_routes(bp) -> None:
     @bp.route("/journal/<key_prefix>/ingest/entities", methods=["POST"])
     @require_journal_source
     def ingest_entities(key_prefix: str):
-        if journal_source_state_prefix(g.journal_source) != key_prefix:
-            abort(403, description="Key prefix mismatch")
-
         payload = request.get_json(silent=True)
         if not isinstance(payload, dict):
             return error_response(INVALID_JSON_REQUEST, detail="Invalid JSON body")
@@ -361,7 +347,7 @@ def register_ingest_routes(bp) -> None:
                 MISSING_REQUIRED_FIELD, detail="Missing entities array"
             )
 
-        state_dir = get_state_directory(key_prefix)
+        state_dir = get_state_directory(g.derived_prefix)
         log_path = state_dir / "entities" / "log.jsonl"
         state_path = state_dir / "entities" / "state.json"
         staged_dir = state_dir / "entities" / "staged"
@@ -519,9 +505,9 @@ def register_ingest_routes(bp) -> None:
                         "reason": "low_confidence_match",
                         "staged_at": datetime.now(timezone.utc).isoformat(),
                     }
-                    (staged_dir / f"{source_id}.json").write_text(
+                    atomic_replace(
+                        staged_dir / f"{source_id}.json",
                         json.dumps(staged_payload, indent=2, ensure_ascii=False) + "\n",
-                        encoding="utf-8",
                     )
                     staged += 1
                     _append_decision(
@@ -554,10 +540,10 @@ def register_ingest_routes(bp) -> None:
                             "reason": "id_collision",
                             "staged_at": datetime.now(timezone.utc).isoformat(),
                         }
-                        (staged_dir / f"{source_id}.json").write_text(
+                        atomic_replace(
+                            staged_dir / f"{source_id}.json",
                             json.dumps(staged_payload, indent=2, ensure_ascii=False)
                             + "\n",
-                            encoding="utf-8",
                         )
                         staged += 1
                         _append_decision(
@@ -582,10 +568,10 @@ def register_ingest_routes(bp) -> None:
                             "reason": "principal_conflict",
                             "staged_at": datetime.now(timezone.utc).isoformat(),
                         }
-                        (staged_dir / f"{source_id}.json").write_text(
+                        atomic_replace(
+                            staged_dir / f"{source_id}.json",
                             json.dumps(staged_payload, indent=2, ensure_ascii=False)
                             + "\n",
-                            encoding="utf-8",
                         )
                         staged += 1
                         _append_decision(
@@ -655,9 +641,6 @@ def register_ingest_routes(bp) -> None:
     @bp.route("/journal/<key_prefix>/ingest/facets", methods=["POST"])
     @require_journal_source
     def ingest_facets(key_prefix: str):
-        if journal_source_state_prefix(g.journal_source) != key_prefix:
-            abort(403, description="Key prefix mismatch")
-
         metadata_raw = request.form.get("metadata")
         if not metadata_raw:
             return error_response(MISSING_REQUIRED_FIELD, detail="Missing metadata")
@@ -680,7 +663,7 @@ def register_ingest_routes(bp) -> None:
         if not isinstance(facets, list):
             return error_response(MISSING_REQUIRED_FIELD, detail="Missing facets array")
 
-        state_dir = get_state_directory(key_prefix)
+        state_dir = get_state_directory(g.derived_prefix)
         entities_state_path = state_dir / "entities" / "state.json"
         facets_state_path = state_dir / "facets" / "state.json"
         log_path = state_dir / "facets" / "log.jsonl"
@@ -809,9 +792,6 @@ def register_ingest_routes(bp) -> None:
     @bp.route("/journal/<key_prefix>/ingest/imports", methods=["POST"])
     @require_journal_source
     def ingest_imports(key_prefix: str):
-        if journal_source_state_prefix(g.journal_source) != key_prefix:
-            abort(403, description="Key prefix mismatch")
-
         payload = request.get_json(silent=True)
         if not isinstance(payload, dict):
             return error_response(INVALID_JSON_REQUEST, detail="Invalid JSON body")
@@ -822,7 +802,7 @@ def register_ingest_routes(bp) -> None:
                 MISSING_REQUIRED_FIELD, detail="Missing imports array"
             )
 
-        state_dir = get_state_directory(key_prefix)
+        state_dir = get_state_directory(g.derived_prefix)
         log_path = state_dir / "imports" / "log.jsonl"
         state_path = state_dir / "imports" / "state.json"
         staged_dir = state_dir / "imports" / "staged"
@@ -901,9 +881,9 @@ def register_ingest_routes(bp) -> None:
                         "reason": "id_collision",
                         "staged_at": datetime.now(timezone.utc).isoformat(),
                     }
-                    (staged_dir / f"{import_id}.json").write_text(
+                    atomic_replace(
+                        staged_dir / f"{import_id}.json",
                         json.dumps(staged_payload, indent=2, ensure_ascii=False) + "\n",
-                        encoding="utf-8",
                     )
                     staged += 1
                     _append_decision(
@@ -918,21 +898,21 @@ def register_ingest_routes(bp) -> None:
                     )
                 else:
                     target_dir.mkdir(parents=True, exist_ok=True)
-                    (target_dir / "import.json").write_text(
+                    atomic_replace(
+                        target_dir / "import.json",
                         json.dumps(import_json, indent=2, ensure_ascii=False) + "\n",
-                        encoding="utf-8",
                     )
-                    (target_dir / "imported.json").write_text(
+                    atomic_replace(
+                        target_dir / "imported.json",
                         json.dumps(imported_json, indent=2, ensure_ascii=False) + "\n",
-                        encoding="utf-8",
                     )
                     lines = [
                         json.dumps(entry, ensure_ascii=False)
                         for entry in content_manifest
                     ]
-                    (target_dir / "content_manifest.jsonl").write_text(
+                    atomic_replace(
+                        target_dir / "content_manifest.jsonl",
                         "\n".join(lines) + "\n" if lines else "",
-                        encoding="utf-8",
                     )
                     copied += 1
                     _append_decision(
@@ -973,9 +953,6 @@ def register_ingest_routes(bp) -> None:
     @bp.route("/journal/<key_prefix>/ingest/config", methods=["POST"])
     @require_journal_source
     def ingest_config(key_prefix: str):
-        if journal_source_state_prefix(g.journal_source) != key_prefix:
-            abort(403, description="Key prefix mismatch")
-
         payload = request.get_json(silent=True)
         if not isinstance(payload, dict):
             return error_response(INVALID_JSON_REQUEST, detail="Invalid JSON body")
@@ -986,7 +963,7 @@ def register_ingest_routes(bp) -> None:
                 MISSING_REQUIRED_FIELD, detail="Missing config object"
             )
 
-        state_dir = get_state_directory(key_prefix)
+        state_dir = get_state_directory(g.derived_prefix)
         log_path = state_dir / "config" / "log.jsonl"
         state_path = state_dir / "config" / "state.json"
         config_dir = state_dir / "config"
@@ -1036,13 +1013,13 @@ def register_ingest_routes(bp) -> None:
                 }
 
         config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "source_config.json").write_text(
+        atomic_replace(
+            config_dir / "source_config.json",
             json.dumps(source_config, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
         )
-        (config_dir / "diff.json").write_text(
+        atomic_replace(
+            config_dir / "diff.json",
             json.dumps(diff, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
         )
 
         config_state["last_hash"] = content_hash

@@ -9,10 +9,12 @@ import json
 import logging
 import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
 from solstone.think.importers.utils import save_import_file, write_import_metadata
+from solstone.think.journal_io import atomic_replace, install_file, write_text
 from solstone.think.media import MIME_TYPES
 from solstone.think.utils import day_path, get_journal, now_ms
 
@@ -84,8 +86,7 @@ def _write_import_jsonl(
             entry = {**entry, "source": "import"}
         jsonl_lines.append(json.dumps(entry))
 
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(jsonl_lines) + "\n")
+    write_text(Path(file_path), "\n".join(jsonl_lines) + "\n")
 
 
 def write_segment(
@@ -272,11 +273,41 @@ def write_markdown_segments(
         segment_dir = day_path(day) / f"import.{source}" / seg_key
         segment_dir.mkdir(parents=True, exist_ok=True)
         md_path = segment_dir / filename
-        md_path.write_text(render(items) + "\n", encoding="utf-8")
+        write_text(md_path, render(items) + "\n")
         created_files.append(str(md_path))
         segments.append((day, seg_key))
 
     return created_files, segments
+
+
+def install_source_file(src: Path, dest: Path) -> None:
+    """Install an original source file onto dest atomically, preserving mtime.
+
+    Streams src into a same-directory temp in dest.parent, then promotes it via
+    journal_io.install_file. The installed file takes the journal default mode
+    (mkstemp-derived), NOT src's mode -- a deliberate, conservative choice for
+    arbitrary user-supplied originals (unlike shutil.copy2, which copies mode).
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    src_mtime = src.stat().st_mtime
+    temp_handle = tempfile.NamedTemporaryFile(
+        mode="wb", dir=dest.parent, prefix=".tmp_", suffix=".tmp", delete=False
+    )
+    temp_path = Path(temp_handle.name)
+    promoted = False
+    try:
+        with open(src, "rb") as src_handle:
+            shutil.copyfileobj(src_handle, temp_handle)
+        temp_handle.close()
+        install_file(temp_path, dest)
+        promoted = True
+    finally:
+        if not temp_handle.closed:
+            temp_handle.close()
+        if not promoted:
+            temp_path.unlink(missing_ok=True)
+    # install_file does not preserve mtime; restore it from the source.
+    os.utime(dest, (src_mtime, src_mtime))
 
 
 # MIME type mapping for import metadata
@@ -360,7 +391,7 @@ def _setup_import(
             logger.info(f"Removing existing import directory: {import_dir}")
             shutil.rmtree(import_dir)
         else:
-            raise SystemExit(
+            raise FileExistsError(
                 f"Error: Import already exists for timestamp {timestamp}\n"
                 f"To re-import, use --force to delete existing data and start over"
             )
@@ -435,7 +466,6 @@ def write_structured_import(
     Returns:
         List of created file paths (absolute)
     """
-    import tempfile
     from collections import defaultdict
 
     # Group entries by day (YYYYMMDD extracted from ts)
@@ -504,17 +534,7 @@ def write_structured_import(
             lines.append(json.dumps(entry))
         content = "\n".join(lines) + "\n"
 
-        # Atomic write: write to temp file, then rename
-        fd, tmp_path = tempfile.mkstemp(
-            dir=str(import_dir), suffix=".tmp", prefix="imported_"
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(content)
-            os.replace(tmp_path, str(out_path))
-        except BaseException:
-            os.unlink(tmp_path)
-            raise
+        atomic_replace(out_path, content)
 
         created.append(str(out_path))
         logger.info("Wrote %d entries to %s", len(day_entries), out_path)
@@ -551,19 +571,22 @@ def write_manifest(
     source_hash: str,
     entry_count: int,
     files_created: list[str],
+    days_affected: list[str] | None = None,
 ) -> Path:
     """Write an import manifest for deduplication tracking.
 
     Returns path to the manifest file.
     """
-    days_affected = sorted(
-        {
-            os.path.basename(os.path.dirname(os.path.dirname(f)))
-            for f in files_created
-            if os.path.basename(os.path.dirname(os.path.dirname(f))).isdigit()
-        }
-    )
+    if days_affected is None:
+        days_affected = sorted(
+            {
+                os.path.basename(os.path.dirname(os.path.dirname(f)))
+                for f in files_created
+                if os.path.basename(os.path.dirname(os.path.dirname(f))).isdigit()
+            }
+        )
     manifest = {
+        "import_id": import_id,
         "source_type": source_type,
         "source_hash": source_hash,
         "entry_count": entry_count,
@@ -574,8 +597,7 @@ def write_manifest(
     manifest_dir = journal_root / "imports" / import_id
     manifest_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = manifest_dir / "manifest.json"
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2)
+    atomic_replace(manifest_path, json.dumps(manifest, indent=2))
     return manifest_path
 
 
@@ -647,9 +669,8 @@ def write_content_manifest(
     manifest_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = manifest_dir / "content_manifest.jsonl"
 
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        for entry in entries:
-            f.write(json.dumps(entry) + "\n")
+    lines = [json.dumps(entry) for entry in entries]
+    atomic_replace(manifest_path, "\n".join(lines) + "\n" if lines else "")
 
     return manifest_path
 

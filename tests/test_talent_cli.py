@@ -7,17 +7,35 @@ import json
 
 import pytest
 
+from solstone.think import talent as talent_mod
+from solstone.think import talent_cli as talent_cli_mod
+from solstone.think.cogitate_contract import (
+    COGITATE_ACCESS_TIERS,
+    COGITATE_READ_TOOL_NAMES,
+    COGITATE_RUNTIME_PREAMBLE,
+    capabilities_for_access_tier,
+    expects_emit_final,
+)
+from solstone.think.providers.cli import assemble_prompt
+from solstone.think.talent import get_talent, get_talent_configs
 from solstone.think.talent_cli import (
+    _build_inventory_rows,
     _collect_configs,
     _format_bytes,
     _format_cost,
     _format_tags,
     _parse_run_stats,
+    _render_inventory_json,
+    _render_inventory_table,
+    _scan_command_examples,
     _scan_variables,
+    _tier_inventory,
+    inventory,
     json_output,
     list_prompts,
     log_run,
     logs_runs,
+    show_effective_prompt,
     show_prompt,
 )
 
@@ -301,6 +319,170 @@ def test_show_prompt_context_day_format_validation(capsys):
 
     output = capsys.readouterr().err
     assert "invalid --day format" in output.lower()
+
+
+def test_show_effective_prompt_exec_omits_read_scope_hint(capsys):
+    """Cogitate prompt view omits the read-scope hint when no read_scope is set."""
+    config = get_talent("exec")
+    body, system_instruction = assemble_prompt(config, sol_tool_name="sol")
+
+    show_effective_prompt("exec", full=True)
+    output = capsys.readouterr().out
+
+    assert system_instruction is not None
+    assert system_instruction.startswith(COGITATE_RUNTIME_PREAMBLE)
+    assert "through the `sol` tool" in system_instruction
+    assert "Limit filesystem reads to today's segment dir" not in system_instruction
+    assert "You make the change the owner asked for" in body
+    assert system_instruction in output
+    assert body in output
+    assert "tier: normal" in output
+    assert "finalize: FinishTool" in output
+
+
+def test_show_effective_prompt_outbound_shows_submit_capability(capsys):
+    """Outbound talents show submit capability on the tool-surface line."""
+    config = get_talent("support:support")
+    caps = capabilities_for_access_tier(config["access_tier"])
+
+    show_effective_prompt("support:support")
+    output = capsys.readouterr().out
+
+    assert config["access_tier"] == "outbound"
+    assert caps.submit is True
+    assert "tier: outbound" in output
+    assert "sol+reads+submit" in output
+
+
+def test_inventory_row_set_matches_cogitate_loader():
+    """Inventory discovery matches healthy eager loader key-set."""
+    rows = _build_inventory_rows()
+
+    assert {row["name"] for row in rows} == set(get_talent_configs(type="cogitate"))
+
+
+def test_inventory_rows_normalize_and_lockstep_with_config():
+    """Inventory rows normalize display fields and derive finalization from config."""
+    rows = _build_inventory_rows()
+    by_name = {row["name"]: row for row in rows}
+
+    assert all(row["error"] is None for row in rows)
+    assert all(row["cwd"] == "journal" for row in rows)
+    assert all(row["write"] == "ro" for row in rows)
+
+    for row in rows:
+        config = get_talent(row["name"])
+        assert (row["finalize"] == "emit_final") == expects_emit_final(config)
+
+    assert by_name["support:support"]["access_tier"] == "outbound"
+    # steward is a deterministic + lite-generate talent now, not cogitate, so it
+    # is no longer part of the cogitate inventory.
+    assert "steward" not in by_name
+    assert by_name["exec"]["access_tier"] == "normal"
+    assert by_name["exec"]["schedule"] == "-"
+
+
+def test_tier_inventory_matches_capabilities():
+    """Tier inventory is derived from canonical tier capabilities."""
+    tiers = _tier_inventory()
+
+    assert set(tiers) == set(COGITATE_ACCESS_TIERS)
+    for tier in COGITATE_ACCESS_TIERS:
+        caps = capabilities_for_access_tier(tier)
+        assert tiers[tier]["sol"] is caps.sol
+        assert tiers[tier]["reads"] is caps.reads
+        assert tiers[tier]["submit"] is caps.submit
+        assert tiers[tier]["tools"] == ["sol", *COGITATE_READ_TOOL_NAMES]
+
+
+def test_inventory_json_uses_verbatim_rows_and_table_uses_same_values(capsys):
+    """JSON emits row dicts verbatim and table renders from the same rows."""
+    rows = _build_inventory_rows()
+    tiers = _tier_inventory()
+    by_name = {row["name"]: row for row in rows}
+
+    _render_inventory_json(rows, tiers)
+    data = json.loads(capsys.readouterr().out)
+    assert data["talents"] == rows
+    assert data["tiers"] == tiers
+
+    _render_inventory_table(rows)
+    table = capsys.readouterr().out
+    assert "exec" in table
+    assert by_name["exec"]["access_tier"] in table
+    assert by_name["exec"]["finalize"] in table
+
+
+def test_inventory_command_outputs_json(capsys):
+    """Inventory command emits the same row-builder data in JSON mode."""
+    rows = _build_inventory_rows()
+
+    inventory(as_json=True)
+    data = json.loads(capsys.readouterr().out)
+
+    assert data["talents"] == rows
+    assert "tiers" in data
+
+
+def test_scan_command_examples_dedupes_and_caps():
+    """Command scanner extracts supported backtick command examples."""
+    body = "\n".join(
+        [
+            "`sol call support search foo`",
+            "`sol call support search foo`",
+            "`journal talent logs --daily -c 20 --errors.`",
+            "`journal identity partner --write --value x`",
+        ]
+    )
+
+    assert _scan_command_examples(body, cap=3) == [
+        "sol call support search foo",
+        "journal talent logs --daily -c 20 --errors",
+        "journal identity partner --write --value x",
+    ]
+
+
+def test_inventory_degrades_bad_access_tier_in_rows_table_and_json(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    """One invalid cogitate talent becomes an error row without hiding good rows."""
+    talent_dir = tmp_path / "talent"
+    apps_dir = tmp_path / "apps"
+    talent_dir.mkdir()
+    apps_dir.mkdir()
+    (talent_dir / "good.md").write_text(
+        "---\ntype: cogitate\ntitle: Good\n---\nGood body\n",
+        encoding="utf-8",
+    )
+    (talent_dir / "badname.md").write_text(
+        "---\ntype: cogitate\ntitle: Bad\naccess_tier: bogus\n---\nBad body\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(talent_cli_mod, "TALENT_DIR", talent_dir)
+    monkeypatch.setattr(talent_cli_mod, "APPS_DIR", apps_dir)
+    monkeypatch.setattr(talent_mod, "TALENT_DIR", talent_dir)
+
+    rows = _build_inventory_rows()
+    by_name = {row["name"]: row for row in rows}
+
+    assert set(by_name) == {"badname", "good"}
+    assert by_name["good"]["error"] is None
+    assert by_name["badname"]["error"] is not None
+    assert "invalid 'access_tier'" in by_name["badname"]["error"]
+
+    _render_inventory_table(rows)
+    table = capsys.readouterr().out
+    assert "good" in table
+    assert "badname" in table
+    assert "ERROR" in table
+
+    _render_inventory_json(rows, _tier_inventory())
+    data = json.loads(capsys.readouterr().out)
+    talents = {row["name"]: row for row in data["talents"]}
+    assert talents["good"]["error"] is None
+    assert "invalid 'access_tier'" in talents["badname"]["error"]
 
 
 def test_logs_runs_default(capsys):

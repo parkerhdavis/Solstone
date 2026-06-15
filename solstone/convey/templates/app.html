@@ -193,6 +193,7 @@
   let solPingDisconnectedAt = null;
   let solPingOfflineTimer = null;
   let solPingConnectionUnsub = null;
+  let statusErrorActive = false;
 
   function escapeHtml(value) {
     return String(value || '')
@@ -611,12 +612,6 @@
     return Date.now();
   }
 
-  function getAttentionPlaceholder() {
-    var attention = window.solChatBarAttention || null;
-    if (!attention || typeof attention.placeholder_text !== 'string') return '';
-    return attention.placeholder_text;
-  }
-
   function formatChatDay(ts) {
     var date = new Date(typeof ts === 'number' ? ts : Date.now());
     var year = date.getFullYear();
@@ -627,7 +622,7 @@
 
   function restoreDefaultPlaceholder() {
     if (!input) return;
-    input.placeholder = getAttentionPlaceholder() || input.dataset.defaultPlaceholder || '';
+    input.placeholder = input.dataset.defaultPlaceholder || '';
   }
 
   function clearSolPingTimers() {
@@ -785,6 +780,10 @@
     solPingApiJson(solPingEndpoint('open'), solRequestState.request_id);
   }
 
+  window.recordOwnerChatOpen = function(requestId) {
+    solPingApiJson(solPingEndpoint('open'), requestId);
+  };
+
   function clearConversationSuggestion() {
     if (!input) return;
     delete input.dataset.suggestion;
@@ -799,7 +798,18 @@
     return true;
   }
 
-  function handleSuggestionKeydown(event) {
+  function handleComposerKeydown(event) {
+    if (event.isComposing === true || event.keyCode === 229) return;
+    if (event.key === 'Enter' && event.shiftKey) return;
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      if (form && typeof form.requestSubmit === 'function') {
+        form.requestSubmit();
+      } else if (form) {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+      return;
+    }
     if (!input || !input.dataset.suggestion || input.value !== '') return;
     if (event.key === 'Tab' && !event.shiftKey) {
       event.preventDefault();
@@ -887,6 +897,13 @@
       if (!solRequestState) {
         chatBarPendingPlaceholders.push({ ownerText: msg.text || '', ts: msg.ts || Date.now() });
         setStatus(window.solChatCopy.CHAT_LIVENESS_THINKING, window.solChatCopy.CHAT_LIVENESS_THINKING);
+        if (statusWrap) {
+          statusWrap.classList.add('chat-bar-status--thinking');
+          statusWrap.classList.remove('chat-bar-status--error');
+          statusWrap.removeAttribute('role');
+          statusWrap.removeAttribute('tabindex');
+        }
+        statusErrorActive = false;
       }
       return;
     }
@@ -897,6 +914,13 @@
     if (eventName === 'sol_message') {
       if (solRequestState) return;
       if (chatBarPendingPlaceholders.length > 0) chatBarPendingPlaceholders.shift();
+      if (statusWrap) {
+        statusWrap.classList.remove('chat-bar-status--thinking');
+        statusWrap.classList.remove('chat-bar-status--error');
+        statusWrap.removeAttribute('role');
+        statusWrap.removeAttribute('tabindex');
+      }
+      statusErrorActive = false;
       setStatus(msg.text || '', msg.notes || msg.text || '');
       return;
     }
@@ -952,10 +976,14 @@
       if (solRequestState) return;
       if (chatBarPendingPlaceholders.length > 0) chatBarPendingPlaceholders.shift();
       var renderedReason = window.renderChatReason(msg.reason, msg.provider || '');
-      var detail = (msg.reason === 'unknown' && typeof msg.detail === 'string' && msg.detail.length > 0)
-        ? msg.detail
-        : renderedReason.message;
-      setStatus(renderedReason.message, detail, renderedReason.action);
+      if (statusWrap) {
+        statusWrap.classList.remove('chat-bar-status--thinking');
+        statusWrap.classList.add('chat-bar-status--error');
+        statusWrap.setAttribute('role', 'button');
+        statusWrap.tabIndex = 0;
+      }
+      statusErrorActive = true;
+      setStatus(renderedReason.message, renderedReason.message, renderedReason.action);
     }
   }
 
@@ -1075,7 +1103,7 @@
       resizeComposer();
       input.addEventListener('input', resizeComposer);
       input.addEventListener('input', handleSuggestionInput);
-      input.addEventListener('keydown', handleSuggestionKeydown);
+      input.addEventListener('keydown', handleComposerKeydown);
     }
 
     if (form) {
@@ -1084,14 +1112,27 @@
 
     if (statusWrap) {
       statusWrap.addEventListener('click', function(event) {
-        if (!solRequestState || event.target.closest('button')) return;
-        window.openConversation({ prompt: null, openOn: 'chat-request' });
+        if (event.target.closest('button, a')) return;
+        if (statusErrorActive) {
+          window.location.href = '/app/chat/';
+          return;
+        }
+        if (solRequestState) {
+          window.openConversation({ prompt: null, openOn: 'chat-request' });
+        }
       });
       statusWrap.addEventListener('keydown', function(event) {
-        if (!solRequestState) return;
+        if (!solRequestState && !statusErrorActive) return;
+        if (event.target.closest('button, a')) return;
         if (event.key !== 'Enter' && event.key !== ' ') return;
         event.preventDefault();
-        window.openConversation({ prompt: null, openOn: 'chat-request' });
+        if (statusErrorActive) {
+          window.location.href = '/app/chat/';
+          return;
+        }
+        if (solRequestState) {
+          window.openConversation({ prompt: null, openOn: 'chat-request' });
+        }
       });
     }
 

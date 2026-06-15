@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime
-from pathlib import Path
 from typing import Any
 
 from solstone.convey.chat_stream import read_chat_tail, reduce_chat_state
@@ -16,14 +15,6 @@ from solstone.convey.sol_initiated.copy import (
     SYNTHETIC_TRIGGER_LABEL,
     TRIGGER_LABEL_SOL_INITIATED,
 )
-from solstone.talent._routine_context import (
-    _TEMPLATE_TRIGGERS as TEMPLATE_TRIGGERS,
-)
-from solstone.talent._routine_context import (
-    render_active_routines,
-    render_routine_suggestion,
-)
-from solstone.think.utils import get_journal
 
 logger = logging.getLogger(__name__)
 STOP_AND_REPORT_CONTRACT = (
@@ -33,72 +24,12 @@ STOP_AND_REPORT_CONTRACT = (
 )
 
 
-def _count_triggers(msg: str, facet: str | None, config: dict) -> bool:
-    """Count trigger signals in the user's message. Returns True if config was mutated."""
-    lower = msg.lower()
-    today = date.today().isoformat()
-    meta = config.setdefault("_meta", {})
-    suggestions = meta.setdefault("suggestions", {})
-    changed = False
-
-    for template, info in TEMPLATE_TRIGGERS.items():
-        if not any(p in lower for p in info["patterns"]):
-            continue
-
-        if template == "domain-watch":
-            if not facet:
-                continue
-            entry = suggestions.setdefault(
-                template,
-                {
-                    "trigger_count": 0,
-                    "first_trigger": None,
-                    "last_trigger": None,
-                    "trigger_data": {},
-                    "response": None,
-                    "suggested": False,
-                },
-            )
-            topics = entry.setdefault("trigger_data", {}).setdefault("topics", {})
-            dates = topics.setdefault(facet, [])
-            if today not in dates:
-                dates.append(today)
-                entry["trigger_count"] = len(dates)
-                entry["first_trigger"] = entry["first_trigger"] or min(dates)
-                entry["last_trigger"] = max(dates)
-                changed = True
-        else:
-            entry = suggestions.setdefault(
-                template,
-                {
-                    "trigger_count": 0,
-                    "first_trigger": None,
-                    "last_trigger": None,
-                    "trigger_data": {},
-                    "response": None,
-                    "suggested": False,
-                },
-            )
-            entry["trigger_count"] = entry.get("trigger_count", 0) + 1
-            entry["first_trigger"] = entry.get("first_trigger") or today
-            entry["last_trigger"] = today
-            changed = True
-
-    return changed
-
-
 def pre_process(context: dict) -> dict:
     """Build chat-context template vars for the chat talent prompt."""
-    from solstone.think.routines import get_config as get_routines_config
-    from solstone.think.routines import save_config as save_routines_config
 
-    facet = context.get("facet")
     trigger_kind, trigger_payload = _normalize_trigger(context)
     day = _resolve_day(context, trigger_payload)
     template_vars = {
-        "digest_contents": "",
-        "identity_self": "",
-        "identity_agency": "",
         "active_talents": "",
         "trigger_kind": "",
         "trigger_context": "",
@@ -108,21 +39,9 @@ def pre_process(context: dict) -> dict:
         "since_ts": "",
         "trigger_talent": "",
         "location": "",
-        "active_routines": "",
-        "routine_suggestion": "",
+        "situational": "",
     }
     result = {"template_vars": template_vars}
-
-    try:
-        template_vars["digest_contents"] = _load_digest_contents()
-    except Exception:
-        logger.debug("Digest enrichment failed", exc_info=True)
-
-    try:
-        template_vars["identity_self"] = _load_identity_contents("self.md")
-        template_vars["identity_agency"] = _load_identity_contents("agency.md")
-    except Exception:
-        logger.debug("Identity enrichment failed", exc_info=True)
 
     messages: list[dict[str, str]] = []
     source_context = ""
@@ -174,6 +93,8 @@ def pre_process(context: dict) -> dict:
     except Exception:
         logger.debug("Active talent enrichment failed", exc_info=True)
 
+    template_vars["situational"] = _render_situational(day)
+
     _apply_trigger_template_vars(template_vars, trigger_kind, trigger_payload)
     trigger_context = _render_trigger_context(trigger_kind, trigger_payload, context)
     if source_context:
@@ -185,40 +106,37 @@ def pre_process(context: dict) -> dict:
     template_vars["trigger_context"] = trigger_context
     template_vars["location"] = _render_location(trigger_payload, context)
 
-    try:
-        template_vars["active_routines"] = render_active_routines()
-    except Exception:
-        logger.debug("Routine state enrichment failed", exc_info=True)
-
-    try:
-        prompt = context.get("prompt", "")
-        if trigger_kind == "owner_message" and prompt:
-            routines_config = get_routines_config()
-            if _count_triggers(prompt, facet, routines_config):
-                save_routines_config(routines_config)
-    except Exception:
-        logger.debug("Routine trigger counting failed", exc_info=True)
-
-    try:
-        template_vars["routine_suggestion"] = render_routine_suggestion()
-    except Exception:
-        logger.debug("Routine suggestion eligibility check failed", exc_info=True)
-
     return result
 
 
-def _load_digest_contents() -> str:
-    digest_path = Path(get_journal()) / "identity" / "digest.md"
-    if not digest_path.exists():
-        return ""
-    return digest_path.read_text(encoding="utf-8").strip()
+def _render_situational(day: str) -> str:
+    """Compact situational read from the latest pulse record."""
+    try:
+        from solstone.think.day_accumulator import read_latest
 
-
-def _load_identity_contents(file_name: str) -> str:
-    identity_path = Path(get_journal()) / "identity" / file_name
-    if not identity_path.exists():
+        record = read_latest(day, "pulse")
+    except Exception:
+        logger.debug("Situational pulse enrichment failed", exc_info=True)
         return ""
-    return identity_path.read_text(encoding="utf-8").strip()
+    if not record:
+        return ""
+
+    lines = ["## Situational awareness\n"]
+    title = str(record.get("title") or "").strip()
+    one = str(record.get("one_sentence") or "").strip()
+    details = str(record.get("full_details") or "").strip()
+    if title:
+        lines.append(f"**{title}**")
+    if one:
+        lines.append(one)
+    if details:
+        lines.append(f"\n{details}")
+
+    needs = [str(n).strip() for n in record.get("needs_you", []) if str(n).strip()]
+    if needs:
+        lines.append("\nNeeds the owner:")
+        lines.extend(f"- {need}" for need in needs)
+    return "\n".join(lines)
 
 
 def _normalize_trigger(context: dict) -> tuple[str | None, dict[str, Any]]:

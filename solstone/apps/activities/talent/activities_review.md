@@ -29,13 +29,15 @@ narrative describes an activity that doesn't have its own record — typically
 an in-person meeting, a phone call, a brief interaction not captured by
 desktop recording — add it.
 
-Use `sol call activities create --source cogitate` to add a record. Include:
-- activity type (meeting, call, etc.)
-- a starting segment (the closest real captured segment in time)
-- description (one-sentence prose summary)
-- participation (array of {name, role, source, confidence, context})
-
-JSON payload note: `title` is required; `details` is optional.
+Use `sol call activities create --source cogitate` with argv flags to add a
+record:
+- `--activity`: activity type (meeting, call, etc.)
+- `--since-segment`: the `segment_key` shown under the matching narrative
+  (`HHMMSS_LEN`, for example `143000_300`). Do not pass the full narrative
+  heading such as `engineering_143000_300`.
+- `--title`: required title
+- `--description`: one-sentence prose summary
+- `--details`: optional longer details
 
 Quality bar: only add activities that are key, notable, or important. A passing
 mention of "I need to call Dennis later" is not a missed activity. A meeting

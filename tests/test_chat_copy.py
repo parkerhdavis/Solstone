@@ -43,12 +43,15 @@ def _extract_object_literal(text: str, marker: str) -> dict:
 
 def test_talent_label_for_all_known_combinations():
     expected = {
+        ("read", "running"): chat_copy.TALENT_LABEL_READ_RUNNING,
+        ("read", "finished"): chat_copy.TALENT_LABEL_READ_FINISHED,
+        ("read", "errored"): chat_copy.TALENT_LABEL_READ_ERRORED,
         ("exec", "running"): chat_copy.TALENT_LABEL_EXEC_RUNNING,
         ("exec", "finished"): chat_copy.TALENT_LABEL_EXEC_FINISHED,
         ("exec", "errored"): chat_copy.TALENT_LABEL_EXEC_ERRORED,
-        ("reflection", "running"): chat_copy.TALENT_LABEL_REFLECTION_RUNNING,
-        ("reflection", "finished"): chat_copy.TALENT_LABEL_REFLECTION_FINISHED,
-        ("reflection", "errored"): chat_copy.TALENT_LABEL_REFLECTION_ERRORED,
+        ("support", "running"): chat_copy.TALENT_LABEL_SUPPORT_RUNNING,
+        ("support", "finished"): chat_copy.TALENT_LABEL_SUPPORT_FINISHED,
+        ("support", "errored"): chat_copy.TALENT_LABEL_SUPPORT_ERRORED,
     }
 
     for (target, status), label in expected.items():
@@ -63,17 +66,11 @@ def test_talent_label_for_unknown_values_raise():
         chat_copy.talent_label_for("exec", "queued")
 
 
-def test_liveness_and_retry_copy_bytes():
-    assert chat_copy.CHAT_LIVENESS_THINKING == "Sol is thinking…"
+def test_liveness_and_error_detail_copy_bytes():
+    assert chat_copy.CHAT_LIVENESS_THINKING == "sol is thinking…"
     assert chat_copy.CHAT_LIVENESS_TASK_FORMAT == "{label} {task}"
-    assert chat_copy.CHAT_ERROR_RETRY_LABEL == "Try again"
-    assert chat_copy.CHAT_ERROR_RETRY_ARIA_FORMAT == "Try again — re-send: {excerpt}"
-
-
-def test_chat_error_retry_excerpt():
-    assert chat_copy.chat_error_retry_excerpt("hi") == "hi"
-    assert chat_copy.chat_error_retry_excerpt("a" * 60) == "a" * 60
-    assert chat_copy.chat_error_retry_excerpt("a" * 61) == ("a" * 60) + "…"
+    assert chat_copy.CHAT_ERROR_DETAIL_EXPANDER_LABEL == "Show details"
+    assert chat_copy.CHAT_ERROR_DETAIL_COLLAPSER_LABEL == "Hide details"
 
 
 def test_thinking_copy_bytes():
@@ -83,7 +80,7 @@ CHAT_THINKING_SETTING_LABEL = "Thinking surfaces"
 CHAT_THINKING_OPT_ON_TAP = "Show on tap"
 CHAT_THINKING_OPT_ALWAYS = "Always show"
 CHAT_THINKING_OPT_NEVER = "Never show"
-CHAT_THINKING_SETTING_HELP = "Sol does some thinking before replying. Choose how much you want to see."
+CHAT_THINKING_SETTING_HELP = "sol does some thinking before replying. Choose how much you want to see."
 """
     actual = "\n".join(
         [
@@ -107,15 +104,20 @@ def test_js_parity():
     js_labels = _extract_object_literal(text, "const TALENT_LABELS = ")
 
     assert js_labels == {
+        "read": {
+            "running": chat_copy.TALENT_LABEL_READ_RUNNING,
+            "finished": chat_copy.TALENT_LABEL_READ_FINISHED,
+            "errored": chat_copy.TALENT_LABEL_READ_ERRORED,
+        },
         "exec": {
             "running": chat_copy.TALENT_LABEL_EXEC_RUNNING,
             "finished": chat_copy.TALENT_LABEL_EXEC_FINISHED,
             "errored": chat_copy.TALENT_LABEL_EXEC_ERRORED,
         },
-        "reflection": {
-            "running": chat_copy.TALENT_LABEL_REFLECTION_RUNNING,
-            "finished": chat_copy.TALENT_LABEL_REFLECTION_FINISHED,
-            "errored": chat_copy.TALENT_LABEL_REFLECTION_ERRORED,
+        "support": {
+            "running": chat_copy.TALENT_LABEL_SUPPORT_RUNNING,
+            "finished": chat_copy.TALENT_LABEL_SUPPORT_FINISHED,
+            "errored": chat_copy.TALENT_LABEL_SUPPORT_ERRORED,
         },
     }
     assert (
@@ -132,9 +134,13 @@ def test_js_parity():
     )
     assert f'CHAT_LIVENESS_THINKING: "{chat_copy.CHAT_LIVENESS_THINKING}"' in text
     assert f'CHAT_LIVENESS_TASK_FORMAT: "{chat_copy.CHAT_LIVENESS_TASK_FORMAT}"' in text
-    assert f'CHAT_ERROR_RETRY_LABEL: "{chat_copy.CHAT_ERROR_RETRY_LABEL}"' in text
     assert (
-        f'CHAT_ERROR_RETRY_ARIA_FORMAT: "{chat_copy.CHAT_ERROR_RETRY_ARIA_FORMAT}"'
+        "CHAT_ERROR_DETAIL_EXPANDER_LABEL: "
+        f'"{chat_copy.CHAT_ERROR_DETAIL_EXPANDER_LABEL}"'
+    ) in text
+    assert (
+        "CHAT_ERROR_DETAIL_COLLAPSER_LABEL: "
+        f'"{chat_copy.CHAT_ERROR_DETAIL_COLLAPSER_LABEL}"'
     ) in text
     expected_js_thinking = """CHAT_THINKING_EXPANDER_LABEL: "Show thinking",
 CHAT_THINKING_COLLAPSER_LABEL: "Hide thinking",
@@ -142,11 +148,10 @@ CHAT_THINKING_SETTING_LABEL: "Thinking surfaces",
 CHAT_THINKING_OPT_ON_TAP: "Show on tap",
 CHAT_THINKING_OPT_ALWAYS: "Always show",
 CHAT_THINKING_OPT_NEVER: "Never show",
-CHAT_THINKING_SETTING_HELP: "Sol does some thinking before replying. Choose how much you want to see.",
+CHAT_THINKING_SETTING_HELP: "sol does some thinking before replying. Choose how much you want to see.",
 """
     for expected_line in expected_js_thinking.splitlines():
         assert expected_line in text
-    assert "function chatErrorRetryExcerpt(text)" in text
 
 
 def test_closer_constants_byte_parity():

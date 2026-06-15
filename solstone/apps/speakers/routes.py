@@ -26,6 +26,22 @@ from flask import (
     send_file,
 )
 
+from solstone.apps.speakers.attribution import (
+    accumulate_voiceprints,
+    append_speaker_correction,
+    apply_label_patches,
+    attribute_segment,
+    backfill_last_seen,
+    backfill_segments,
+    save_speaker_labels,
+)
+from solstone.apps.speakers.bootstrap import (
+    bootstrap_voiceprints,
+    link_import,
+    merge_names,
+    resolve_name_variants,
+    seed_from_imports,
+)
 from solstone.apps.speakers.copy import (
     SPK_OVERVIEW_KNOWN_VOICES_SORTS,
     speaker_copy_payload,
@@ -50,7 +66,9 @@ from solstone.apps.speakers.owner import (
     reject_owner_candidate,
 )
 from solstone.apps.speakers.status import get_speakers_status
+from solstone.apps.speakers.suggest import format_suggestions, suggest_opportunities
 from solstone.apps.speakers.time import segment_start_ts_ms
+from solstone.apps.speakers.wipe import wipe_speaker_artifacts
 from solstone.apps.utils import log_app_action
 from solstone.convey import state
 from solstone.convey.reasons import (
@@ -66,13 +84,17 @@ from solstone.convey.reasons import (
     MISSING_REQUEST_BODY,
     MISSING_REQUIRED_FIELD,
     SPEAKER_ATTRIBUTION_STATE_INVALID,
+    SPEAKER_COMMAND_FAILED,
+    SPEAKER_LABELS_BUSY,
     SPEAKER_NOT_FOUND,
+    SPEAKER_OWNER_CENTROID_REQUIRED,
     SPEAKER_OWNER_VOICE_TOO_CLOSE,
     SPEAKER_REVIEW_UNAVAILABLE,
     SPEAKER_SENTENCE_MISSING,
+    SPEAKER_VOICEPRINT_BUSY,
 )
 from solstone.convey.utils import DATE_RE, error_response, format_date, success_response
-from solstone.think.awareness import get_current
+from solstone.think.awareness import get_current, owner_detection_ready
 from solstone.think.entities import find_matching_entity
 from solstone.think.entities.journal import (
     ensure_journal_entity_memory,
@@ -81,6 +103,8 @@ from solstone.think.entities.journal import (
     load_all_journal_entities,
     load_journal_entity,
 )
+from solstone.think.journal_io.errors import LockTimeout
+from solstone.think.journal_io.npz import load_npz, update_npz
 from solstone.think.utils import (
     day_dirs,
     day_path,
@@ -93,6 +117,7 @@ from solstone.think.utils import segment_key as validate_segment_key
 from solstone.think.utils import segment_path as get_segment_path
 
 logger = logging.getLogger(__name__)
+VOICEPRINT_KEYS = ("embeddings", "metadata")
 
 speakers_bp = Blueprint(
     "app:speakers",
@@ -129,7 +154,9 @@ def _load_embeddings_file(
         return None
 
     try:
-        data = np.load(npz_path)
+        data = load_npz(npz_path)
+        if data is None:
+            return None
         embeddings = data.get("embeddings")
         statement_ids = data.get("statement_ids")
         durations_s = data.get("durations_s")
@@ -207,7 +234,6 @@ def _save_voiceprint(
     folder = ensure_journal_entity_memory(entity_id)
     npz_path = folder / "voiceprints.npz"
 
-    # Build metadata for this voiceprint
     metadata = {
         "day": day,
         "segment_key": segment_key,
@@ -220,27 +246,25 @@ def _save_voiceprint(
         metadata["stream"] = stream
     metadata_json = json.dumps(metadata)
 
-    # Load existing or initialize empty
-    if npz_path.exists():
-        try:
-            data = np.load(npz_path, allow_pickle=False)
-            existing_embeddings = data["embeddings"]
-            existing_metadata = data["metadata"]
-        except Exception:
+    def transform(current: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        if current:
+            existing_embeddings = current["embeddings"]
+            existing_metadata = current["metadata"]
+        else:
             existing_embeddings = np.empty((0, 256), dtype=np.float32)
-            existing_metadata = np.array([], dtype=str)
-    else:
-        existing_embeddings = np.empty((0, 256), dtype=np.float32)
-        existing_metadata = np.array([], dtype=str)
+            existing_metadata = np.asarray([], dtype=str)
 
-    # Append new voiceprint
-    new_embeddings = np.vstack([existing_embeddings, embedding.reshape(1, -1)])
-    new_metadata = np.append(existing_metadata, metadata_json)
+        return {
+            "embeddings": np.vstack(
+                [
+                    existing_embeddings,
+                    embedding.reshape(1, -1).astype(np.float32),
+                ]
+            ),
+            "metadata": np.append(existing_metadata, metadata_json),
+        }
 
-    # Write back (atomic: temp file + rename)
-    tmp_path = npz_path.with_name(npz_path.stem + ".tmp.npz")
-    np.savez_compressed(tmp_path, embeddings=new_embeddings, metadata=new_metadata)
-    tmp_path.rename(npz_path)
+    update_npz(npz_path, transform, expected_keys=VOICEPRINT_KEYS)
     return npz_path
 
 
@@ -266,43 +290,46 @@ def _remove_voiceprint(
     if not npz_path.exists():
         return None
 
-    try:
-        data = np.load(npz_path, allow_pickle=False)
-        embeddings = data.get("embeddings")
-        metadata_arr = data.get("metadata")
+    outcome: str | None = None
+
+    def transform(current: dict[str, np.ndarray]) -> dict[str, np.ndarray] | None:
+        nonlocal outcome
+        embeddings = current.get("embeddings")
+        metadata_arr = current.get("metadata")
         if embeddings is None or metadata_arr is None:
             return None
-    except Exception:
-        return None
 
-    keep = []
-    for i, m_str in enumerate(metadata_arr):
-        try:
-            m = json.loads(m_str)
-            if (
-                m.get("day") == day
-                and m.get("segment_key") == segment_key
-                and m.get("source") == source
-                and m.get("sentence_id") == sentence_id
-            ):
-                continue
-        except (json.JSONDecodeError, TypeError):
-            pass
-        keep.append(i)
+        keep = []
+        for i, m_str in enumerate(metadata_arr):
+            try:
+                m = json.loads(str(m_str))
+                if (
+                    m.get("day") == day
+                    and m.get("segment_key") == segment_key
+                    and m.get("source") == source
+                    and m.get("sentence_id") == sentence_id
+                ):
+                    continue
+            except (json.JSONDecodeError, TypeError):
+                pass
+            keep.append(i)
 
-    if len(keep) == len(metadata_arr):
-        return None
+        if len(keep) == len(metadata_arr):
+            outcome = "not_found"
+            return None
 
-    if not keep:
-        npz_path.unlink()
-        return npz_path
+        if not keep:
+            outcome = "unlinked"
+            return {}
 
-    new_embeddings = embeddings[keep]
-    new_metadata = metadata_arr[keep]
-    tmp_path = npz_path.with_name(npz_path.stem + ".tmp.npz")
-    np.savez_compressed(tmp_path, embeddings=new_embeddings, metadata=new_metadata)
-    tmp_path.rename(npz_path)
-    return None
+        outcome = "rewritten"
+        return {
+            "embeddings": embeddings[keep],
+            "metadata": metadata_arr[keep],
+        }
+
+    update_npz(npz_path, transform, expected_keys=VOICEPRINT_KEYS)
+    return npz_path if outcome == "unlinked" else None
 
 
 def _load_speaker_labels(segment_dir: Path) -> dict | None:
@@ -320,17 +347,6 @@ def _load_speaker_labels(segment_dir: Path) -> dict | None:
         return None
 
 
-def _save_speaker_labels(segment_dir: Path, labels_data: dict) -> None:
-    """Atomically write speaker_labels.json to a segment's talents/ directory."""
-    talents_dir = segment_dir / "talents"
-    talents_dir.mkdir(parents=True, exist_ok=True)
-    out_path = talents_dir / "speaker_labels.json"
-    tmp_path = out_path.with_suffix(".tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(labels_data, f, indent=2)
-    tmp_path.rename(out_path)
-
-
 def _load_speaker_corrections(segment_dir: Path) -> list[dict]:
     """Load speaker_corrections.json from a segment's talents/ directory.
 
@@ -345,19 +361,6 @@ def _load_speaker_corrections(segment_dir: Path) -> list[dict]:
         return data.get("corrections", [])
     except (json.JSONDecodeError, OSError):
         return []
-
-
-def _append_speaker_correction(segment_dir: Path, correction: dict) -> None:
-    """Append a correction entry to speaker_corrections.json (atomic write)."""
-    corrections = _load_speaker_corrections(segment_dir)
-    corrections.append(correction)
-    talents_dir = segment_dir / "talents"
-    talents_dir.mkdir(parents=True, exist_ok=True)
-    out_path = talents_dir / "speaker_corrections.json"
-    tmp_path = out_path.with_suffix(".tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump({"corrections": corrections}, f, indent=2)
-    tmp_path.rename(out_path)
 
 
 def _check_owner_contamination(embedding: np.ndarray) -> bool:
@@ -390,6 +393,22 @@ def _principal_id_or_none() -> str | None:
     if principal is None:
         return None
     return str(principal["id"])
+
+
+def _voiceprint_busy_response(exc: LockTimeout) -> Any:
+    logger.warning("voiceprint storage busy for %s", exc.path)
+    return error_response(
+        SPEAKER_VOICEPRINT_BUSY,
+        detail="voiceprint storage is busy; try again",
+    )
+
+
+def _labels_busy_response(exc: LockTimeout) -> Any:
+    logger.warning("speaker labels busy for %s", exc.path)
+    return error_response(
+        SPEAKER_LABELS_BUSY,
+        detail="speaker labels are busy; try again",
+    )
 
 
 def _owner_bootstrap_status_fields() -> dict[str, Any]:
@@ -1004,14 +1023,12 @@ def api_confirm_attribution() -> Any:
         )
 
     label = None
-    label_idx = None
-    for i, item in enumerate(labels_data.get("labels", [])):
+    for item in labels_data.get("labels", []):
         if item.get("sentence_id") == sentence_id:
             label = item
-            label_idx = i
             break
 
-    if label is None or label_idx is None:
+    if label is None:
         return error_response(
             SPEAKER_SENTENCE_MISSING,
             detail="Sentence not found in labels",
@@ -1047,23 +1064,36 @@ def api_confirm_attribution() -> Any:
             detail="Embedding too similar to owner voice — cannot save",
         )
 
-    _save_voiceprint(speaker, emb, day, segment_key, source, sentence_id, stream=stream)
+    try:
+        _save_voiceprint(
+            speaker, emb, day, segment_key, source, sentence_id, stream=stream
+        )
+    except LockTimeout as exc:
+        return _voiceprint_busy_response(exc)
 
     old_method = label.get("method")
-    labels_data["labels"][label_idx]["confidence"] = "high"
-    labels_data["labels"][label_idx]["method"] = "user_confirmed"
-    _save_speaker_labels(segment_dir, labels_data)
+    try:
+        apply_label_patches(
+            segment_dir,
+            {sentence_id: {"confidence": "high", "method": "user_confirmed"}},
+            allow_insert=False,
+        )
+    except LockTimeout as exc:
+        return _labels_busy_response(exc)
 
-    _append_speaker_correction(
-        segment_dir,
-        {
-            "sentence_id": sentence_id,
-            "original_speaker": speaker,
-            "corrected_speaker": speaker,
-            "original_method": old_method,
-            "timestamp": now_ms(),
-        },
-    )
+    try:
+        append_speaker_correction(
+            segment_dir,
+            {
+                "sentence_id": sentence_id,
+                "original_speaker": speaker,
+                "corrected_speaker": speaker,
+                "original_method": old_method,
+                "timestamp": now_ms(),
+            },
+        )
+    except LockTimeout as exc:
+        return _labels_busy_response(exc)
 
     log_app_action(
         app="speakers",
@@ -1133,14 +1163,12 @@ def api_correct_attribution() -> Any:
         )
 
     label = None
-    label_idx = None
-    for i, item in enumerate(labels_data.get("labels", [])):
+    for item in labels_data.get("labels", []):
         if item.get("sentence_id") == sentence_id:
             label = item
-            label_idx = i
             break
 
-    if label is None or label_idx is None:
+    if label is None:
         return error_response(
             SPEAKER_SENTENCE_MISSING,
             detail="Sentence not found in labels",
@@ -1167,41 +1195,59 @@ def api_correct_attribution() -> Any:
 
     auto_accumulated_methods = {"acoustic", "context", "contextual"}
     removed_voiceprint_path = None
-    if old_speaker and old_method in auto_accumulated_methods:
-        removed_voiceprint_path = _remove_voiceprint(
-            old_speaker, day, segment_key, source, sentence_id
+    try:
+        if old_speaker and old_method in auto_accumulated_methods:
+            removed_voiceprint_path = _remove_voiceprint(
+                old_speaker, day, segment_key, source, sentence_id
+            )
+
+        voiceprints_removed: list[str] = []
+        if removed_voiceprint_path is not None:
+            journal_root = Path(get_journal())
+            voiceprints_removed = [
+                str(removed_voiceprint_path.relative_to(journal_root))
+            ]
+
+        _save_voiceprint(
+            new_speaker,
+            emb,
+            day,
+            segment_key,
+            source,
+            sentence_id,
+            stream=stream,
         )
+    except LockTimeout as exc:
+        return _voiceprint_busy_response(exc)
 
-    voiceprints_removed: list[str] = []
-    if removed_voiceprint_path is not None:
-        journal_root = Path(get_journal())
-        voiceprints_removed = [str(removed_voiceprint_path.relative_to(journal_root))]
+    try:
+        apply_label_patches(
+            segment_dir,
+            {
+                sentence_id: {
+                    "speaker": new_speaker,
+                    "confidence": "high",
+                    "method": "user_corrected",
+                }
+            },
+            allow_insert=False,
+        )
+    except LockTimeout as exc:
+        return _labels_busy_response(exc)
 
-    _save_voiceprint(
-        new_speaker,
-        emb,
-        day,
-        segment_key,
-        source,
-        sentence_id,
-        stream=stream,
-    )
-
-    labels_data["labels"][label_idx]["speaker"] = new_speaker
-    labels_data["labels"][label_idx]["confidence"] = "high"
-    labels_data["labels"][label_idx]["method"] = "user_corrected"
-    _save_speaker_labels(segment_dir, labels_data)
-
-    _append_speaker_correction(
-        segment_dir,
-        {
-            "sentence_id": sentence_id,
-            "original_speaker": old_speaker,
-            "corrected_speaker": new_speaker,
-            "original_method": old_method,
-            "timestamp": now_ms(),
-        },
-    )
+    try:
+        append_speaker_correction(
+            segment_dir,
+            {
+                "sentence_id": sentence_id,
+                "original_speaker": old_speaker,
+                "corrected_speaker": new_speaker,
+                "original_method": old_method,
+                "timestamp": now_ms(),
+            },
+        )
+    except LockTimeout as exc:
+        return _labels_busy_response(exc)
 
     log_app_action(
         app="speakers",
@@ -1277,14 +1323,12 @@ def api_assign_attribution() -> Any:
         )
 
     label = None
-    label_idx = None
-    for i, item in enumerate(labels_data.get("labels", [])):
+    for item in labels_data.get("labels", []):
         if item.get("sentence_id") == sentence_id:
             label = item
-            label_idx = i
             break
 
-    if label is None or label_idx is None:
+    if label is None:
         return error_response(
             SPEAKER_SENTENCE_MISSING,
             detail="Sentence not found in labels",
@@ -1313,23 +1357,41 @@ def api_assign_attribution() -> Any:
             detail="Embedding too similar to owner voice — cannot save",
         )
 
-    _save_voiceprint(speaker, emb, day, segment_key, source, sentence_id, stream=stream)
+    try:
+        _save_voiceprint(
+            speaker, emb, day, segment_key, source, sentence_id, stream=stream
+        )
+    except LockTimeout as exc:
+        return _voiceprint_busy_response(exc)
 
-    labels_data["labels"][label_idx]["speaker"] = speaker
-    labels_data["labels"][label_idx]["confidence"] = "high"
-    labels_data["labels"][label_idx]["method"] = "user_assigned"
-    _save_speaker_labels(segment_dir, labels_data)
+    try:
+        apply_label_patches(
+            segment_dir,
+            {
+                sentence_id: {
+                    "speaker": speaker,
+                    "confidence": "high",
+                    "method": "user_assigned",
+                }
+            },
+            allow_insert=False,
+        )
+    except LockTimeout as exc:
+        return _labels_busy_response(exc)
 
-    _append_speaker_correction(
-        segment_dir,
-        {
-            "sentence_id": sentence_id,
-            "original_speaker": None,
-            "corrected_speaker": speaker,
-            "original_method": label.get("method"),
-            "timestamp": now_ms(),
-        },
-    )
+    try:
+        append_speaker_correction(
+            segment_dir,
+            {
+                "sentence_id": sentence_id,
+                "original_speaker": None,
+                "corrected_speaker": speaker,
+                "original_method": label.get("method"),
+                "timestamp": now_ms(),
+            },
+        )
+    except LockTimeout as exc:
+        return _labels_busy_response(exc)
 
     log_app_action(
         app="speakers",
@@ -1415,14 +1477,24 @@ def api_owner_status() -> Any:
 @speakers_bp.route("/api/owner/detect", methods=["POST"])
 def api_owner_detect() -> Any:
     """Run owner voice candidate detection."""
-    result = detect_owner_candidate()
+    try:
+        result = detect_owner_candidate()
+    except LockTimeout as exc:
+        return _voiceprint_busy_response(exc)
+    if result.get("error_kind") == "voiceprint_busy":
+        return error_response(SPEAKER_VOICEPRINT_BUSY, detail=result["error"])
     return jsonify(result)
 
 
 @speakers_bp.route("/api/owner/build-from-tags", methods=["POST"])
 def api_owner_build_from_tags() -> Any:
     """Build a confirmed owner centroid directly from validated manual tags."""
-    result = bootstrap_owner_from_manual_tags()
+    try:
+        result = bootstrap_owner_from_manual_tags()
+    except LockTimeout as exc:
+        return _voiceprint_busy_response(exc)
+    if result.get("error_kind") == "voiceprint_busy":
+        return error_response(SPEAKER_VOICEPRINT_BUSY, detail=result["error"])
     if "error" in result:
         return error_response(ENTITY_NOT_FOUND, detail=result["error"], status=400)
     if result.get("status") == "confirmed":
@@ -1441,7 +1513,12 @@ def api_owner_build_from_tags() -> Any:
 @speakers_bp.route("/api/owner/confirm", methods=["POST"])
 def api_owner_confirm() -> Any:
     """Confirm the current owner voice candidate and persist the centroid."""
-    result = confirm_owner_candidate()
+    try:
+        result = confirm_owner_candidate()
+    except LockTimeout as exc:
+        return _voiceprint_busy_response(exc)
+    if result.get("error_kind") == "voiceprint_busy":
+        return error_response(SPEAKER_VOICEPRINT_BUSY, detail=result["error"])
     if "error" in result:
         code = 404 if "No candidate" in result["error"] else 400
         reason = SPEAKER_REVIEW_UNAVAILABLE if code == 404 else ENTITY_NOT_FOUND
@@ -1463,7 +1540,10 @@ def api_owner_confirm() -> Any:
 @speakers_bp.route("/api/owner/reject", methods=["POST"])
 def api_owner_reject() -> Any:
     """Reject the current owner voice candidate."""
-    reject_owner_candidate()
+    try:
+        reject_owner_candidate()
+    except LockTimeout as exc:
+        return _voiceprint_busy_response(exc)
     return jsonify({"status": "needs_detection"})
 
 
@@ -1529,7 +1609,13 @@ def api_discovery_identify() -> Any:
             detail="cluster_id must be an integer",
         )
 
-    result = identify_cluster(cluster_id, name)
+    try:
+        result = identify_cluster(cluster_id, name)
+    except LockTimeout as exc:
+        if exc.path.name in ("speaker_labels.json", "speaker_corrections.json"):
+            return _labels_busy_response(exc)
+        return _voiceprint_busy_response(exc)
+
     if "error" in result:
         resolved = load_resolved_cluster(cluster_id)
         if resolved and resolved.get("label", "").strip().lower() == name.lower():
@@ -1564,6 +1650,252 @@ def api_discovery_identify() -> Any:
     )
 
     return jsonify(result)
+
+
+# CLI-backing routes for sol call speakers HTTP cutover.
+@speakers_bp.route("/api/status", methods=["GET"])
+def api_cli_status() -> Any:
+    """Return the full speakers status payload for CLI-side section selection."""
+    return jsonify(get_speakers_status(None))
+
+
+@speakers_bp.route("/api/bootstrap", methods=["POST"])
+def api_cli_bootstrap() -> Any:
+    """Bootstrap voiceprints for the CLI."""
+    data = request.get_json(silent=True) or {}
+    commit = bool(data.get("commit", False))
+    stats = bootstrap_voiceprints(dry_run=not commit)
+    if "error" in stats:
+        return error_response(
+            SPEAKER_OWNER_CENTROID_REQUIRED,
+            detail=stats["error"],
+        )
+    return jsonify(stats)
+
+
+@speakers_bp.route("/api/resolve-names", methods=["POST"])
+def api_cli_resolve_names() -> Any:
+    """Resolve speaker name variants for the CLI."""
+    data = request.get_json(silent=True) or {}
+    commit = bool(data.get("commit", False))
+    return jsonify(resolve_name_variants(dry_run=not commit))
+
+
+@speakers_bp.route("/api/seed-from-imports", methods=["POST"])
+def api_cli_seed_from_imports() -> Any:
+    """Seed voiceprints from imports for the CLI."""
+    data = request.get_json(silent=True) or {}
+    commit = bool(data.get("commit", False))
+    stats = seed_from_imports(dry_run=not commit)
+    if "error" in stats:
+        return error_response(
+            SPEAKER_OWNER_CENTROID_REQUIRED,
+            detail=stats["error"],
+        )
+    return jsonify(stats)
+
+
+@speakers_bp.route("/api/backfill-last-seen", methods=["POST"])
+def api_cli_backfill_last_seen() -> Any:
+    """Backfill speaker last-seen metadata for the CLI."""
+    data = request.get_json(silent=True) or {}
+    commit = bool(data.get("commit", False))
+    return jsonify(backfill_last_seen(dry_run=not commit))
+
+
+@speakers_bp.route("/api/backfill", methods=["POST"])
+def api_cli_backfill() -> Any:
+    """Backfill speaker labels synchronously for the CLI."""
+    data = request.get_json(silent=True) or {}
+    commit = bool(data.get("commit", False))
+    reattribute = bool(data.get("reattribute", False))
+    kwargs: dict[str, Any] = {
+        "dry_run": not commit,
+        "progress_callback": None,
+    }
+    if reattribute:
+        kwargs["reattribute"] = True
+    return jsonify(backfill_segments(**kwargs))
+
+
+@speakers_bp.route("/api/wipe", methods=["POST"])
+def api_cli_wipe() -> Any:
+    """Wipe speaker artifacts for the CLI."""
+    data = request.get_json(silent=True) or {}
+    commit = bool(data.get("commit", False))
+    report = wipe_speaker_artifacts(dry_run=not commit)
+    return jsonify(report.to_dict())
+
+
+@speakers_bp.route("/api/attribute-segment", methods=["POST"])
+def api_cli_attribute_segment() -> Any:
+    """Attribute one segment and optionally persist CLI-requested artifacts."""
+    data = request.get_json(silent=True) or {}
+    day = data.get("day")
+    stream = data.get("stream")
+    segment = data.get("segment")
+    commit = bool(data.get("commit", False))
+    save = bool(data.get("save", True))
+    accumulate = bool(data.get("accumulate", True))
+
+    if not all([day, stream, segment]):
+        return error_response(MISSING_REQUIRED_FIELD, detail="Missing required fields")
+
+    result = attribute_segment(day, stream, segment)
+    if result.get("error"):
+        return error_response(
+            SPEAKER_OWNER_CENTROID_REQUIRED,
+            detail=result["error"],
+        )
+
+    labels = result.get("labels", [])
+    metadata = result.get("metadata", {})
+    source = result.get("source")
+    written_path = None
+    accumulated = None
+
+    if commit and save:
+        try:
+            out_path = save_speaker_labels(
+                get_segment_path(day, segment, stream),
+                labels,
+                metadata,
+            )
+        except LockTimeout as exc:
+            return _labels_busy_response(exc)
+        written_path = str(out_path)
+
+    if commit and accumulate and source:
+        try:
+            accumulated = accumulate_voiceprints(day, stream, segment, labels, source)
+        except LockTimeout as exc:
+            return _voiceprint_busy_response(exc)
+
+    return jsonify(
+        {
+            "result": result,
+            "written_path": written_path,
+            "accumulated": accumulated,
+        }
+    )
+
+
+@speakers_bp.route("/api/suggest", methods=["GET"])
+def api_cli_suggest() -> Any:
+    """Return speaker suggestion items plus server-rendered markdown."""
+    try:
+        limit = int(request.args.get("limit", 5))
+    except (TypeError, ValueError):
+        return error_response(
+            INVALID_REQUEST_VALUE,
+            detail="Invalid limit parameter",
+        )
+    items = suggest_opportunities(limit=limit)
+    return jsonify({"items": items, "markdown": format_suggestions(items)})
+
+
+@speakers_bp.route("/api/discovery/identify-cli", methods=["POST"])
+def api_cli_discovery_identify() -> Any:
+    """Identify a discovery cluster with CLI-compatible pass-through behavior."""
+    data = request.get_json(silent=True) or {}
+    cluster_id = data.get("cluster_id")
+    name = data.get("name")
+    entity_id = data.get("entity_id")
+
+    if cluster_id is None or not name:
+        return error_response(
+            MISSING_REQUIRED_FIELD,
+            detail="cluster_id and name are required",
+        )
+
+    try:
+        cluster_id = int(cluster_id)
+    except (TypeError, ValueError):
+        return error_response(
+            INVALID_REQUEST_VALUE,
+            detail="cluster_id must be an integer",
+        )
+
+    try:
+        result = identify_cluster(cluster_id, name, entity_id=entity_id)
+    except LockTimeout as exc:
+        if exc.path.name in ("speaker_labels.json", "speaker_corrections.json"):
+            return _labels_busy_response(exc)
+        return _voiceprint_busy_response(exc)
+
+    if "error" in result:
+        return error_response(
+            SPEAKER_COMMAND_FAILED,
+            detail=json.dumps(result, indent=2, default=str),
+            status=400,
+        )
+    return jsonify(result)
+
+
+@speakers_bp.route("/api/merge-names", methods=["POST"])
+def api_cli_merge_names() -> Any:
+    """Merge two speaker names for the CLI."""
+    data = request.get_json(silent=True) or {}
+    alias = data.get("alias")
+    canonical = data.get("canonical")
+    result = merge_names(alias, canonical)
+    if "error" in result:
+        return error_response(
+            SPEAKER_COMMAND_FAILED,
+            detail=json.dumps(result, indent=2, default=str),
+            status=400,
+        )
+    return jsonify(result)
+
+
+@speakers_bp.route("/api/link-import", methods=["POST"])
+def api_cli_link_import() -> Any:
+    """Link an imported speaker name to an entity for the CLI."""
+    data = request.get_json(silent=True) or {}
+    name = data.get("name")
+    entity_id = data.get("entity_id")
+    result = link_import(name, entity_id)
+    if "error" in result:
+        return error_response(
+            SPEAKER_COMMAND_FAILED,
+            detail=json.dumps(result, indent=2, default=str),
+            status=400,
+        )
+    return jsonify(result)
+
+
+@speakers_bp.route("/api/owner/confirm-cli", methods=["POST"])
+def api_cli_owner_confirm() -> Any:
+    """Confirm the owner candidate with CLI-compatible full-result behavior."""
+    try:
+        result = confirm_owner_candidate()
+    except LockTimeout as exc:
+        return _voiceprint_busy_response(exc)
+    if result.get("error_kind") == "voiceprint_busy":
+        return error_response(SPEAKER_VOICEPRINT_BUSY, detail=result["error"])
+    if "error" in result:
+        return error_response(
+            SPEAKER_COMMAND_FAILED,
+            detail=json.dumps(result, indent=2, default=str),
+            status=400,
+        )
+    return jsonify(result)
+
+
+@speakers_bp.route("/api/owner/reject-cli", methods=["POST"])
+def api_cli_owner_reject() -> Any:
+    """Reject the owner candidate with CLI-compatible domain result behavior."""
+    try:
+        result = reject_owner_candidate()
+    except LockTimeout as exc:
+        return _voiceprint_busy_response(exc)
+    return jsonify(result)
+
+
+@speakers_bp.route("/api/owner/ready", methods=["POST"])
+def api_cli_owner_ready() -> Any:
+    """Return owner-detection readiness; this may refresh provisional state."""
+    return jsonify(owner_detection_ready())
 
 
 @speakers_bp.route("/api/serve_audio/<day>/<path:rel_path>")

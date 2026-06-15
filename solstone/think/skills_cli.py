@@ -1,20 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2026 sol pbc
 
-"""sol skills — install, uninstall, and inspect coding-agent skills.
+"""sol skills — build, install, uninstall, and inspect coding-agent skills.
 
 Two install modes:
 
 - User mode (default): copies the bundled umbrella skill
-  solstone/talent/solstone/ into per-agent user config directories
+  solstone/talent/sol/ into per-agent user config directories
   (~/.claude/skills/, ~/.codex/skills/, ~/.gemini/skills/).
-- Project mode (--project [DIR]): symlinks every talent/ and apps/*/talent/
-  SKILL.md source into <DIR>/.claude/skills/ and <DIR>/.agents/skills/.
+- Project mode (--project [DIR]): symlinks the two router skills (sol, journal)
+  into <DIR>/.claude/skills/ and <DIR>/.agents/skills/.
 
-Subcommands: install, uninstall, list.
-
-Note: this is a different namespace from `sol call skills`, which manages
-owner-wide journal skill patterns under apps/skills/.
+Subcommands: build, install, uninstall, list.
 """
 
 from __future__ import annotations
@@ -35,15 +32,14 @@ ALL_AGENTS = "all"
 PROJECT_MULTI_AGENT = "agents"
 PROJECT_CLAUDE_SKILLS_REL = ".claude/skills"
 PROJECT_AGENTS_SKILLS_REL = ".agents/skills"
+ROUTER_SKILL_NAMES = ("sol", "journal")
 GLOBAL_SKIP_MESSAGE = (
     "no AI coding agent config directories found — skipping skill registration"
 )
-SUBCOMMAND_DESCRIPTION = """User mode: copies/removes the bundled umbrella skill solstone/talent/solstone/ in per-agent user config dirs.
-Project mode: symlinks/removes every talent/ and apps/*/talent/ skill under DIR.
+SUBCOMMAND_DESCRIPTION = """User mode: copies/removes the bundled umbrella skill solstone/talent/sol/ in per-agent user config dirs.
+Project mode: symlinks/removes the two router skills (sol, journal) under DIR.
 User-mode install creates missing agent config dirs and atomically replaces a
-changed skill target.
-This is separate from `sol call skills`, which manages owner-wide journal
-skill patterns."""
+changed skill target."""
 
 
 @dataclass(frozen=True)
@@ -121,23 +117,26 @@ AGENTS: dict[str, AgentSpec] = {
 
 def resolve_user_skill() -> Path:
     """Return the bundled umbrella user skill source directory."""
-    skill_dir = Path(str(resources.files("solstone.talent") / "solstone"))
+    skill_dir = Path(str(resources.files("solstone.talent") / "sol"))
     skill_file = skill_dir / "SKILL.md"
     if not skill_file.is_file():
         raise FileNotFoundError(
             "expected bundled umbrella skill at "
-            f"solstone/talent/solstone/SKILL.md ({skill_file})"
+            f"solstone/talent/sol/SKILL.md ({skill_file})"
         )
     return skill_dir
 
 
 def discover_project_sources(repo_root: Path) -> list[Path]:
     """Return project skill source directories, rejecting duplicate names."""
-    package_root = repo_root / "solstone"
-    sources = sorted(
-        [path.parent for path in (package_root / "talent").glob("*/SKILL.md")]
-        + [path.parent for path in (package_root / "apps").glob("*/talent/*/SKILL.md")]
-    )
+    sources: list[Path] = []
+    for name in ROUTER_SKILL_NAMES:
+        source = repo_root / "solstone" / "talent" / name
+        skill_file = source / "SKILL.md"
+        if not skill_file.is_file():
+            raise FileNotFoundError(f"expected project skill at {skill_file}")
+        sources.append(source)
+    sources = sorted(sources)
     seen: dict[str, Path] = {}
     for source in sources:
         previous = seen.get(source.name)
@@ -371,7 +370,18 @@ def _remove_stale_project_links(
     if not link_parent.is_dir():
         return
     for link in sorted(link_parent.iterdir()):
-        if not link.is_symlink() or link.name in source_names:
+        if link.name in source_names:
+            continue
+        if not link.is_symlink():
+            rows.append(
+                ActionRow(
+                    agent,
+                    link.name,
+                    "warning",
+                    link,
+                    reason="user content at stale target preserved",
+                )
+            )
             continue
         try:
             link.unlink()
@@ -529,12 +539,11 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="sol skills",
         description=(
             "Install, uninstall, and inspect coding-agent skills. "
-            "User mode copies the bundled umbrella skill solstone/talent/solstone/ "
-            "into per-agent user config dirs. Project mode symlinks every talent/ "
-            "and apps/*/talent/ SKILL.md source into the selected project directory. "
-            "This is separate from `sol call skills`, which manages owner-wide "
-            "journal skill patterns. User-mode install creates missing agent config "
-            "dirs and atomically replaces a changed skill target."
+            "User mode copies the bundled umbrella skill solstone/talent/sol/ "
+            "into per-agent user config dirs. Project mode symlinks the two "
+            "router skills (sol, journal) into the selected project directory. "
+            "User-mode install creates missing agent config dirs and atomically "
+            "replaces a changed skill target."
         ),
     )
     subparsers = parser.add_subparsers(dest="cmd", required=True)
@@ -559,6 +568,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     list_parser = subparsers.add_parser("list", help="list skill install status")
     _add_project_option(list_parser)
+
+    build_parser = subparsers.add_parser(
+        "build", help="build generated router skill references"
+    )
+    build_parser.add_argument(
+        "--check",
+        action="store_true",
+        help="verify generated router skill references are current without writing",
+    )
 
     return parser
 
@@ -585,9 +603,28 @@ def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
     repo_root = Path(get_project_root())
-    target = _resolve_project_target(args.project)
+    target = _resolve_project_target(getattr(args, "project", None))
 
     try:
+        if args.cmd == "build":
+            from solstone.think import skills_build
+
+            if args.check:
+                stale = skills_build.check()
+                for path in stale:
+                    print(
+                        f"stale generated reference {path} (run `sol skills build`)",
+                        file=sys.stderr,
+                    )
+                if stale:
+                    return 1
+                print("generated skill references are current")
+                return 0
+
+            for path in skills_build.build():
+                print(f"generated {path}")
+            return 0
+
         if args.cmd == "install":
             if target is None:
                 skill_dir = resolve_user_skill()

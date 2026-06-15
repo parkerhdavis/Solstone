@@ -119,7 +119,9 @@ def merge_journals_fixture(tmp_path, monkeypatch):
     )
 
     (source / "identity").mkdir(parents=True)
-    (source / "identity" / "self.md").write_text("source identity\n", encoding="utf-8")
+    (source / "identity" / "partner.md").write_text(
+        "source identity\n", encoding="utf-8"
+    )
     (source / "config").mkdir(parents=True)
     (source / "config" / "source-only.json").write_text("{}", encoding="utf-8")
 
@@ -325,20 +327,6 @@ def test_facet_merge_overlapping(merge_journals_fixture, monkeypatch):
             {"content": "Target fact", "observed_at": 300},
         ],
     )
-    _write_jsonl(
-        paths["source"] / "facets" / "work" / "todos" / "20260101.jsonl",
-        [
-            {"text": "Duplicate todo", "created_at": 10},
-            {"text": "Source todo", "created_at": 11},
-        ],
-    )
-    _write_jsonl(
-        paths["target"] / "facets" / "work" / "todos" / "20260101.jsonl",
-        [
-            {"text": "Duplicate todo", "created_at": 10},
-            {"text": "Target todo", "created_at": 12},
-        ],
-    )
     (paths["source"] / "facets" / "work" / "news").mkdir(parents=True)
     (paths["target"] / "facets" / "work" / "news").mkdir(parents=True)
     (paths["source"] / "facets" / "work" / "news" / "20260101.md").write_text(
@@ -445,15 +433,6 @@ def test_facet_merge_overlapping(merge_journals_fixture, monkeypatch):
         "Target fact",
     }
 
-    todos = _read_jsonl(
-        paths["target"] / "facets" / "work" / "todos" / "20260101.jsonl"
-    )
-    assert {item["text"] for item in todos} == {
-        "Duplicate todo",
-        "Source todo",
-        "Target todo",
-    }
-
     assert (paths["target"] / "facets" / "work" / "news" / "20260102.md").read_text(
         encoding="utf-8"
     ) == "source new\n"
@@ -529,7 +508,7 @@ def test_source_identity_skipped(merge_journals_fixture, monkeypatch):
     result = runner.invoke(call_app, ["journal", "merge", str(paths["source"])])
 
     assert result.exit_code == 0
-    assert not (paths["target"] / "identity" / "self.md").exists()
+    assert not (paths["target"] / "identity" / "partner.md").exists()
 
 
 def test_source_config_skipped(merge_journals_fixture, monkeypatch):

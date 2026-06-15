@@ -7,20 +7,33 @@ import pytest
 
 from solstone.think.entities import (
     DEFAULT_ACTIVITY_TS,
+    AkaConflictError,
+    EntityBlockedError,
+    EntityExistsError,
+    EntityNotFoundError,
+    add_entity_aka,
     add_observation,
+    attach_or_reactivate_entity,
     block_journal_entity,
+    count_observations,
     delete_journal_entity,
+    detach_facet_entity,
     detected_entities_path,
     ensure_entity_memory,
+    entity_last_active_day,
     entity_last_active_ts,
     entity_memory_path,
     entity_slug,
     find_matching_entity,
     get_identity_names,
     iter_detected_entity_names_since,
+    last_active_day_for_ts,
     load_all_attached_entities,
+    load_all_facet_relationships,
+    load_all_journal_entities,
     load_detected_entities_recent,
     load_entities,
+    load_facet_relationship,
     load_journal_entity,
     load_observations,
     load_recent_entity_names,
@@ -30,11 +43,15 @@ from solstone.think.entities import (
     resolve_entity,
     save_detected_entity,
     save_entities,
+    save_facet_relationship,
+    save_journal_entity,
     save_observations,
     touch_entities_from_activity,
     touch_entity,
     unblock_journal_entity,
     update_detected_entity,
+    update_facet_entity_description,
+    update_facet_entity_identity,
     validate_aka_uniqueness,
 )
 
@@ -127,6 +144,67 @@ def test_entity_last_active_ts_zero_timestamps():
     }
     ts = entity_last_active_ts(entity)
     assert ts == DEFAULT_ACTIVITY_TS
+
+
+@pytest.fixture
+def tz_americas_evening(monkeypatch):
+    """Pin process tz to US Eastern so a UTC-next-day instant is the same local day.
+
+    Journal days bucket on local time, so the derived last-active day must follow
+    local time — this is the evening-Americas case that produced "Tomorrow".
+    """
+    import os
+    import time
+
+    original_tz = os.environ.get("TZ")
+    monkeypatch.setenv("TZ", "America/New_York")
+    time.tzset()
+    yield
+    if original_tz is None:
+        os.environ.pop("TZ", None)
+    else:
+        os.environ["TZ"] = original_tz
+    time.tzset()
+
+
+def test_last_active_day_for_ts_uses_local_journal_day(tz_americas_evening):
+    """Evening-Americas instant renders the local journal day, not the next UTC day."""
+    from datetime import datetime, timezone
+
+    # 2026-01-15 23:30 America/New_York == 2026-01-16 04:30 UTC.
+    instant = datetime(2026, 1, 16, 4, 30, tzinfo=timezone.utc)
+    ts_ms = int(instant.timestamp() * 1000)
+
+    assert last_active_day_for_ts(ts_ms) == "20260115"  # local journal day (the fix)
+    assert last_active_day_for_ts(ts_ms) != "20260116"  # NOT the next UTC day (the bug)
+
+
+def test_entity_last_active_day_from_updated_at_local_basis(tz_americas_evening):
+    """entity_last_active_day derives the local journal day from the updated_at epoch."""
+    from datetime import datetime, timezone
+
+    instant = datetime(2026, 1, 16, 4, 30, tzinfo=timezone.utc)
+    ts_ms = int(instant.timestamp() * 1000)
+
+    assert entity_last_active_day({"updated_at": ts_ms}) == "20260115"
+
+
+def test_entity_last_active_day_returns_last_seen_verbatim():
+    """A valid last_seen journal-day string is returned without an epoch round-trip."""
+    entity = {"last_seen": "20260115", "updated_at": 1700000000000}
+    assert entity_last_active_day(entity) == "20260115"
+
+
+def test_entity_last_active_day_malformed_last_seen_falls_through(
+    tz_americas_evening,
+):
+    """Malformed last_seen falls through to the epoch-derived local day."""
+    from datetime import datetime, timezone
+
+    instant = datetime(2026, 1, 16, 4, 30, tzinfo=timezone.utc)
+    ts_ms = int(instant.timestamp() * 1000)
+    entity = {"last_seen": "invalid", "updated_at": ts_ms}
+    assert entity_last_active_day(entity) == "20260115"
 
 
 def test_entity_last_active_ts_negative_timestamps():
@@ -286,16 +364,10 @@ def test_save_entities_sorting(fixture_journal, tmp_path, monkeypatch):
     assert "beta_corp" in journal_ids
 
 
-def test_save_entities_detected_invalidates_loading_cache(
+def test_save_entities_detected_reflects_fresh_read(
     fixture_journal, tmp_path, monkeypatch
 ):
-    """Regression: save_entities must invalidate the loading cache so load-after-save returns fresh data.
-
-    The autouse _clear_entity_caches fixture only clears between tests, so within
-    a single test the cache persists across calls. Before the fix, the first load
-    populated the cache and a subsequent save did not invalidate it — the second
-    load returned stale data from the cache rather than re-reading disk.
-    """
+    """Detected entity reads reflect same-process saves."""
     monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
     (tmp_path / "facets" / "test_facet" / "entities").mkdir(parents=True)
 
@@ -321,10 +393,10 @@ def test_save_entities_detected_invalidates_loading_cache(
     assert {e["name"] for e in loaded_second} == {"Alice", "Bob"}
 
 
-def test_save_entities_attached_invalidates_loading_cache(
+def test_save_entities_attached_reflects_fresh_read(
     fixture_journal, tmp_path, monkeypatch
 ):
-    """Regression: save_entities (attached path, day=None) must invalidate the loading cache."""
+    """Attached entity reads reflect same-process saves."""
     monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
     (tmp_path / "facets" / "test_facet").mkdir(parents=True)
 
@@ -343,6 +415,243 @@ def test_save_entities_attached_invalidates_loading_cache(
 
     loaded_second = load_entities("test_facet")
     assert {e["name"] for e in loaded_second} == {"Alice", "Bob"}
+
+
+def test_concurrent_description_updates_preserve_both_entities(
+    fixture_journal, tmp_path, monkeypatch
+):
+    """Concurrent attached-entity description writes do not lose sibling updates."""
+    import threading
+
+    facet = "test_facet"
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+    (tmp_path / "facets" / facet).mkdir(parents=True)
+
+    save_entities(
+        facet,
+        [
+            {"type": "Person", "name": "Alice", "description": "Initial Alice"},
+            {"type": "Person", "name": "Bob", "description": "Initial Bob"},
+        ],
+    )
+
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def update_description(name: str, description: str) -> None:
+        try:
+            entity_id = entity_slug(name)
+            load_entities(facet, include_detached=True)
+            barrier.wait(timeout=5)
+            update_facet_entity_description(facet, entity_id, description)
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(
+            target=update_description,
+            args=("Alice", "Updated Alice"),
+        ),
+        threading.Thread(
+            target=update_description,
+            args=("Bob", "Updated Bob"),
+        ),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not errors
+    assert load_facet_relationship(facet, "alice")["description"] == "Updated Alice"
+    assert load_facet_relationship(facet, "bob")["description"] == "Updated Bob"
+
+
+def test_attach_or_reactivate_entity_fresh_key_order(
+    fixture_journal, tmp_path, monkeypatch
+):
+    """Fresh targeted attach writes the same ordered schema as bulk save."""
+    facet = "test_facet"
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+
+    relationship, reattached = attach_or_reactivate_entity(
+        facet,
+        entity_type="Person",
+        name="Alice Johnson",
+        description="Friend",
+    )
+
+    assert reattached is False
+    assert list(load_journal_entity("alice_johnson")) == [
+        "id",
+        "name",
+        "type",
+        "created_at",
+    ]
+    assert list(relationship) == [
+        "entity_id",
+        "description",
+        "attached_at",
+        "updated_at",
+    ]
+    assert list(load_facet_relationship(facet, "alice_johnson")) == [
+        "entity_id",
+        "description",
+        "attached_at",
+        "updated_at",
+    ]
+
+
+def test_detach_facet_entity_key_order(fixture_journal, tmp_path, monkeypatch):
+    """Targeted detach preserves the existing relationship field order."""
+    facet = "test_facet"
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+    attach_or_reactivate_entity(
+        facet,
+        entity_type="Person",
+        name="Alice",
+        description="Friend",
+    )
+
+    relationship = detach_facet_entity(facet, "alice")
+
+    assert relationship["detached"] is True
+    assert list(load_facet_relationship(facet, "alice")) == [
+        "entity_id",
+        "description",
+        "attached_at",
+        "updated_at",
+        "detached",
+    ]
+
+
+def test_update_facet_entity_description_key_order(
+    fixture_journal, tmp_path, monkeypatch
+):
+    """Targeted description updates keep the relationship schema order stable."""
+    facet = "test_facet"
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+    attach_or_reactivate_entity(
+        facet,
+        entity_type="Person",
+        name="Alice",
+        description="Initial",
+    )
+
+    update_facet_entity_description(facet, "alice", "Updated")
+
+    relationship = load_facet_relationship(facet, "alice")
+    assert relationship["description"] == "Updated"
+    assert list(relationship) == [
+        "entity_id",
+        "description",
+        "attached_at",
+        "updated_at",
+    ]
+
+
+def test_attached_owner_methods_raise_typed_errors(
+    fixture_journal, tmp_path, monkeypatch
+):
+    """Targeted attached writes raise owner exceptions instead of value errors."""
+    facet = "test_facet"
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+    save_entities(
+        facet,
+        [
+            {"type": "Person", "name": "Alice", "description": "Friend"},
+            {"type": "Person", "name": "Bob", "description": "Neighbor"},
+        ],
+    )
+
+    with pytest.raises(EntityExistsError):
+        attach_or_reactivate_entity(
+            facet,
+            entity_type="Person",
+            name="Alice",
+            description="Duplicate",
+        )
+
+    with pytest.raises(EntityNotFoundError):
+        detach_facet_entity(facet, "missing")
+
+    with pytest.raises(EntityNotFoundError):
+        update_facet_entity_description(facet, "missing", "Updated")
+
+    with pytest.raises(EntityExistsError):
+        update_facet_entity_identity(
+            facet,
+            old_name="Alice",
+            new_name="Bob",
+            entity_type="Person",
+            aka_list=[],
+        )
+
+    with pytest.raises(AkaConflictError):
+        update_facet_entity_identity(
+            facet,
+            old_name="Alice",
+            new_name="Alice",
+            entity_type="Person",
+            aka_list=["Bob"],
+        )
+
+    with pytest.raises(AkaConflictError):
+        add_entity_aka(facet, "alice", "Bob", exclude_name="Alice")
+
+    with pytest.raises(EntityNotFoundError):
+        add_entity_aka(facet, "missing", "Missing Alias", exclude_name="Missing")
+
+
+def test_attach_or_reactivate_entity_blocked_before_detached(
+    fixture_journal, tmp_path, monkeypatch
+):
+    """Attach reports blocked for entities that are both blocked and detached."""
+    facet = "test_facet"
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+    save_entities(
+        facet,
+        [{"type": "Person", "name": "Alice", "description": "Friend"}],
+    )
+    block_journal_entity("alice")
+
+    with pytest.raises(EntityBlockedError):
+        attach_or_reactivate_entity(
+            facet,
+            entity_type="Person",
+            name="Alice",
+            description="Friend",
+        )
+
+
+def test_save_journal_entity_reflects_fresh_reads(tmp_path, monkeypatch):
+    """Journal entity readers reflect same-process saves."""
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+
+    save_journal_entity({"id": "alice", "name": "Alice", "type": "Person"})
+
+    assert load_journal_entity("alice")["name"] == "Alice"
+    assert load_all_journal_entities()["alice"]["name"] == "Alice"
+
+    save_journal_entity({"id": "alice", "name": "Alice Updated", "type": "Person"})
+
+    assert load_journal_entity("alice")["name"] == "Alice Updated"
+    assert load_all_journal_entities()["alice"]["name"] == "Alice Updated"
+
+
+def test_save_facet_relationship_reflects_fresh_reads(tmp_path, monkeypatch):
+    """Facet relationship readers reflect same-process saves."""
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+
+    save_facet_relationship("work", "alice", {"description": "First"})
+
+    assert load_facet_relationship("work", "alice")["description"] == "First"
+    assert load_all_facet_relationships("work")["alice"]["description"] == "First"
+
+    save_facet_relationship("work", "alice", {"description": "Second"})
+
+    assert load_facet_relationship("work", "alice")["description"] == "Second"
+    assert load_all_facet_relationships("work")["alice"]["description"] == "Second"
 
 
 def test_save_detected_entity_basic(fixture_journal, tmp_path, monkeypatch):
@@ -409,27 +718,27 @@ def test_save_detected_entity_retry_on_error(fixture_journal, tmp_path, monkeypa
     """Test that save_detected_entity retries on transient OSError."""
     from unittest.mock import patch
 
+    from solstone.think.journal_io import atomic_replace as _real_atomic_replace
+
     monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
     (tmp_path / "facets" / "test_facet" / "entities").mkdir(parents=True)
 
     call_count = 0
-    original_atomic_write = __import__(
-        "solstone.think.entities.core", fromlist=["atomic_write"]
-    ).atomic_write
 
-    def flaky_atomic_write(path, content, prefix=".tmp_"):
+    def flaky_atomic_replace(path, data, *, mode=None):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
             raise PermissionError("Simulated transient error")
-        return original_atomic_write(path, content, prefix)
+        return _real_atomic_replace(path, data, mode=mode)
 
     with patch(
-        "solstone.think.entities.saving.atomic_write", side_effect=flaky_atomic_write
+        "solstone.think.entities.saving.atomic_replace",
+        side_effect=flaky_atomic_replace,
     ):
         save_detected_entity("test_facet", "20250101", "Person", "Alice", "Friend")
 
-    assert call_count == 2  # First attempt failed, second succeeded
+    assert call_count == 2
     loaded = load_entities("test_facet", "20250101")
     assert len(loaded) == 1
     assert loaded[0]["name"] == "Alice"
@@ -2029,7 +2338,7 @@ def test_load_observations_empty(fixture_journal, tmp_path, monkeypatch):
 
 
 def test_save_and_load_observations(fixture_journal, tmp_path, monkeypatch):
-    """Test saving and loading observations."""
+    """Observation readers reflect same-process saves."""
     monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
 
     # Save observations
@@ -2050,6 +2359,16 @@ def test_save_and_load_observations(fixture_journal, tmp_path, monkeypatch):
     assert loaded[0]["observed_at"] == 1700000000000
     assert loaded[0]["source_day"] == "20250113"
     assert loaded[1]["content"] == "Expert in Kubernetes"
+    assert count_observations("personal", "Alice Johnson") == 2
+
+    updated_observations = [
+        {"content": "Prefers afternoon meetings", "observed_at": 1700000002000},
+    ]
+    save_observations("personal", "Alice Johnson", updated_observations)
+
+    loaded_updated = load_observations("personal", "Alice Johnson")
+    assert [obs["content"] for obs in loaded_updated] == ["Prefers afternoon meetings"]
+    assert count_observations("personal", "Alice Johnson") == 1
 
 
 def test_add_observation_success(fixture_journal, tmp_path, monkeypatch):
@@ -2072,6 +2391,34 @@ def test_add_observation_success(fixture_journal, tmp_path, monkeypatch):
     # Verify persistence
     loaded = load_observations("personal", "Alice")
     assert len(loaded) == 2
+
+
+def test_add_observation_retry_on_error(fixture_journal, tmp_path, monkeypatch):
+    """Test that add_observation retries on transient OSError."""
+    from unittest.mock import patch
+
+    from solstone.think.journal_io import atomic_replace as _real_atomic_replace
+
+    monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+
+    call_count = 0
+
+    def flaky_atomic_replace(path, data, *, mode=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise PermissionError("Simulated transient error")
+        return _real_atomic_replace(path, data, mode=mode)
+
+    with patch(
+        "solstone.think.entities.observations.atomic_replace",
+        side_effect=flaky_atomic_replace,
+    ):
+        add_observation("personal", "Alice", "Prefers async communication", "20250113")
+
+    assert call_count == 2
+    loaded = load_observations("personal", "Alice")
+    assert [obs["content"] for obs in loaded] == ["Prefers async communication"]
 
 
 def test_add_observation_empty_content(fixture_journal, tmp_path, monkeypatch):

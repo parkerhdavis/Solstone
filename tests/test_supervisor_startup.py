@@ -3,12 +3,9 @@
 
 import importlib
 import itertools
+import json
 from types import SimpleNamespace
 from unittest import mock
-
-import pytest
-
-import solstone.think.utils as utils
 
 
 def test_task_queue_defers_submit_when_not_ready(monkeypatch):
@@ -36,6 +33,7 @@ def test_task_queue_defers_submit_when_not_ready(monkeypatch):
             "scheduler_name": None,
         }
     ]
+    assert "outbound_approval" not in json.dumps(queue._pending)
     assert queue.collect_queue_counts() == {"pending": 1}
 
 
@@ -91,6 +89,7 @@ def test_task_queue_set_ready_dedupes_same_cmd_in_pending(monkeypatch):
             "scheduler_name": None,
         }
     ]
+    assert "outbound_approval" not in json.dumps(queue._queues["indexer"])
 
 
 def test_task_queue_ready_true_default_dispatches_immediately(monkeypatch):
@@ -168,68 +167,6 @@ def test_wait_for_convey_ready_convey_died(caplog):
     assert "Convey process exited during startup" in caplog.text
 
 
-def test_require_solstone_tempfail_when_supervisor_spawned(monkeypatch, capsys):
-    monkeypatch.delenv("SOL_SKIP_SUPERVISOR_CHECK", raising=False)
-    monkeypatch.setenv("SOL_SUPERVISOR_SPAWNED", "1")
-
-    with mock.patch("solstone.think.utils.is_solstone_up", return_value=False):
-        with pytest.raises(SystemExit) as exc_info:
-            utils.require_solstone()
-
-    assert exc_info.value.code == utils.EXIT_TEMPFAIL
-    assert capsys.readouterr().err == ""
-
-
-def test_require_solstone_exit1_when_not_supervisor_spawned(monkeypatch, capsys):
-    monkeypatch.delenv("SOL_SKIP_SUPERVISOR_CHECK", raising=False)
-    monkeypatch.delenv("SOL_SUPERVISOR_SPAWNED", raising=False)
-
-    with mock.patch("solstone.think.utils.is_solstone_up", return_value=False):
-        with pytest.raises(SystemExit) as exc_info:
-            utils.require_solstone()
-
-    assert exc_info.value.code == 1
-    assert (
-        capsys.readouterr().err
-        == "sol: solstone isn't running. Start it with 'journal up' and retry.\n"
-    )
-
-
-def test_require_solstone_skip_env_still_honored(monkeypatch):
-    monkeypatch.setenv("SOL_SKIP_SUPERVISOR_CHECK", "1")
-    monkeypatch.delenv("SOL_SUPERVISOR_SPAWNED", raising=False)
-
-    with mock.patch(
-        "solstone.think.utils.is_solstone_up",
-        side_effect=AssertionError("should not run"),
-    ):
-        assert utils.require_solstone() is None
-
-
-def test_startup_submits_digest_once():
-    mod = importlib.reload(importlib.import_module("solstone.think.supervisor"))
-    submit = mock.Mock()
-
-    mod._task_queue = SimpleNamespace(submit=submit)
-    mod._is_remote_mode = False
-    mod._digest_submitted_this_boot = False
-
-    mod._maybe_submit_startup_digest(no_cortex=False)
-    mod._maybe_submit_startup_digest(no_cortex=False)
-
-    submit.assert_called_once_with(["journal", "identity", "digest"])
-    assert mod._digest_submitted_this_boot is True
-
-
-def test_startup_skips_digest_when_no_cortex():
-    mod = importlib.reload(importlib.import_module("solstone.think.supervisor"))
-    submit = mock.Mock()
-
-    mod._task_queue = SimpleNamespace(submit=submit)
-    mod._is_remote_mode = False
-    mod._digest_submitted_this_boot = False
-
-    mod._maybe_submit_startup_digest(no_cortex=True)
-
-    submit.assert_not_called()
-    assert mod._digest_submitted_this_boot is False
+# require_solstone branch tests (down/tempfail/up/skip) live with the function in
+# tests/test_think_utils.py::TestSolstoneGuard — they test a utils helper, not
+# supervisor startup, and were a duplicate set here.

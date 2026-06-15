@@ -2,17 +2,22 @@
 name: journal
 description: >
   Search the journal, list facets, and explain how the journal is laid out
-  on disk — captures, extracts, talent outputs, apps, facets, and the
-  search index. Also covers the `sol call journal` CLI.
-  TRIGGER: journal, journal layout, search journal, find meeting, list
-  facets, show agent output, captures, extracts, talents, apps, facet,
-  indexer, activity records, sol call journal, sol call journal search,
-  sol call journal facet.
+  on disk — captures, extracts, talent outputs, apps, facets, and the search
+  index. Covers host commands such as `journal setup`, `journal doctor`,
+  `journal service`, `journal health`, `journal talent`, and `journal
+  identity`, plus the `sol call journal` CLI.
+  TRIGGER: journal, journal setup, journal doctor, journal service, journal
+  health, journal talent, journal identity, journal layout, search journal,
+  find meeting, list facets, show agent output, captures, extracts, talents,
+  apps, facet, indexer, activity records, sol call journal, sol call journal
+  search, sol call journal facet.
 ---
 
 # Journal Skill
 
-Explore journal layout and run `sol call journal` CLI work. Invoke via Bash: `sol call journal <command> [args...]`.
+Operate the local journal host and explore journal layout. Use this skill for
+`journal <command>` runtime/setup work and for `sol call journal <command>`
+content queries.
 
 ## Overview
 
@@ -30,6 +35,40 @@ A journal is the on-disk record of captures, extracts, facet data, app storage, 
 
 For the full pipeline, see [captures](references/captures.md).
 
+## Host CLI
+
+Use host commands from the journal machine:
+
+```bash
+journal setup
+journal doctor
+journal service status
+journal service logs
+journal health
+journal talent logs
+journal identity
+```
+
+Boundaries:
+
+- `journal setup` owns first-run setup and repair: config, models, wrappers,
+  service units, and the `sol` + `journal` router skill links.
+- `journal doctor` examines only. It can warn when router skills are missing,
+  stale, or pointed at the wrong source, but it does not repair them.
+- `journal start` starts the supervisor runtime only. It must not initialize
+  config, refresh wrappers, repair service units, rebuild references, or fix
+  skills.
+- `journal service ...` owns service lifecycle: status, start, stop, restart,
+  install, uninstall, and logs. `journal up` / `journal down` are aliases for
+  service start/stop.
+- `journal health` and `journal talent ...` are troubleshooting surfaces for
+  supervisor health, logs, pipeline state, and talent run history.
+- `journal identity` owns local owner/sol identity operations; use its help
+  output before changing identity data.
+
+For app-contributed host command guidance, see
+[Commands](references/commands.md).
+
 ## Vocabulary
 
 | Term | Definition | Examples |
@@ -46,7 +85,7 @@ For the full pipeline, see [captures](references/captures.md).
 |------|---------|
 | `chronicle/` | Daily capture folders |
 | `entities/` | Journal-level entity records |
-| `facets/` | Facet data: entities, todos, events, news, logs |
+| `facets/` | Facet data: entities, events, news, logs |
 | `talents/` | Talent run logs and outputs |
 | `solstone/apps/` | App-specific journal storage |
 | `imports/` | Imported audio and artifacts |
@@ -59,7 +98,8 @@ For the full table, see [storage](references/storage.md).
 
 - [CLI reference](references/cli.md) — `sol call journal` commands
 - [Configuration](references/config.md) — `journal.json`, providers, retention
-- [Facets](references/facets.md) — facet folders, entities, news, todos
+- [Facets](references/facets.md) — facet folders, entities, news, activities
 - [Captures and Extracts](references/captures.md) — layers, imports, segment layout
 - [Logs](references/logs.md) — action logs, token usage, talent logs, health
 - [Storage](references/storage.md) — top-level layout, app storage, search index
+- [Commands](references/commands.md) — journal-host command guidance contributed by apps (generated)

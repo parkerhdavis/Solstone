@@ -496,6 +496,31 @@ class TestRestart:
 
 
 class TestUp:
+    @pytest.mark.parametrize("platform", ["darwin", "linux"])
+    def test_up_errors_when_not_installed(self, monkeypatch, capsys, platform):
+        monkeypatch.setattr(sys, "platform", platform)
+        monkeypatch.setattr(service, "service_is_installed", lambda: False)
+        install = MagicMock()
+        start = MagicMock()
+        clear_ready = MagicMock()
+        wait_ready = MagicMock()
+        status = MagicMock()
+        monkeypatch.setattr(service, "_install", install)
+        monkeypatch.setattr(service, "_start", start)
+        monkeypatch.setattr(service, "clear_ready", clear_ready)
+        monkeypatch.setattr(service, "wait_ready", wait_ready)
+        monkeypatch.setattr(service, "_status", status)
+
+        assert service._up() == 1
+        install.assert_not_called()
+        start.assert_not_called()
+        clear_ready.assert_not_called()
+        wait_ready.assert_not_called()
+        status.assert_not_called()
+        err = capsys.readouterr().err
+        assert "journal setup" in err
+        assert "journal service install" in err
+
     def test_up_waits_for_readiness_after_start(self, monkeypatch):
         monkeypatch.setattr(service, "_platform", lambda: "darwin")
         monkeypatch.setattr(service, "service_is_installed", lambda: True)
@@ -509,7 +534,7 @@ class TestUp:
         monkeypatch.setattr(service, "wait_ready", wait_ready)
         monkeypatch.setattr(service, "_status", status)
 
-        assert service._up(port=5015) == 0
+        assert service._up() == 0
         start.assert_called_once_with()
         clear_ready.assert_called_once_with()
         wait_ready.assert_called_once_with(timeout=service.READY_TIMEOUT_SECONDS)
@@ -528,7 +553,7 @@ class TestUp:
         monkeypatch.setattr(service, "wait_ready", wait_ready)
         monkeypatch.setattr(service, "_status", status)
 
-        assert service._up(port=5015) == 0
+        assert service._up() == 0
         start.assert_called_once_with()
         clear_ready.assert_called_once_with()
         wait_ready.assert_called_once_with(timeout=service.READY_TIMEOUT_SECONDS)
@@ -547,7 +572,7 @@ class TestUp:
         monkeypatch.setattr(service, "wait_ready", wait_ready)
         monkeypatch.setattr(service, "_status", status)
 
-        assert service._up(port=5015) == 7
+        assert service._up() == 7
         start.assert_called_once_with()
         clear_ready.assert_called_once_with()
         wait_ready.assert_called_once_with(timeout=service.READY_TIMEOUT_SECONDS)
@@ -564,7 +589,7 @@ class TestUp:
         monkeypatch.setattr(service, "wait_ready", wait_ready)
         monkeypatch.setattr(service, "_status", status)
 
-        assert service._up(port=5015) == 0
+        assert service._up() == 0
         clear_ready.assert_not_called()
         wait_ready.assert_called_once_with(timeout=service.READY_TIMEOUT_SECONDS)
         status.assert_called_once_with()
@@ -656,8 +681,8 @@ class TestInstall:
         assert events.index("print-present") < events.index("print-absent")
         assert events.index("print-absent") < events.index("bootstrap")
 
-    def test_darwin_bootstrap_proceeds_when_label_never_unloads(
-        self, monkeypatch, tmp_path, caplog
+    def test_darwin_install_fails_when_label_never_unloads(
+        self, monkeypatch, tmp_path, caplog, capsys
     ):
         monkeypatch.setattr(service, "_platform", lambda: "darwin")
         monkeypatch.setattr(service.os, "getuid", lambda: 501)
@@ -669,16 +694,23 @@ class TestInstall:
         )
         monkeypatch.setattr(service, "remove_stale_plists", MagicMock())
         _install_fake_launchd_clock(monkeypatch)
-        events = []
+        monkeypatch.setattr(service, "_LAUNCHD_UNLOAD_TIMEOUT_S", 0.5)
+        bootstrap_count = 0
 
         def run(command, **kwargs):
+            nonlocal bootstrap_count
             if command[:2] == ["launchctl", "print"]:
-                events.append("print")
                 return subprocess.CompletedProcess(
                     args=command, returncode=0, stdout="", stderr=""
                 )
             if command[:2] == ["launchctl", "bootstrap"]:
-                events.append("bootstrap")
+                bootstrap_count += 1
+                return subprocess.CompletedProcess(
+                    args=command,
+                    returncode=1,
+                    stdout="",
+                    stderr="Bootstrap failed: 5: Input/output error",
+                )
             return subprocess.CompletedProcess(
                 args=command, returncode=0, stdout="", stderr=""
             )
@@ -686,10 +718,159 @@ class TestInstall:
         monkeypatch.setattr("subprocess.run", run)
 
         with caplog.at_level(logging.WARNING):
-            assert service._install() == 0
+            assert service._install() == 1
 
-        assert "Timed out waiting for launchd label" in caplog.text
-        assert "bootstrap" in events
+        assert bootstrap_count == service._LAUNCHD_BOOTSTRAP_MAX_ATTEMPTS
+        assert "did not unload" in caplog.text
+        stderr = capsys.readouterr().err
+        assert "Error loading service" in stderr
+        assert "Bootstrap failed: 5: Input/output error" in stderr
+
+    def test_darwin_slow_unload_clears_during_retry_succeeds(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        monkeypatch.setattr(service, "_platform", lambda: "darwin")
+        monkeypatch.setattr(service.os, "getuid", lambda: 501)
+        monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+        monkeypatch.setattr(
+            service,
+            "_plist_path",
+            lambda: tmp_path / "LaunchAgents" / "org.solpbc.solstone.plist",
+        )
+        monkeypatch.setattr(service, "remove_stale_plists", MagicMock())
+        _install_fake_launchd_clock(monkeypatch)
+        monkeypatch.setattr(service, "_LAUNCHD_UNLOAD_TIMEOUT_S", 0.5)
+        bootstrap_count = 0
+
+        def run(command, **kwargs):
+            nonlocal bootstrap_count
+            if command[:2] == ["launchctl", "print"]:
+                return subprocess.CompletedProcess(
+                    args=command, returncode=0, stdout="", stderr=""
+                )
+            if command[:2] == ["launchctl", "bootstrap"]:
+                bootstrap_count += 1
+                if bootstrap_count == 1:
+                    return subprocess.CompletedProcess(
+                        args=command,
+                        returncode=1,
+                        stdout="",
+                        stderr="Bootstrap failed: 5: Input/output error",
+                    )
+                return subprocess.CompletedProcess(
+                    args=command, returncode=0, stdout="", stderr=""
+                )
+            return subprocess.CompletedProcess(
+                args=command, returncode=0, stdout="", stderr=""
+            )
+
+        monkeypatch.setattr("subprocess.run", run)
+
+        assert service._install() == 0
+        assert bootstrap_count >= 2
+        assert "Error loading service" not in capsys.readouterr().err
+
+    def test_darwin_bootstrap_eio_retried_and_succeeds(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        monkeypatch.setattr(service, "_platform", lambda: "darwin")
+        monkeypatch.setattr(service.os, "getuid", lambda: 501)
+        monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+        monkeypatch.setattr(
+            service,
+            "_plist_path",
+            lambda: tmp_path / "LaunchAgents" / "org.solpbc.solstone.plist",
+        )
+        monkeypatch.setattr(service, "remove_stale_plists", MagicMock())
+        _install_fake_launchd_clock(monkeypatch)
+        sequence = []
+        bootstrap_count = 0
+
+        def run(command, **kwargs):
+            nonlocal bootstrap_count
+            sequence.append(command[:2])
+            if command[:2] == ["launchctl", "print"]:
+                return subprocess.CompletedProcess(
+                    args=command, returncode=1, stdout="", stderr=""
+                )
+            if command[:2] == ["launchctl", "bootstrap"]:
+                bootstrap_count += 1
+                if bootstrap_count == 1:
+                    return subprocess.CompletedProcess(
+                        args=command,
+                        returncode=1,
+                        stdout="",
+                        stderr="Bootstrap failed: 5: Input/output error",
+                    )
+                return subprocess.CompletedProcess(
+                    args=command, returncode=0, stdout="", stderr=""
+                )
+            return subprocess.CompletedProcess(
+                args=command, returncode=0, stdout="", stderr=""
+            )
+
+        monkeypatch.setattr("subprocess.run", run)
+
+        assert service._install() == 0
+        assert bootstrap_count == 2
+        bootstrap_indexes = [
+            index
+            for index, command in enumerate(sequence)
+            if command == ["launchctl", "bootstrap"]
+        ]
+        reprobe_indexes = [
+            index
+            for index, command in enumerate(sequence)
+            if command == ["launchctl", "print"]
+        ]
+        assert any(
+            bootstrap_indexes[0] < index < bootstrap_indexes[1]
+            for index in reprobe_indexes
+        )
+        assert "Error loading service" not in capsys.readouterr().err
+
+    def test_darwin_noneio_bootstrap_failure_fails_fast(
+        self, monkeypatch, tmp_path, caplog, capsys
+    ):
+        monkeypatch.setattr(service, "_platform", lambda: "darwin")
+        monkeypatch.setattr(service.os, "getuid", lambda: 501)
+        monkeypatch.setenv("SOLSTONE_JOURNAL", str(tmp_path))
+        monkeypatch.setattr(
+            service,
+            "_plist_path",
+            lambda: tmp_path / "LaunchAgents" / "org.solpbc.solstone.plist",
+        )
+        monkeypatch.setattr(service, "remove_stale_plists", MagicMock())
+        bootstrap_count = 0
+
+        def run(command, **kwargs):
+            nonlocal bootstrap_count
+            if command[:2] == ["launchctl", "print"]:
+                return subprocess.CompletedProcess(
+                    args=command, returncode=1, stdout="", stderr=""
+                )
+            if command[:2] == ["launchctl", "bootstrap"]:
+                bootstrap_count += 1
+                return subprocess.CompletedProcess(
+                    args=command,
+                    returncode=1,
+                    stdout="",
+                    stderr="Bootstrap failed: 1: Operation not permitted",
+                )
+            return subprocess.CompletedProcess(
+                args=command, returncode=0, stdout="", stderr=""
+            )
+
+        monkeypatch.setattr("subprocess.run", run)
+
+        with caplog.at_level(logging.WARNING):
+            assert service._install() == 1
+
+        assert bootstrap_count == 1
+        stderr = capsys.readouterr().err
+        assert "Error loading service" in stderr
+        assert "Operation not permitted" in stderr
+        assert "did not unload" not in caplog.text
 
     def test_darwin_bootstrap_proceeds_when_probe_raises(self, monkeypatch, tmp_path):
         monkeypatch.setattr(service, "_platform", lambda: "darwin")

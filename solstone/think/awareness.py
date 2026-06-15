@@ -17,12 +17,19 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import tempfile
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from solstone.think.journal_io import (
+    MalformedPolicy,
+    append_jsonl,
+    hold_lock,
+    read_json,
+    write_json,
+)
 
 logger = logging.getLogger(__name__)
 _LEGACY_AGENT_FIELD = "talent"
@@ -35,6 +42,11 @@ def _awareness_dir() -> Path:
     d = Path(get_journal()) / "awareness"
     d.mkdir(exist_ok=True)
     return d
+
+
+def _current_path() -> Path:
+    """Return path to the materialized current awareness state."""
+    return _awareness_dir() / "current.json"
 
 
 def _now_ts() -> int:
@@ -57,33 +69,27 @@ def get_current() -> dict[str, Any]:
 
     Returns an empty dict if no state exists yet.
     """
-    path = _awareness_dir() / "current.json"
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
-        logger.warning("Failed to read awareness/current.json, returning empty")
-        return {}
+    return read_json(
+        _current_path(),
+        on_error=MalformedPolicy.WARN_AND_SKIP,
+        default={},
+    )
 
 
-def _write_current(state: dict[str, Any]) -> None:
-    """Atomically write the current awareness state."""
-    path = _awareness_dir() / "current.json"
-    # Write to temp file then rename for atomicity
-    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(state, f, indent=2)
-            f.write("\n")
-        os.replace(tmp, path)
-    except Exception:
-        # Clean up temp file on failure
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+def _update_current(
+    transform: Callable[[dict[str, Any]], dict[str, Any]],
+) -> dict[str, Any]:
+    """Apply a locked read-modify-write transform to current awareness state."""
+    path = _current_path()
+    with hold_lock(path):
+        state = read_json(
+            path,
+            on_error=MalformedPolicy.WARN_AND_SKIP,
+            default={},
+        )
+        new_state = transform(state)
+        write_json(path, new_state)
+        return new_state
 
 
 def update_state(section: str, data: dict[str, Any]) -> dict[str, Any]:
@@ -92,12 +98,14 @@ def update_state(section: str, data: dict[str, Any]) -> dict[str, Any]:
     Merges ``data`` into the named section (creates if missing).
     Returns the updated section.
     """
-    state = get_current()
-    existing = state.get(section, {})
-    existing.update(data)
-    state[section] = existing
-    _write_current(state)
-    return existing
+
+    def _transform(state: dict[str, Any]) -> dict[str, Any]:
+        existing = state.get(section, {})
+        existing.update(data)
+        state[section] = existing
+        return state
+
+    return _update_current(_transform)[section]
 
 
 def append_log(
@@ -142,8 +150,7 @@ def append_log(
 
     log_day = day or _today()
     log_path = _awareness_dir() / f"{log_day}.jsonl"
-    with open(log_path, "a") as f:
-        f.write(json.dumps(entry) + "\n")
+    append_jsonl(log_path, entry)
 
     return entry
 
@@ -179,34 +186,21 @@ def read_log(day: str | None = None) -> list[dict[str, Any]]:
 # --- Import tracking convenience functions ---
 
 
-def _ensure_imports_section() -> dict[str, Any]:
-    """Ensure the imports section exists in current state, return it."""
-    state = get_current()
-    if "imports" not in state:
-        state["imports"] = {
-            "has_imported": False,
-            "import_count": 0,
-            "sources_used": [],
-            "offer_declined": None,
-            "last_nudge": None,
-        }
-        _write_current(state)
-    return state["imports"]
+def _default_imports() -> dict[str, Any]:
+    """Return a fresh default import tracking state."""
+    return {
+        "has_imported": False,
+        "import_count": 0,
+        "sources_used": [],
+        "offer_declined": None,
+        "last_nudge": None,
+    }
 
 
 def get_imports() -> dict[str, Any]:
     """Return the current import tracking state, or defaults if none."""
     state = get_current()
-    return state.get(
-        "imports",
-        {
-            "has_imported": False,
-            "import_count": 0,
-            "sources_used": [],
-            "offer_declined": None,
-            "last_nudge": None,
-        },
-    )
+    return state.get("imports", _default_imports())
 
 
 def _recent_chat_exchanges(limit: int = 10000) -> list[dict[str, Any]]:
@@ -250,84 +244,9 @@ def _recent_chat_exchanges(limit: int = 10000) -> list[dict[str, Any]]:
     return exchanges[-limit:]
 
 
-def compute_thickness() -> dict[str, Any]:
-    """Compute journal thickness signals for naming ceremony readiness.
-
-    Returns a dict with five signals and a composite ``ready`` boolean:
-
-    - ``entity_depth``: count of entities with observation_depth >= 2
-    - ``conversation_count``: conversation exchanges excluding legacy onboarding
-    - ``recall_success``: exchanges where an entity name appears in agent_response
-    - ``facet_count``: number of enabled (non-muted) facets
-    - ``journal_days``: number of day directories with at least one segment
-    - ``ready``: True when the naming ceremony should trigger
-    """
-    from solstone.think.entities.observations import (
-        count_entities_with_min_observation_depth,
-        iter_entity_names_for_recall,
-    )
-    from solstone.think.facets import get_enabled_facets
-    from solstone.think.utils import day_dirs, iter_segments
-
-    try:
-        entity_depth = count_entities_with_min_observation_depth(2)
-        entity_names = iter_entity_names_for_recall()
-    except Exception:
-        entity_depth = 0
-        entity_names = []
-
-    try:
-        exchanges = _recent_chat_exchanges(limit=10000)
-    except Exception:
-        exchanges = []
-    non_onboarding = [
-        ex
-        for ex in exchanges
-        if (ex.get("talent") or ex.get(_LEGACY_AGENT_FIELD, "")) != "onboarding"
-    ]
-    conversation_count = len(non_onboarding)
-
-    recall_success = 0
-    for ex in non_onboarding:
-        resp = (ex.get("agent_response") or "").lower()
-        if resp and any(name in resp for name in entity_names):
-            recall_success += 1
-
-    try:
-        facet_count = len(get_enabled_facets())
-    except Exception:
-        facet_count = 0
-
-    try:
-        days = day_dirs()
-    except Exception:
-        days = {}
-    journal_days = 0
-    for _day_name, day_path in days.items():
-        try:
-            if iter_segments(day_path):
-                journal_days += 1
-        except Exception:
-            pass
-
-    ready = (
-        entity_depth >= 10 and conversation_count >= 5 and recall_success >= 1
-    ) and (facet_count >= 2 or journal_days >= 3)
-
-    return {
-        "entity_depth": entity_depth,
-        "conversation_count": conversation_count,
-        "recall_success": recall_success,
-        "facet_count": facet_count,
-        "journal_days": journal_days,
-        "ready": ready,
-    }
-
-
 def owner_detection_ready() -> dict[str, Any]:
     """Check if owner voice detection should be surfaced to the user.
 
-    Same pattern as ``compute_thickness()`` for the naming ceremony.
     Returns a dict with a ``ready`` boolean and contextual fields.
 
     Checks in order:
@@ -345,7 +264,8 @@ def owner_detection_ready() -> dict[str, Any]:
     if rejected_at:
         try:
             rejection_time = datetime.fromisoformat(rejected_at)
-            days_since = (datetime.now() - rejection_time).days
+            now = datetime.now(rejection_time.tzinfo)
+            days_since = (now - rejection_time).days
             if days_since < 14:
                 return {
                     "ready": False,
@@ -392,25 +312,29 @@ def record_import(
     dict
         The updated imports state
     """
-    _ensure_imports_section()
-    imports = get_imports()
-    sources = imports.get("sources_used", [])
-    if source_type not in sources:
-        sources.append(source_type)
-    update_data: dict[str, Any] = {
-        "has_imported": True,
-        "import_count": imports.get("import_count", 0) + 1,
-        "sources_used": sources,
-    }
-    if source_display is not None:
-        summary = (
-            f"{entries_written} {source_display}" if entries_written else source_display
-        )
-        update_data["last_completed"] = _now_iso()
-        update_data["last_result_summary"] = summary
-    state = update_state("imports", update_data)
+
+    def _transform(state: dict[str, Any]) -> dict[str, Any]:
+        imports = state.get("imports") or _default_imports()
+        sources = imports.get("sources_used", [])
+        if source_type not in sources:
+            sources.append(source_type)
+        imports["has_imported"] = True
+        imports["import_count"] = imports.get("import_count", 0) + 1
+        imports["sources_used"] = sources
+        if source_display is not None:
+            summary = (
+                f"{entries_written} {source_display}"
+                if entries_written
+                else source_display
+            )
+            imports["last_completed"] = _now_iso()
+            imports["last_result_summary"] = summary
+        state["imports"] = imports
+        return state
+
+    new_state = _update_current(_transform)
     append_log("state", key="imports.completed", data={"source_type": source_type})
-    return state
+    return new_state["imports"]
 
 
 def record_import_offer_declined() -> dict[str, Any]:
@@ -421,13 +345,16 @@ def record_import_offer_declined() -> dict[str, Any]:
     dict
         The updated imports state
     """
-    _ensure_imports_section()
-    state = update_state(
-        "imports",
-        {"offer_declined": _now_iso()},
-    )
+
+    def _transform(state: dict[str, Any]) -> dict[str, Any]:
+        imports = state.get("imports") or _default_imports()
+        imports["offer_declined"] = _now_iso()
+        state["imports"] = imports
+        return state
+
+    new_state = _update_current(_transform)
     append_log("state", key="imports.offer_declined")
-    return state
+    return new_state["imports"]
 
 
 def record_import_nudge() -> dict[str, Any]:
@@ -438,10 +365,13 @@ def record_import_nudge() -> dict[str, Any]:
     dict
         The updated imports state
     """
-    _ensure_imports_section()
-    state = update_state(
-        "imports",
-        {"last_nudge": _now_iso()},
-    )
+
+    def _transform(state: dict[str, Any]) -> dict[str, Any]:
+        imports = state.get("imports") or _default_imports()
+        imports["last_nudge"] = _now_iso()
+        state["imports"] = imports
+        return state
+
+    new_state = _update_current(_transform)
     append_log("state", key="imports.nudge_sent")
-    return state
+    return new_state["imports"]

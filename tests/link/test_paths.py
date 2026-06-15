@@ -34,6 +34,13 @@ def _legacy_token_key() -> str:
     return "account" + "_token"
 
 
+def _forbid_link_state_save(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_save(self) -> None:
+        raise AssertionError("LinkState.save should not be called by load")
+
+    monkeypatch.setattr(LinkState, "save", fail_save)
+
+
 def test_link_state_load_or_create_creates_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -75,6 +82,61 @@ def test_link_state_load_or_create_custom_label(
     assert loaded.home_label == "laptop"
 
 
+def test_link_state_load_missing_returns_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_journal(monkeypatch, tmp_path)
+    _forbid_link_state_save(monkeypatch)
+
+    assert LinkState.load() is None
+    assert not state_path().exists()
+
+
+def test_link_state_load_reads_existing_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_journal(monkeypatch, tmp_path)
+    _forbid_link_state_save(monkeypatch)
+    path = state_path()
+    path.write_text(
+        json.dumps(
+            {
+                "instance_id": "12345678-1234-1234-1234-123456789abc",
+                "home_label": "laptop",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state = LinkState.load()
+
+    assert state == LinkState(
+        instance_id="12345678-1234-1234-1234-123456789abc",
+        home_label="laptop",
+    )
+
+
+def test_link_state_load_corrupt_json_returns_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_journal(monkeypatch, tmp_path)
+    _forbid_link_state_save(monkeypatch)
+    state_path().write_text("{not json", encoding="utf-8")
+
+    assert LinkState.load() is None
+
+
+@pytest.mark.parametrize("payload", [{}, {"instance_id": ""}, {"instance_id": 123}])
+def test_link_state_load_missing_or_invalid_instance_id_returns_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: dict
+) -> None:
+    _set_journal(monkeypatch, tmp_path)
+    _forbid_link_state_save(monkeypatch)
+    state_path().write_text(json.dumps(payload), encoding="utf-8")
+
+    assert LinkState.load() is None
+
+
 def test_relay_url_env_wins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _set_journal(monkeypatch, tmp_path)
     monkeypatch.setenv("SOL_LINK_RELAY_URL", "https://example.test/")
@@ -107,6 +169,16 @@ def test_load_service_token_missing(
     _set_journal(monkeypatch, tmp_path)
 
     assert load_service_token() is None
+    assert not (tmp_path / "link").exists()
+
+
+def test_service_token_path_does_not_create_token_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_journal(monkeypatch, tmp_path)
+
+    assert service_token_path() == tmp_path / "link" / "tokens" / "account.json"
+    assert not (tmp_path / "link").exists()
 
 
 def test_save_and_load_service_token_roundtrip(
@@ -130,7 +202,9 @@ def test_save_service_token_is_atomic(
 
     token_path = service_token_path()
     assert token_path.exists()
-    assert not any(path.name.endswith(".tmp") for path in token_path.parent.iterdir())
+    assert json.loads(token_path.read_text("utf-8")) == {"service_token": "tok.123"}
+    assert token_path.stat().st_mode & 0o777 == 0o600
+    assert {path.name for path in token_path.parent.iterdir()} == {token_path.name}
 
 
 def test_load_service_token_reads_legacy_account_key(
@@ -183,7 +257,9 @@ def test_save_totp_secret_is_atomic(
 
     secret_path = totp_secret_path()
     assert secret_path.exists()
-    assert not any(path.name.endswith(".tmp") for path in secret_path.parent.iterdir())
+    assert json.loads(secret_path.read_text("utf-8")) == {"totp_secret": "SECRET"}
+    assert secret_path.stat().st_mode & 0o777 == 0o600
+    assert {path.name for path in secret_path.parent.iterdir()} == {secret_path.name}
 
 
 def test_generate_totp_secret_shape() -> None:

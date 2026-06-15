@@ -10,12 +10,68 @@
   });
 
   const CHAT_REASONS = Object.freeze({
+    "provider_key_missing": {
+      "template": "{provider} needs credentials before it can read your screen descriptions",
+      "action": {"label": "Open Settings", "href": "/app/settings/#providers"}
+    },
+    "ram_insufficient": {
+      "template": "the local model needs more memory than this machine has",
+      "action": {"label": "Open Local Model Setup", "href": "/app/settings/#providers"}
+    },
+    "gpu_unavailable": {
+      "template": "local models need GPU acceleration on this computer",
+      "action": {"label": "Open Settings", "href": "/app/settings/#providers"}
+    },
+    "local_model_missing": {
+      "template": "local model setup is not finished",
+      "action": {"label": "Open Local Model Setup", "href": "/app/settings/#providers"}
+    },
+    "model_missing": {
+      "template": "local model setup is not finished",
+      "action": {"label": "Open Local Model Setup", "href": "/app/settings/#providers"}
+    },
+    "binary_missing": {
+      "template": "local model setup is not finished",
+      "action": {"label": "Open Local Model Setup", "href": "/app/settings/#providers"}
+    },
+    "local_model_installing": {
+      "template": "local model setup is finishing",
+      "action": null
+    },
+    "local_model_loading": {
+      "template": "the local model is starting up",
+      "action": null
+    },
+    "local_model_not_ready": {
+      "template": "the local model is starting up",
+      "action": null
+    },
+    "local_server_unhealthy": {
+      "template": "the local model isn't responding",
+      "action": {"label": "Open Local Model Setup", "href": "/app/settings/#providers"}
+    },
+    "unsupported_platform": {
+      "template": "this machine is not supported for local model setup",
+      "action": {"label": "Open Local Model Setup", "href": "/app/settings/#providers"}
+    },
+    "unsupported_model": {
+      "template": "this local model is not supported",
+      "action": {"label": "Open Local Model Setup", "href": "/app/settings/#providers"}
+    },
+    "sha256_mismatch": {
+      "template": "local model setup could not be verified",
+      "action": {"label": "Open Local Model Setup", "href": "/app/settings/#providers"}
+    },
+    "archive_path_traversal": {
+      "template": "local model setup could not be verified",
+      "action": {"label": "Open Local Model Setup", "href": "/app/settings/#providers"}
+    },
     "provider_key_invalid": {
       "template": "your {provider} key didn't validate",
       "action": {"label": "Open Settings", "href": "/app/settings/#providers"}
     },
     "provider_quota_exceeded": {
-      "template": "your {provider} quota is spent — try again later",
+      "template": "your {provider} quota is spent",
       "action": null
     },
     "network_unreachable": {
@@ -27,19 +83,35 @@
       "action": null
     },
     "provider_unavailable": {
-      "template": "{provider} is having trouble — try again",
+      "template": "{provider} is having trouble right now",
       "action": null
     },
     "chat_pipeline_unavailable": {
-      "template": "the chat pipeline isn't ready yet — try again in a moment",
+      "template": "the chat pipeline isn't ready yet",
       "action": null
     },
     "chat_timeout": {
-      "template": "chat took too long — try again",
+      "template": "chat took too long",
+      "action": null
+    },
+    "context_window_exceeded": {
+      "template": "the conversation grew too long to finish",
+      "action": null
+    },
+    "max_turns_exhausted": {
+      "template": "this took too many steps to finish",
+      "action": null
+    },
+    "no_output": {
+      "template": "I didn't get a response",
+      "action": null
+    },
+    "token_budget_exceeded": {
+      "template": "this run reached its resource budget before finishing",
       "action": null
     },
     "unknown": {
-      "template": "chat had trouble — try again",
+      "template": "chat had trouble",
       "action": null
     }
   });

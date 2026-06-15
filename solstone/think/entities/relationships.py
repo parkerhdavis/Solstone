@@ -16,21 +16,12 @@ since they are identity-specific, not facet-specific.
 import json
 import shutil
 from pathlib import Path
+from typing import Any
 
-from solstone.think.entities.core import EntityDict, atomic_write, entity_slug
+from solstone.think.entities.core import EntityDict, entity_slug
+from solstone.think.entities.errors import EntityExistsError, EntityNotFoundError
+from solstone.think.journal_io import atomic_replace
 from solstone.think.utils import get_journal
-
-# Global cache for facet relationships: {(facet, entity_id): EntityDict}
-_RELATIONSHIP_CACHE: dict[tuple[str, str], EntityDict] | None = None
-# Global cache for facet relationship IDs: {facet: [entity_id, ...]}
-_RELATIONSHIP_IDS_CACHE: dict[str, list[str]] | None = None
-
-
-def clear_relationship_caches() -> None:
-    """Clear all relationship and ID caches."""
-    global _RELATIONSHIP_CACHE, _RELATIONSHIP_IDS_CACHE
-    _RELATIONSHIP_CACHE = None
-    _RELATIONSHIP_IDS_CACHE = None
 
 
 def facet_relationship_path(facet: str, entity_id: str) -> Path:
@@ -59,12 +50,6 @@ def load_facet_relationship(facet: str, entity_id: str) -> EntityDict | None:
         Relationship dict with entity_id, description, timestamps, etc.,
         or None if not found.
     """
-    global _RELATIONSHIP_CACHE
-    if _RELATIONSHIP_CACHE is not None:
-        cached = _RELATIONSHIP_CACHE.get((facet, entity_id))
-        if cached is not None:
-            return cached
-
     path = facet_relationship_path(facet, entity_id)
     if not path.exists():
         return None
@@ -74,10 +59,6 @@ def load_facet_relationship(facet: str, entity_id: str) -> EntityDict | None:
             data = json.load(f)
         # Ensure entity_id is present
         data["entity_id"] = entity_id
-
-        # Update cache if initialized
-        if _RELATIONSHIP_CACHE is not None:
-            _RELATIONSHIP_CACHE[(facet, entity_id)] = data
 
         return data
     except (json.JSONDecodeError, OSError):
@@ -96,16 +77,13 @@ def save_facet_relationship(
         entity_id: Entity ID (slug)
         relationship: Relationship dict with description, timestamps, etc.
     """
-    # Clear caches on modification
-    clear_relationship_caches()
-
     path = facet_relationship_path(facet, entity_id)
 
     # Ensure entity_id is in the relationship
     relationship["entity_id"] = entity_id
 
     content = json.dumps(relationship, ensure_ascii=False, indent=2) + "\n"
-    atomic_write(path, content, prefix=".relationship_")
+    atomic_replace(path, content)
 
 
 def scan_facet_relationships(facet: str) -> list[str]:
@@ -119,12 +97,6 @@ def scan_facet_relationships(facet: str) -> list[str]:
     Returns:
         List of entity IDs (directory names)
     """
-    global _RELATIONSHIP_IDS_CACHE
-    if _RELATIONSHIP_IDS_CACHE is not None:
-        cached = _RELATIONSHIP_IDS_CACHE.get(facet)
-        if cached is not None:
-            return cached
-
     entities_dir = Path(get_journal()) / "facets" / facet / "entities"
     if not entities_dir.exists():
         return []
@@ -135,9 +107,6 @@ def scan_facet_relationships(facet: str) -> list[str]:
             entity_ids.append(entry.name)
 
     entity_ids.sort()
-    if _RELATIONSHIP_IDS_CACHE is None:
-        _RELATIONSHIP_IDS_CACHE = {}
-    _RELATIONSHIP_IDS_CACHE[facet] = entity_ids
     return entity_ids
 
 
@@ -147,19 +116,7 @@ def load_all_facet_relationships(facet: str) -> dict[str, EntityDict]:
     Returns:
         Dict mapping entity_id to relationship dict
     """
-    global _RELATIONSHIP_CACHE
     entity_ids = scan_facet_relationships(facet)
-    if _RELATIONSHIP_CACHE is not None and all(
-        (facet, entity_id) in _RELATIONSHIP_CACHE for entity_id in entity_ids
-    ):
-        return {
-            entity_id: _RELATIONSHIP_CACHE[(facet, entity_id)]
-            for entity_id in entity_ids
-        }
-
-    if _RELATIONSHIP_CACHE is None:
-        _RELATIONSHIP_CACHE = {}
-
     relationships = {}
     for entity_id in entity_ids:
         relationship = load_facet_relationship(facet, entity_id)
@@ -307,8 +264,61 @@ def rename_entity_memory(facet: str, old_name: str, new_name: str) -> bool:
     if new_folder.exists():
         raise OSError(f"Target folder already exists: {new_folder}")
 
-    # Clear caches on modification
-    clear_relationship_caches()
-
     shutil.move(str(old_folder), str(new_folder))
     return True
+
+
+def move_facet_entity(
+    *,
+    entity_name: str,
+    from_facet: str,
+    to_facet: str,
+    merge: bool = False,
+) -> dict[str, Any]:
+    """Move or merge an entity's facet-scoped memory between facets."""
+    entity_id = entity_slug(entity_name)
+    src_dir = entity_memory_path(from_facet, entity_name)
+    dst_dir = entity_memory_path(to_facet, entity_name)
+
+    if not src_dir.exists():
+        raise EntityNotFoundError(entity_name)
+
+    if dst_dir.exists() and not merge:
+        raise EntityExistsError(entity_name)
+
+    if dst_dir.exists():
+        from solstone.think.entities.observations import (
+            load_observations,
+            save_observations,
+        )
+
+        src_relationship = load_facet_relationship(from_facet, entity_id)
+        dst_relationship = load_facet_relationship(to_facet, entity_id)
+        if src_relationship is not None and dst_relationship is None:
+            save_facet_relationship(to_facet, entity_id, src_relationship)
+
+        src_obs = load_observations(from_facet, entity_name)
+        dst_obs = load_observations(to_facet, entity_name)
+
+        existing_keys = {(o["content"], o.get("observed_at")) for o in dst_obs}
+        merged = list(dst_obs) + [
+            o
+            for o in src_obs
+            if (o["content"], o.get("observed_at")) not in existing_keys
+        ]
+        save_observations(to_facet, entity_name, merged)
+
+        shutil.rmtree(str(src_dir))
+        did_merge = True
+    else:
+        dst_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src_dir), str(dst_dir))
+        did_merge = False
+
+    return {
+        "entity": entity_name,
+        "entity_id": entity_id,
+        "moved_from": from_facet,
+        "moved_to": to_facet,
+        "merged": did_merge,
+    }

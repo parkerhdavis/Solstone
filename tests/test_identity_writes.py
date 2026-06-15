@@ -3,10 +3,12 @@
 
 import hashlib
 import json
+import multiprocessing
 import os
 import re
 import stat
 import threading
+import traceback
 from pathlib import Path
 
 import pytest
@@ -44,40 +46,40 @@ def _read_history(journal_path: Path) -> list[dict]:
 
 def test_write_identity_first_write(tmp_path):
     write_identity(
-        "pulse.md",
+        "partner.md",
         actor="test writer",
         op="replace",
         section=None,
-        content="first pulse\n",
+        content="first partner\n",
         reason="test",
     )
 
-    pulse_path = tmp_path / "identity" / "pulse.md"
-    assert pulse_path.read_text(encoding="utf-8") == "first pulse\n"
+    partner_path = tmp_path / "identity" / "partner.md"
+    assert partner_path.read_text(encoding="utf-8") == "first partner\n"
 
     records = _read_history(tmp_path)
     assert len(records) == 1
     record = records[0]
     assert record["before_hash"] == hashlib.sha256(b"").hexdigest()
     assert record["bytes_before"] == 0
-    assert record["after_hash"] == hashlib.sha256(b"first pulse\n").hexdigest()
-    assert record["bytes_after"] == len("first pulse\n".encode("utf-8"))
+    assert record["after_hash"] == hashlib.sha256(b"first partner\n").hexdigest()
+    assert record["bytes_after"] == len("first partner\n".encode("utf-8"))
 
 
 def test_write_identity_atomic_failure(tmp_path, monkeypatch):
     identity_dir = tmp_path / "identity"
     identity_dir.mkdir()
-    target = identity_dir / "self.md"
+    target = identity_dir / "partner.md"
     target.write_text("original\n", encoding="utf-8")
 
     def fail_replace(src, dst):
         raise OSError("replace failed")
 
-    monkeypatch.setattr("solstone.think.identity.os.replace", fail_replace)
+    monkeypatch.setattr("solstone.think.journal_io.atomic.os.replace", fail_replace)
 
     with pytest.raises(OSError, match="replace failed"):
         write_identity(
-            "self.md",
+            "partner.md",
             actor="test writer",
             op="replace",
             section=None,
@@ -87,13 +89,62 @@ def test_write_identity_atomic_failure(tmp_path, monkeypatch):
 
     assert target.read_text(encoding="utf-8") == "original\n"
     assert not _history_path(tmp_path).exists()
-    assert list(identity_dir.glob(".self.md.*.tmp")) == []
+    assert list(identity_dir.glob(".tmp_*.tmp")) == []
+
+
+def _identity_worker(journal_path, barrier, errors, index):
+    os.environ["SOLSTONE_JOURNAL"] = journal_path
+    try:
+        from solstone.think.identity import write_identity
+
+        barrier.wait(timeout=5)
+        write_identity(
+            "partner.md",
+            actor=f"writer-{index}",
+            op="replace",
+            section=None,
+            content=f"content-{index}\n",
+            reason="test",
+        )
+    except BaseException:
+        errors.put(traceback.format_exc())
+        raise
+
+
+def test_write_identity_serializes_process_writers(tmp_path):
+    ctx = multiprocessing.get_context("spawn")
+    barrier = ctx.Barrier(4)
+    errors = ctx.Queue()
+    procs = [
+        ctx.Process(target=_identity_worker, args=(str(tmp_path), barrier, errors, i))
+        for i in range(4)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=15)
+    for p in procs:
+        if p.is_alive():
+            p.terminate()
+    drained = []
+    while True:
+        try:
+            drained.append(errors.get_nowait())
+        except Exception:
+            break
+    assert all(p.exitcode == 0 for p in procs), "\n".join(drained)
+
+    records = _read_history(tmp_path)
+    assert len(records) == 4
+    assert {r["actor"] for r in records} == {f"writer-{i}" for i in range(4)}
+    final = (tmp_path / "identity" / "partner.md").read_text(encoding="utf-8")
+    assert final in {f"content-{i}\n" for i in range(4)}
 
 
 def test_write_identity_lock_serializes(tmp_path):
     def writer(actor: str, content: str) -> None:
         write_identity(
-            "self.md",
+            "partner.md",
             actor=actor,
             op="replace",
             section=None,
@@ -108,7 +159,7 @@ def test_write_identity_lock_serializes(tmp_path):
     thread_one.join()
     thread_two.join()
 
-    final_content = (tmp_path / "identity" / "self.md").read_text(encoding="utf-8")
+    final_content = (tmp_path / "identity" / "partner.md").read_text(encoding="utf-8")
     assert final_content in {"first\n", "second\n"}
 
     records = _read_history(tmp_path)
@@ -118,11 +169,11 @@ def test_write_identity_lock_serializes(tmp_path):
 
 def test_write_identity_history_schema(tmp_path):
     write_identity(
-        "awareness.md",
+        "partner.md",
         actor="schema test",
         op="replace",
         section=None,
-        content="awareness\n",
+        content="partner\n",
         reason="test",
     )
 
@@ -139,7 +190,7 @@ def test_write_identity_history_schema(tmp_path):
         "bytes_before",
         "bytes_after",
     ]
-    assert record["file"] == "awareness.md"
+    assert record["file"] == "partner.md"
     assert record["actor"] == "schema test"
     assert record["op"] == "replace"
     assert record["section"] is None

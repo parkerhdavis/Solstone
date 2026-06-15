@@ -40,13 +40,15 @@ from solstone.convey.reasons import (
     INGEST_STORAGE_FAILED,
     INVALID_DAY,
     INVALID_SEGMENT_OR_STREAM,
+    LOCAL_REQUEST_ONLY,
     MISSING_REQUIRED_FIELD,
     PAIRED_DEVICE_NOT_FOUND,
     PL_REVOKED,
     SETTINGS_OPERATION_FAILED,
     Reason,
 )
-from solstone.convey.utils import error_response
+from solstone.convey.utils import error_response, respond_collection
+from solstone.observe import protocol
 from solstone.observe.utils import (
     MAX_SEGMENT_ATTEMPTS,
     compute_bytes_sha256,
@@ -56,7 +58,7 @@ from solstone.observe.utils import (
 from solstone.think.streams import stream_name, update_stream, write_segment_stream
 from solstone.think.utils import day_path, iter_segments, now_ms, segment_path
 
-from .share_delete import DELETABLE_SOURCE_STREAMS, delete_source_stream
+from .share_delete import DELETABLE_SOURCE_STREAMS, SHARE_STREAM, delete_source_stream
 from .utils import (
     ObserverRegistry,
     append_history_record,
@@ -314,7 +316,15 @@ def callosum_sse(key: str) -> Any:
 
 @observer_bp.route("/api/create", methods=["POST"])
 def api_create() -> Any:
-    """Create a new observer registration."""
+    """Create a new observer registration (legacy web-UI mint).
+
+    Used only by the observer management page's "add observer" button
+    (apps/observer/workspace.html). Auto-registering observer clients use
+    POST /app/observer/register instead, which takes a self-descriptor and
+    locks a stream identity onto the record. This route is kept for the
+    human-facing management flow; it always mints and returns ``key_prefix``
+    (vs /register's ``prefix``).
+    """
     data = request.get_json(force=True) if request.is_json else {}
     name = data.get("name", "").strip()
     if not name:
@@ -352,7 +362,7 @@ def api_create() -> Any:
     )
 
     # Build ingest URL
-    ingest_url = f"/app/observer/ingest/{key}"
+    ingest_url = "/app/observer/ingest"
 
     return jsonify(
         {
@@ -360,6 +370,98 @@ def api_create() -> Any:
             "key_prefix": key[:8],
             "name": name,
             "ingest_url": ingest_url,
+            "protocol_version": protocol.OBSERVER_PROTOCOL_VERSION,
+        }
+    )
+
+
+_REGISTER_REQUIRED_FIELDS = ("platform", "hostname", "stream_type", "version")
+
+
+def _is_trusted_localhost() -> bool:
+    """Direct-loopback check mirroring the convey trust_localhost gate."""
+    is_localhost = request.remote_addr in ("127.0.0.1", "::1", "localhost")
+    proxy_headers = (
+        request.headers.get("X-Forwarded-For")
+        or request.headers.get("X-Real-IP")
+        or request.headers.get("X-Forwarded-Host")
+    )
+    return is_localhost and not proxy_headers
+
+
+@observer_bp.route("/register", methods=["POST"])
+def register() -> Any:
+    """Self-register a local observer and lock its stream identity.
+
+    Loopback-only (the in-handler guard is the sole gate) and require_login-exempt
+    so a local observer can register before setup completes. Mints the DL handle,
+    locks a stream onto the record, and returns the pinned descriptor response.
+    """
+    # Localhost guard FIRST — non-local / proxy-headed callers mint nothing.
+    if not _is_trusted_localhost():
+        return error_response(
+            LOCAL_REQUEST_ONLY,
+            detail="Observer registration requires a direct localhost request.",
+        )
+
+    parsed = request.get_json(force=True, silent=True)
+    data = parsed if isinstance(parsed, dict) else {}
+
+    for field in _REGISTER_REQUIRED_FIELDS:
+        value = data.get(field)
+        if not isinstance(value, str) or not value.strip():
+            return error_response(MISSING_REQUIRED_FIELD, detail=f"{field} is required")
+
+    hostname = data["hostname"].strip()
+    stream_type = data["stream_type"].strip()
+    try:
+        if stream_type == "desktop":
+            stream = stream_name(host=hostname)
+        else:
+            stream = stream_name(host=hostname, qualifier=stream_type)
+    except ValueError as exc:
+        return error_response(INVALID_SEGMENT_OR_STREAM, detail=str(exc))
+
+    key = _generate_key()
+    observer_data = {
+        "key": key,
+        "name": stream,
+        "platform": data["platform"].strip(),
+        "hostname": hostname,
+        "stream_type": stream_type,
+        "label": data.get("label"),
+        "version": data["version"].strip(),
+        "stream": stream,
+        "created_at": now_ms(),
+        "last_seen": None,
+        "last_segment": None,
+        "enabled": True,
+        "stats": {
+            "segments_received": 0,
+            "bytes_received": 0,
+        },
+    }
+
+    if not save_observer(observer_data):
+        return error_response(
+            SETTINGS_OPERATION_FAILED,
+            detail="Failed to save observer",
+        )
+
+    log_app_action(
+        app="observer",
+        facet=None,
+        action="observer_register",
+        params={"name": stream, "key_prefix": key[:8]},
+    )
+
+    return jsonify(
+        {
+            "key": key,
+            "prefix": key[:8],
+            "name": stream,
+            "ingest_url": "/app/observer/ingest",
+            "protocol_version": protocol.OBSERVER_PROTOCOL_VERSION,
         }
     )
 
@@ -383,6 +485,12 @@ def api_delete(key_prefix: str) -> Any:
         )
 
     return jsonify({"status": "ok"})
+
+
+@observer_bp.route("/api/delete-source", methods=["POST"])
+def api_delete_source() -> Any:
+    """Delete everything the iOS Share Sheet contributed."""
+    return jsonify(delete_source_stream(SHARE_STREAM))
 
 
 @observer_bp.route("/api/<key_prefix>/key")
@@ -418,7 +526,8 @@ def api_get_key(key_prefix: str) -> Any:
         {
             "key": key,
             "name": data.get("name", ""),
-            "ingest_url": f"/app/observer/ingest/{key}",
+            "ingest_url": "/app/observer/ingest",
+            "protocol_version": protocol.OBSERVER_PROTOCOL_VERSION,
         }
     )
 
@@ -823,17 +932,21 @@ def ingest_upload(key: str | None = None) -> Any:
     if not files:
         return error_response(INGEST_NO_FILES, detail="No files uploaded")
 
-    # Determine stream name: trust client-provided stream in meta if valid,
-    # otherwise derive from observer registration name.
-    # Deriving from observer name via stream_name(observer=...) calls _strip_hostname,
-    # which strips qualifiers like ".tmux" — so "fedora.tmux" becomes "fedora",
-    # colliding both observers into one stream.
-    client_stream = meta.get("stream", "").strip()
-    observer_name = observer.get("name", "unknown")
-    if client_stream and re.match(r"^[a-z0-9][a-z0-9._-]*$", client_stream):
-        stream = client_stream
+    # Determine stream name. A registered observer carries a locked stream on its
+    # record — that is authoritative and ignores any client-provided meta.stream.
+    # Otherwise trust a valid client-provided meta.stream, falling back to deriving
+    # from the observer name (lossy: stream_name(observer=...) strips qualifiers
+    # like ".tmux", which is why registered observers lock the stream up front).
+    locked_stream = observer.get("stream")
+    if locked_stream:
+        stream = locked_stream
     else:
-        stream = stream_name(observer=observer_name)
+        client_stream = meta.get("stream", "").strip()
+        observer_name = observer.get("name", "unknown")
+        if client_stream and re.match(r"^[a-z0-9][a-z0-9._-]*$", client_stream):
+            stream = client_stream
+        else:
+            stream = stream_name(observer=observer_name)
 
     body, status = _process_ingest_files(
         observer, key_prefix, segment, day, stream, files
@@ -955,8 +1068,9 @@ def ingest_transfer(key: str) -> Any:
     return jsonify(body), status
 
 
+@observer_bp.route("/ingest/manifest", methods=["GET"])
 @observer_bp.route("/ingest/<key>/manifest", methods=["GET"])
-def ingest_manifest(key: str) -> Any:
+def ingest_manifest(key: str | None = None) -> Any:
     """List available manifest days for an observer."""
     _observer, key_prefix, error = resolve_observer_identity(key)
     if error is not None:
@@ -979,8 +1093,9 @@ def ingest_manifest(key: str) -> Any:
     return jsonify({"days": days})
 
 
+@observer_bp.route("/ingest/manifest/<day>", methods=["GET"])
 @observer_bp.route("/ingest/<key>/manifest/<day>", methods=["GET"])
-def ingest_manifest_day(key: str, day: str) -> Any:
+def ingest_manifest_day(day: str, key: str | None = None) -> Any:
     """Return a transfer manifest for all segments on a given day."""
     _observer, _key_prefix, error = resolve_observer_identity(key)
     if error is not None:
@@ -1054,6 +1169,35 @@ def ingest_event(key: str | None = None) -> Any:
     return jsonify({"status": "ok"})
 
 
+def _requested_protocol_version() -> int:
+    """Observer ingest protocol version the requesting peer advertises.
+
+    Returns 1 (legacy/unversioned) when the header is absent or unparsable.
+    """
+    raw = request.headers.get(protocol.OBSERVER_PROTOCOL_VERSION_HEADER)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 1
+
+
+def _respond_observer_segments(items: list[dict], *, client_pv: int) -> Any:
+    """Finalize the observer-segments 200 response.
+
+    Canonical shape is the {items, total, protocol_version} collection envelope.
+    A peer advertising protocol < v2 (a prior release) instead receives a bare
+    top-level JSON array so its list-iterating consumer keeps syncing. This
+    legacy downgrade is the SINGLE place a bare array reaches the wire - delete
+    this branch once no prior-release peers remain (no retirement schedule yet).
+    """
+    if client_pv >= protocol.OBSERVER_PROTOCOL_VERSION:
+        response, status = respond_collection(items)
+        body = response.get_json()
+        body["protocol_version"] = protocol.OBSERVER_PROTOCOL_VERSION
+        return jsonify(body), status
+    return jsonify(items)
+
+
 @observer_bp.route("/ingest/segments/<day>")
 @observer_bp.route("/ingest/<key>/segments/<day>")
 def ingest_segments(day: str, key: str | None = None) -> Any:
@@ -1076,23 +1220,30 @@ def ingest_segments(day: str, key: str | None = None) -> Any:
     if not re.match(r"^\d{8}$", day):
         return error_response(INVALID_DAY, detail="Invalid day format")
 
+    client_pv = _requested_protocol_version()
+
     # Load sync history for this observer/day
     records = load_history(key_prefix, day)
 
     if not records:
-        return jsonify([])
+        return _respond_observer_segments([], client_pv=client_pv)
 
     # Get day directory for file verification
     day_dir = day_path(day)
 
-    # Determine stream: trust client-provided query param if valid,
-    # otherwise derive from observer name (same logic as ingest_upload).
-    client_stream = request.args.get("stream", "").strip()
-    observer_name = observer.get("name", "unknown")
-    if client_stream and re.match(r"^[a-z0-9][a-z0-9._-]*$", client_stream):
-        fallback_stream = client_stream
+    # Determine fallback stream for records that don't carry their own. A registered
+    # observer's locked stream is authoritative (ignores the ?stream= query param);
+    # otherwise trust a valid client-provided stream, then derive from observer name.
+    locked_stream = observer.get("stream")
+    if locked_stream:
+        fallback_stream = locked_stream
     else:
-        fallback_stream = stream_name(observer=observer_name)
+        client_stream = request.args.get("stream", "").strip()
+        observer_name = observer.get("name", "unknown")
+        if client_stream and re.match(r"^[a-z0-9][a-z0-9._-]*$", client_stream):
+            fallback_stream = client_stream
+        else:
+            fallback_stream = stream_name(observer=observer_name)
 
     # Build response grouped by segment, deduplicating by sha256
     # Later records overwrite earlier ones (most recent upload wins)
@@ -1167,4 +1318,4 @@ def ingest_segments(day: str, key: str | None = None) -> Any:
         if "original_key" in segment_data:
             entry["original_key"] = segment_data["original_key"]
         result.append(entry)
-    return jsonify(result)
+    return _respond_observer_segments(result, client_pv=client_pv)

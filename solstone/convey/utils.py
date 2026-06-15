@@ -13,7 +13,8 @@ from typing import Any, Optional
 
 from flask import Response, jsonify
 
-from solstone.convey.reasons import Reason
+from solstone.convey.reasons import INVALID_PATH, Reason
+from solstone.think.journal_io import contained_path, get_journal
 
 DATE_RE = re.compile(r"\d{8}")
 _REQUEST_ID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -247,6 +248,24 @@ def save_json(
         return False
 
 
+def safe_journal_path(relpath: str) -> tuple[Path | None, tuple[Response, int] | None]:
+    """Contain a request-supplied journal-relative path at the HTTP boundary.
+
+    Thin wrapper over contained_path: validates and contains, never writes.
+    Both rejection classes — the lexical ValueError from resolve_journal_path
+    (empty/absolute/backslash/dot-dot) and PathEscapeError from an in-journal
+    symlink that escapes the real root (a ValueError subclass) — converge on the
+    standard INVALID_PATH owner-voice envelope.
+
+    Returns (contained_absolute_path, None) on success, or
+    (None, error_response(INVALID_PATH)) on any rejection.
+    """
+    try:
+        return contained_path(get_journal(), relpath), None
+    except ValueError:
+        return None, error_response(INVALID_PATH)
+
+
 def error_response(
     reason: Reason,
     status: int | None = None,
@@ -321,3 +340,57 @@ def success_response(
     if data:
         response_data.update(data)
     return jsonify(response_data), code
+
+
+def respond_collection(
+    items: list[Any],
+    *,
+    total: int | None = None,
+    cursor: str | None = None,
+) -> tuple[Response, int]:
+    """Create a standard JSON collection response.
+
+    The canonical way to return a list resource. Shapes the body as
+    ``{"items": [...], "total": <int>}`` so routes never return a bare
+    top-level JSON array. ``total`` defaults to ``len(items)`` when not
+    given; ``next_cursor`` is added only when ``cursor`` is provided.
+
+    Args:
+        items: The collection items to return.
+        total: Total count of matching items; defaults to ``len(items)``.
+        cursor: Opaque pagination cursor for the next page, if any.
+
+    Returns:
+        Tuple of (jsonify response, 200) ready for Flask return.
+    """
+    body: dict[str, Any] = {
+        "items": items,
+        "total": total if total is not None else len(items),
+    }
+    if cursor is not None:
+        body["next_cursor"] = cursor
+    return jsonify(body), 200
+
+
+def created(
+    resource: dict[str, Any],
+    *,
+    location: str | None = None,
+) -> tuple[Response, int]:
+    """Create a standard 201 response for a newly-created resource.
+
+    The canonical way to return a freshly-created resource with its
+    server-assigned id. Optionally sets a ``Location`` response header.
+
+    Args:
+        resource: The created resource (including its server-assigned id).
+        location: Optional URL of the created resource for the
+            ``Location`` header.
+
+    Returns:
+        Tuple of (jsonify response, 201) ready for Flask return.
+    """
+    response = jsonify(resource)
+    if location is not None:
+        response.headers["Location"] = location
+    return response, 201

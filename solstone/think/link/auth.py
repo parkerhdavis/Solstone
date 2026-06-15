@@ -12,15 +12,16 @@ fields for UX:
               "device_label": "Jer's iPhone",
               "paired_at": "2026-04-19T17:42:13Z",
               "instance_id": "<home_instance_id>",
-              "role": "phone",
+              "role": "",
               "last_seen_at": "2026-04-19T18:03:12Z",  // optional; null/absent = never
               "network": "network"                     // optional; local display label source
             }
 
-Readers reload the file on mtime change so an unpair action takes effect
-within ~500 ms of the file write. Convey's pair and unpair routes own the
-pairing writer surface; the secure listener updates `last_seen_at` and uses
-this ledger for TLS verification and per-request authorization.
+Role-less linked systems are stored with `role: ""`; peers are stored with
+`role: "peer"`. Readers reload the file on mtime change so an unpair action
+takes effect within ~500 ms of the file write. Convey's pair and unpair routes
+own the pairing writer surface; the secure listener updates `last_seen_at` and
+uses this ledger for TLS verification and per-request authorization.
 
 `last_seen_at` and `network` are local-only — never transmitted externally.
 """
@@ -28,14 +29,18 @@ this ledger for TLS verification and per-request authorization.
 from __future__ import annotations
 
 import datetime as dt
-import fcntl
 import json
-import os
 import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from solstone.think.journal_io import hold_lock, write_json
+
 MAX_DEVICE_LABEL_LEN = 80
+
+
+def is_peer(role: str) -> bool:
+    return role == "peer"
 
 
 @dataclass(frozen=True)
@@ -44,7 +49,7 @@ class ClientEntry:
     device_label: str
     paired_at: str
     instance_id: str
-    role: str = "phone"
+    role: str = ""
     last_seen_at: str | None = None
     network: str | None = None
 
@@ -91,7 +96,7 @@ class AuthorizedClients:
         device_label: str,
         instance_id: str,
         *,
-        role: str = "phone",
+        role: str = "",
         paired_at: str | None = None,
         network: str | None = None,
     ) -> None:
@@ -106,20 +111,22 @@ class AuthorizedClients:
             network=network,
         )
         with self._lock:
-            current = self._load_file_locked()
-            current[fingerprint] = entry
-            self._atomic_write_locked(current)
-            self._entries = current
+            with hold_lock(self._path):
+                current = self._load_file_locked()
+                current[fingerprint] = entry
+                self._write(current)
+                self._entries = current
 
     def remove(self, fingerprint: str) -> bool:
         with self._lock:
-            current = self._load_file_locked()
-            if fingerprint not in current:
-                return False
-            del current[fingerprint]
-            self._atomic_write_locked(current)
-            self._entries = current
-            return True
+            with hold_lock(self._path):
+                current = self._load_file_locked()
+                if fingerprint not in current:
+                    return False
+                del current[fingerprint]
+                self._write(current)
+                self._entries = current
+                return True
 
     def touch_last_seen(
         self, fingerprint: str, *, now: dt.datetime | None = None
@@ -127,14 +134,15 @@ class AuthorizedClients:
         """Update last_seen_at for a paired device. Returns False if not paired."""
         ts = (now or dt.datetime.now(dt.UTC)).strftime("%Y-%m-%dT%H:%M:%SZ")
         with self._lock:
-            current = self._load_file_locked()
-            existing = current.get(fingerprint)
-            if existing is None:
-                return False
-            current[fingerprint] = replace(existing, last_seen_at=ts)
-            self._atomic_write_locked(current)
-            self._entries = current
-            return True
+            with hold_lock(self._path):
+                current = self._load_file_locked()
+                existing = current.get(fingerprint)
+                if existing is None:
+                    return False
+                current[fingerprint] = replace(existing, last_seen_at=ts)
+                self._write(current)
+                self._entries = current
+                return True
 
     def update_label(self, fingerprint: str, label: str) -> bool:
         """Update device_label for a paired device. Returns False if not paired."""
@@ -144,14 +152,15 @@ class AuthorizedClients:
         if len(normalized) > MAX_DEVICE_LABEL_LEN:
             raise ValueError("label too long")
         with self._lock:
-            current = self._load_file_locked()
-            existing = current.get(fingerprint)
-            if existing is None:
-                return False
-            current[fingerprint] = replace(existing, device_label=normalized)
-            self._atomic_write_locked(current)
-            self._entries = current
-            return True
+            with hold_lock(self._path):
+                current = self._load_file_locked()
+                existing = current.get(fingerprint)
+                if existing is None:
+                    return False
+                current[fingerprint] = replace(existing, device_label=normalized)
+                self._write(current)
+                self._entries = current
+                return True
 
     def snapshot(self) -> list[ClientEntry]:
         self.reload_if_stale()
@@ -202,18 +211,13 @@ class AuthorizedClients:
                     device_label=str(item.get("device_label", "")),
                     paired_at=str(item.get("paired_at", "")),
                     instance_id=str(item.get("instance_id", "")),
-                    role=(
-                        item.get("role")
-                        if isinstance(item.get("role"), str)
-                        else "phone"
-                    ),
+                    role=item.get("role") if isinstance(item.get("role"), str) else "",
                     last_seen_at=last_seen if isinstance(last_seen, str) else None,
                     network=network if isinstance(network, str) else None,
                 )
         return out
 
-    def _atomic_write_locked(self, entries: dict[str, ClientEntry]) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+    def _write(self, entries: dict[str, ClientEntry]) -> None:
         payload = [
             {
                 "fingerprint": e.fingerprint,
@@ -226,11 +230,4 @@ class AuthorizedClients:
             }
             for e in entries.values()
         ]
-        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            json.dump(payload, f, indent=2)
-            f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, self._path)
+        write_json(self._path, payload)
