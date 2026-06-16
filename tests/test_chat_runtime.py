@@ -1245,7 +1245,7 @@ def test_exec_dispatch_appends_sol_message_and_spawns_talent_real_path(
         assert spawned_events[-1]["use_id"] in chat._active_talents
 
 
-def test_support_dispatch_spawns_app_talent_but_keeps_bare_event_name(
+def test_support_dispatch_after_offer_spawns_app_talent_but_keeps_bare_event_name(
     tmp_path, monkeypatch
 ):
     import solstone.convey.chat as chat
@@ -1272,6 +1272,15 @@ def test_support_dispatch_spawns_app_talent_but_keeps_bare_event_name(
         return use_id
 
     monkeypatch.setattr("solstone.convey.utils.spawn_agent", fake_spawn_agent)
+    append_chat_event(
+        "sol_message",
+        use_id="seed-offer",
+        text="offer support",
+        notes="offer",
+        requested_target=None,
+        requested_task=None,
+        offer={"kind": "support"},
+    )
 
     with chat._state_lock:
         start_info = chat._activate_current_locked(
@@ -2026,7 +2035,11 @@ def test_parse_chat_result_accepts_null_talent_request():
         {"message": "hi", "notes": "n", "talent_request": None}
     )
 
-    assert parsed == {"message": "hi", "notes": "n", "talent_request": None}
+    assert parsed == {
+        "message": "hi",
+        "notes": "n",
+        "talent_request": None,
+    }
 
 
 def test_parse_chat_result_rejects_unknown_target():

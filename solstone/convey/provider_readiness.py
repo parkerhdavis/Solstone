@@ -6,6 +6,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from solstone.think.providers.local_endpoint import (
+    LOCAL_ENDPOINT_CONTRACT_COPY,
+    LOCAL_ENDPOINT_UNREACHABLE_COPY,
+)
 from solstone.think.providers.state import ProviderState
 
 
@@ -54,6 +58,7 @@ PROVIDER_LEVEL_CODES = frozenset(
         "provider_quota_exceeded",
         "provider_unavailable",
         "network_unreachable",
+        "local_endpoint_unreachable",
         "chat_timeout",
         "chat_pipeline_unavailable",
         "unknown",
@@ -63,11 +68,11 @@ PROVIDER_LEVEL_CODES = frozenset(
 
 _SETTINGS_ACTION = RecoveryAction(
     label="Open Settings",
-    target="/app/settings/#providers",
+    target="/app/thinking/#main",
 )
 _LOCAL_SETUP_ACTION = RecoveryAction(
     label="Open Local Model Setup",
-    target="/app/settings/#providers",
+    target="/app/thinking/#local-setup",
 )
 
 _LOCAL_SETUP_DETAIL = "Finish local model setup, then try the request again."
@@ -97,6 +102,15 @@ _ENTRIES: dict[str, _Entry] = {
         detail=(
             "Local models require a supported GPU. This computer has no GPU "
             "acceleration available."
+        ),
+        recovery_action=_SETTINGS_ACTION,
+    ),
+    "gpu_probe_failed": _Entry(
+        klass="setup",
+        summary="local GPU check couldn't finish",
+        detail=(
+            "Local model setup couldn't confirm GPU acceleration — try again, "
+            "or use a cloud provider if it keeps failing."
         ),
         recovery_action=_SETTINGS_ACTION,
     ),
@@ -136,11 +150,36 @@ _ENTRIES: dict[str, _Entry] = {
         detail="The local model is not ready yet. Try again shortly.",
         recovery_action=None,
     ),
+    "unsupported_capability": _Entry(
+        klass="generic",
+        summary="the local model can't handle that kind of input",
+        detail=(
+            "The local model doesn't support that capability — for example, the "
+            "bundle doesn't serve audio (that runs through the Whisper pipeline "
+            "instead). Use a cloud provider for it, or pick a model that does."
+        ),
+        recovery_action=_SETTINGS_ACTION,
+    ),
     "local_server_unhealthy": _Entry(
         klass="provider",
         summary="the local model isn't responding",
         detail="Restart local model setup or try a cloud provider.",
         recovery_action=_LOCAL_SETUP_ACTION,
+    ),
+    "local_endpoint_unreachable": _Entry(
+        klass="provider",
+        summary=LOCAL_ENDPOINT_UNREACHABLE_COPY,
+        detail="Check the endpoint URL, confirm the server is running, then retry.",
+        recovery_action=_SETTINGS_ACTION,
+    ),
+    "local_endpoint_contract_failed": _Entry(
+        klass="generic",
+        summary=LOCAL_ENDPOINT_CONTRACT_COPY,
+        detail=(
+            "Confirm the endpoint serves /v1/chat/completions with vision and "
+            "JSON-schema response_format support."
+        ),
+        recovery_action=_SETTINGS_ACTION,
     ),
     "unsupported_platform": _Entry(
         klass="setup",

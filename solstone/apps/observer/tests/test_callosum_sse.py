@@ -13,28 +13,13 @@ import pytest
 
 import solstone.apps.observer.routes as routes_module
 import solstone.convey.bridge as convey_bridge
-import solstone.convey.root as root_module
 from solstone.apps.observer.routes import OBSERVER_CALLOSUM_SSE_ROUTE
 from solstone.apps.observer.utils import (
     load_observer,
-    load_observer_by_fingerprint,
-    mint_pl_observer_record,
     save_observer,
 )
-from solstone.convey.secure_listener import ConveyIdentity
 from solstone.convey.sol_initiated.copy import KIND_SOL_CHAT_REQUEST
-
-PL_FINGERPRINT = "sha256:" + ("e" * 64)
-
-
-def _pl_identity(fingerprint: str = PL_FINGERPRINT) -> ConveyIdentity:
-    return ConveyIdentity(
-        mode="pl-direct",
-        fingerprint=fingerprint,
-        device_label="pl-sse",
-        paired_at="2026-05-20T00:00:00Z",
-        session_id="session-1",
-    )
+from solstone.observe.protocol import OBSERVER_HANDLE_HEADER
 
 
 @pytest.fixture(autouse=True)
@@ -56,11 +41,11 @@ def _create_observer(env, name: str = "sse-test") -> tuple[str, str]:
     )
     assert resp.status_code == 200
     data = resp.get_json()
-    return data["key"], data["key_prefix"]
+    return data["key"], data["prefix"]
 
 
-def _route_for(key: str) -> str:
-    return OBSERVER_CALLOSUM_SSE_ROUTE.replace("<key>", key)
+def _route() -> str:
+    return OBSERVER_CALLOSUM_SSE_ROUTE
 
 
 def _next_chunk(response) -> str:
@@ -91,10 +76,10 @@ def _assert_reason(response, *, reason_code: str, detail: str) -> None:
     assert data["detail"] == detail
 
 
-def test_callosum_sse_missing_key_returns_401(observer_env):
+def test_callosum_sse_missing_bearer_returns_401(observer_env):
     env = observer_env()
-    with env.app.test_request_context(_route_for("unused")):
-        response, status = routes_module.callosum_sse("")
+    with env.app.test_request_context(_route()):
+        response, status = routes_module.callosum_sse()
     assert status == 401
     _assert_reason(
         response,
@@ -103,11 +88,27 @@ def test_callosum_sse_missing_key_returns_401(observer_env):
     )
 
 
-def test_callosum_sse_unknown_key_returns_401(observer_env):
+def test_callosum_sse_without_bearer_returns_401(observer_env):
     env = observer_env()
-    resp = env.client.get(_route_for("unknown-key"), buffered=False)
+    resp = env.client.get(_route(), buffered=False)
     assert resp.status_code == 401
-    _assert_reason(resp, reason_code="auth_key_invalid", detail="Invalid key")
+    _assert_reason(
+        resp,
+        reason_code="auth_required",
+        detail="Authorization required",
+    )
+
+
+def test_legacy_keyed_callosum_path_is_gone(observer_env):
+    env = observer_env()
+    key, _ = _create_observer(env)
+
+    resp = env.client.get(
+        f"/app/observer/{key}/callosum",
+        headers={"Authorization": f"Bearer {key}"},
+        buffered=False,
+    )
+    assert resp.status_code == 404
 
 
 def test_callosum_sse_revoked_key_returns_403(observer_env):
@@ -116,7 +117,11 @@ def test_callosum_sse_revoked_key_returns_403(observer_env):
     revoke = env.client.delete(f"/app/observer/api/{key_prefix}")
     assert revoke.status_code == 200
 
-    resp = env.client.get(_route_for(key), buffered=False)
+    resp = env.client.get(
+        _route(),
+        headers={"Authorization": f"Bearer {key}"},
+        buffered=False,
+    )
     assert resp.status_code == 403
     _assert_reason(
         resp,
@@ -133,7 +138,11 @@ def test_callosum_sse_disabled_key_returns_403(observer_env):
     observer["enabled"] = False
     assert save_observer(observer)
 
-    resp = env.client.get(_route_for(key), buffered=False)
+    resp = env.client.get(
+        _route(),
+        headers={"Authorization": f"Bearer {key}"},
+        buffered=False,
+    )
     assert resp.status_code == 403
     _assert_reason(
         resp,
@@ -142,13 +151,12 @@ def test_callosum_sse_disabled_key_returns_403(observer_env):
     )
 
 
-def test_callosum_sse_bearer_header_overrides_path_key(observer_env):
+def test_callosum_sse_bearer_header_authenticates(observer_env):
     env = observer_env()
     valid_key, _ = _create_observer(env, "valid-sse")
-    bogus_key = "bogus-key"
 
     resp = env.client.get(
-        _route_for(bogus_key),
+        _route(),
         headers={"Authorization": f"Bearer {valid_key}"},
         buffered=False,
     )
@@ -159,7 +167,7 @@ def test_callosum_sse_bearer_header_overrides_path_key(observer_env):
         resp.close()
 
     resp = env.client.get(
-        _route_for(valid_key),
+        _route(),
         headers={"Authorization": "Bearer invalid-key"},
         buffered=False,
     )
@@ -171,7 +179,11 @@ def test_callosum_sse_success_content_type(observer_env):
     env = observer_env()
     key, _ = _create_observer(env)
 
-    resp = env.client.get(_route_for(key), buffered=False)
+    resp = env.client.get(
+        _route(),
+        headers={"Authorization": f"Bearer {key}"},
+        buffered=False,
+    )
     try:
         assert resp.status_code == 200
         assert resp.content_type.startswith("text/event-stream")
@@ -182,7 +194,11 @@ def test_callosum_sse_success_content_type(observer_env):
 def test_callosum_sse_round_trip_payload(observer_env):
     env = observer_env()
     key, key_prefix = _create_observer(env)
-    resp = env.client.get(_route_for(key), buffered=False)
+    resp = env.client.get(
+        _route(),
+        headers={"Authorization": f"Bearer {key}"},
+        buffered=False,
+    )
     try:
         assert resp.status_code == 200
         assert convey_bridge.subscription_count(key_prefix) == 1
@@ -195,61 +211,23 @@ def test_callosum_sse_round_trip_payload(observer_env):
         resp.close()
 
 
-def test_callosum_sse_pl_registers_under_fingerprint_prefix(observer_env, monkeypatch):
-    env = observer_env()
-    prefix = PL_FINGERPRINT.removeprefix("sha256:")[:16]
-    mint_pl_observer_record(
-        fingerprint=PL_FINGERPRINT,
-        device_label="pl-sse",
-        paired_at="2026-05-20T00:00:00Z",
-    )
-
-    class Authorized:
-        def is_authorized(self, fingerprint: str) -> bool:
-            return fingerprint == PL_FINGERPRINT
-
-    monkeypatch.setattr(root_module, "get_authorized_clients", lambda: Authorized())
-
-    resp = env.client.get(
-        _route_for("url-key-is-ignored"),
-        environ_overrides={"pl.identity": _pl_identity()},
-        buffered=False,
-    )
-    try:
-        assert resp.status_code == 200
-        assert convey_bridge.subscription_count(prefix) == 1
-    finally:
-        resp.close()
-    assert convey_bridge.subscription_count(prefix) == 0
-
-
-def test_callosum_sse_pl_revocation_midstream_emits_error(
+def test_callosum_sse_handle_revocation_midstream_emits_error(
     observer_env,
     monkeypatch,
 ):
     env = observer_env()
-    mint_pl_observer_record(
-        fingerprint=PL_FINGERPRINT,
-        device_label="pl-sse",
-        paired_at="2026-05-20T00:00:00Z",
-    )
-
-    class Authorized:
-        def is_authorized(self, fingerprint: str) -> bool:
-            return fingerprint == PL_FINGERPRINT
-
-    monkeypatch.setattr(root_module, "get_authorized_clients", lambda: Authorized())
+    key, _key_prefix = _create_observer(env, "handle-sse")
     monkeypatch.setattr(routes_module, "_SSE_HEARTBEAT_SECONDS", 0.01)
 
     resp = env.client.get(
-        _route_for("url-key-is-ignored"),
-        environ_overrides={"pl.identity": _pl_identity()},
+        _route(),
+        headers={OBSERVER_HANDLE_HEADER: key},
         buffered=False,
     )
     try:
         assert resp.status_code == 200
         assert _next_chunk(resp) == ": heartbeat\n\n"
-        observer = load_observer_by_fingerprint(PL_FINGERPRINT)
+        observer = load_observer(key)
         assert observer is not None
         observer["revoked"] = True
         assert save_observer(observer)
@@ -268,7 +246,11 @@ def test_callosum_sse_heartbeat(observer_env, monkeypatch):
     key, _ = _create_observer(env)
     monkeypatch.setattr(routes_module, "_SSE_HEARTBEAT_SECONDS", 0.01)
 
-    resp = env.client.get(_route_for(key), buffered=False)
+    resp = env.client.get(
+        _route(),
+        headers={"Authorization": f"Bearer {key}"},
+        buffered=False,
+    )
     try:
         assert resp.status_code == 200
         assert _next_chunk(resp) == ": heartbeat\n\n"

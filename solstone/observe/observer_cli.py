@@ -33,20 +33,11 @@ from solstone.apps.observer.utils import (
     list_observers,
     load_history,
     observer_filename_prefix,
-    observer_mode,
     revoke_observer_record,
     save_observer,
 )
 from solstone.apps.utils import log_app_action
-from solstone.observe.copy import (
-    OBSERVER_LOCALHOST_BANNER_LINE_1,
-    OBSERVER_LOCALHOST_BANNER_LINE_2,
-    OBSERVER_LOCALHOST_BANNER_LINE_3,
-    OBSERVER_LOCALHOST_BANNER_LINE_4,
-    OBSERVER_LOCALHOST_REMINDER,
-)
 from solstone.think.utils import (
-    get_config,
     get_journal,
     now_ms,
     require_solstone,
@@ -163,24 +154,11 @@ def cmd_create(args: argparse.Namespace) -> int:
         print(json.dumps({"name": name, "key": key, "prefix": key[:8]}))
         return 0
 
-    allow_network_access = bool(
-        get_config().get("convey", {}).get("allow_network_access", False)
-    )
-    if not allow_network_access:
-        print()
-        print(OBSERVER_LOCALHOST_BANNER_LINE_1)
-        print(OBSERVER_LOCALHOST_BANNER_LINE_2)
-        print(OBSERVER_LOCALHOST_BANNER_LINE_3)
-        print(OBSERVER_LOCALHOST_BANNER_LINE_4)
-        print()
     print("Reusing existing observer:" if reused else "Observer created:")
     print(f"  Name:       {name}")
     print(f"  Prefix:     {key[:8]}")
     print("  server url:  (set during server configuration)")
     print(f"  api key:     {key}")
-    if not allow_network_access:
-        print()
-        print(OBSERVER_LOCALHOST_REMINDER)
     return 0
 
 
@@ -195,7 +173,6 @@ def cmd_list(args: argparse.Namespace) -> int:
             result.append(
                 {
                     "name": r.get("name", ""),
-                    "mode": observer_mode(r),
                     "prefix": observer_filename_prefix(r),
                     "status": _status_label(r),
                     "last_seen": r.get("last_seen"),
@@ -211,14 +188,13 @@ def cmd_list(args: argparse.Namespace) -> int:
         return 0
 
     print(
-        f"{'Name':<20} {'Mode':<5} {'Prefix':<18} {'Status':<14} "
+        f"{'Name':<20} {'Prefix':<18} {'Status':<14} "
         f"{'Last Seen':<18} {'Segments':>10} {'Bytes':>12}"
     )
-    print("-" * 100)
+    print("-" * 94)
 
     for r in observers:
         name = r.get("name", "")
-        mode = observer_mode(r)
         prefix = observer_filename_prefix(r)
         status = _status_label(r)
         last_seen = _fmt_time(r.get("last_seen"))
@@ -226,7 +202,7 @@ def cmd_list(args: argparse.Namespace) -> int:
         segments = stats.get("segments_received", 0)
         bytes_recv = _fmt_bytes(stats.get("bytes_received", 0))
         print(
-            f"{name:<20} {mode:<5} {prefix:<18} {status:<14} "
+            f"{name:<20} {prefix:<18} {status:<14} "
             f"{last_seen:<18} {segments:>10} {bytes_recv:>12}"
         )
 
@@ -326,7 +302,6 @@ def _status_single(identifier: str, json_output: bool = False) -> int:
         return 1
 
     name = observer.get("name", "")
-    mode = observer_mode(observer)
     key_prefix = observer_filename_prefix(observer)
     stats = observer.get("stats", {})
 
@@ -335,7 +310,6 @@ def _status_single(identifier: str, json_output: bool = False) -> int:
             json.dumps(
                 {
                     "name": name,
-                    "mode": mode,
                     "prefix": key_prefix,
                     "status": _status_label(observer),
                     "created_at": observer.get("created_at"),
@@ -349,7 +323,6 @@ def _status_single(identifier: str, json_output: bool = False) -> int:
         return 0
 
     print(f"Observer: {name}")
-    print(f"  Mode:       {mode}")
     print(f"  Prefix:     {key_prefix}")
     print(f"  Status:     {_status_label(observer)}")
     print(f"  Created:    {_fmt_time(observer.get('created_at'))}")
@@ -418,7 +391,6 @@ def _status_all(json_output: bool = False) -> int:
                     "observers": [
                         {
                             "name": r.get("name", ""),
-                            "mode": observer_mode(r),
                             "prefix": observer_filename_prefix(r),
                             "status": _status_label(r),
                             "last_seen": r.get("last_seen"),
@@ -437,15 +409,14 @@ def _status_all(json_output: bool = False) -> int:
     print(f"  Total segments: {total_segments}")
     print(f"  Total bytes:    {_fmt_bytes(total_bytes)}")
 
-    print(f"\n{'Name':<20} {'Mode':<5} {'Prefix':<18} {'Status':<14} {'Last Seen':<18}")
-    print("-" * 80)
+    print(f"\n{'Name':<20} {'Prefix':<18} {'Status':<14} {'Last Seen':<18}")
+    print("-" * 74)
     for r in observers:
         name = r.get("name", "")
-        mode = observer_mode(r)
         prefix = observer_filename_prefix(r)
         status = _status_label(r)
         last_seen = _fmt_time(r.get("last_seen"))
-        print(f"{name:<20} {mode:<5} {prefix:<18} {status:<14} {last_seen:<18}")
+        print(f"{name:<20} {prefix:<18} {status:<14} {last_seen:<18}")
 
     return 0
 

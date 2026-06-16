@@ -157,16 +157,6 @@ BACKUP_UNAVAILABLE = Reason(
     "I couldn't start a backup because solstone's background service isn't running. Start it, then try again.",
     503,
 )
-NETWORK_SECURITY_REQUIRES_PASSWORD = Reason(
-    "network_security_requires_password",
-    "I couldn't change network access until a password is set.",
-    400,
-)
-LOCAL_REQUEST_REQUIRED = Reason(
-    "local_request_required",
-    "I couldn't change network access from this request.",
-    403,
-)
 LOCAL_REQUEST_ONLY = Reason(
     "local_request_only",
     "I couldn't register that observer because this endpoint serves local requests only.",
@@ -426,26 +416,4 @@ REPROCESS_ALREADY_COMPLETE = Reason(
     "reprocess_already_complete",
     "this day's already done. want to redo it from scratch?",
     200,
-)
-
-# scout / setup wizard
-SETUP_ALREADY_COMPLETE = Reason(
-    "setup_already_complete",
-    "I couldn't do that because setup is already complete.",
-    404,
-)
-SCOUT_ALREADY_ENABLED = Reason(
-    "already_enabled",
-    "I couldn't enable scout because it's already on.",
-    409,
-)
-SCOUT_MANUAL_KEY_PRESENT = Reason(
-    "manual_key_present",
-    "I couldn't enable scout because a Gemini key is already on this machine.",
-    409,
-)
-SCOUT_SESSION_NOT_FOUND = Reason(
-    "scout_session_not_found",
-    "I couldn't find that scout session.",
-    404,
 )

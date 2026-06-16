@@ -73,6 +73,10 @@ def _patch_tunnel(
     requests_seen: list[tuple[str, str, dict[str, str], bytes]],
 ) -> None:
     class FakeTunnelSession:
+        @property
+        def is_alive(self) -> bool:
+            return True
+
         async def request(self, method, path, *, headers=None, body=b""):
             requests_seen.append((method, path, headers or {}, body))
             return (200, {}, b'{"ok": true}')
@@ -297,7 +301,6 @@ def test_export_dl_regression_config_url_headers_and_body(
         "convey": {
             "password_hash": "secret",
             "secret": "secret",
-            "trust_localhost": True,
         },
     }
     (config_dir / "journal.json").write_text(json.dumps(config), encoding="utf-8")
@@ -325,7 +328,7 @@ def test_export_dl_regression_config_url_headers_and_body(
     )
     payload = mock_session.post.call_args.kwargs["json"]["config"]
     assert payload["identity"] == {"name": "Test"}
-    assert payload["convey"] == {"trust_localhost": True}
+    assert payload["convey"] == {}
 
 
 class _FakeInput(io.StringIO):

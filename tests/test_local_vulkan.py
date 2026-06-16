@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import subprocess
 from pathlib import Path
 
@@ -97,9 +98,10 @@ def test_enumerate_gpus_parses_subprocess_json(monkeypatch):
 
     monkeypatch.setattr(local_vulkan.subprocess, "run", fake_run)
 
-    devices = local_vulkan._enumerate_gpus()
+    devices, probe_ok = local_vulkan._enumerate_gpus()
 
     assert [device.index for device in devices] == [0, 1, 2]
+    assert probe_ok is True
 
 
 def test_enumerate_gpus_returns_empty_on_timeout(monkeypatch):
@@ -108,7 +110,9 @@ def test_enumerate_gpus_returns_empty_on_timeout(monkeypatch):
 
     monkeypatch.setattr(local_vulkan.subprocess, "run", fake_run)
 
-    assert local_vulkan._enumerate_gpus() == []
+    devices, probe_ok = local_vulkan._enumerate_gpus()
+    assert devices == []
+    assert probe_ok is False
 
 
 def test_enumerate_gpus_returns_empty_on_nonzero_or_bad_json(monkeypatch):
@@ -120,7 +124,9 @@ def test_enumerate_gpus_returns_empty_on_nonzero_or_bad_json(monkeypatch):
         ),
     )
 
-    assert local_vulkan._enumerate_gpus() == []
+    devices, probe_ok = local_vulkan._enumerate_gpus()
+    assert devices == []
+    assert probe_ok is False
 
     monkeypatch.setattr(
         local_vulkan.subprocess,
@@ -130,7 +136,45 @@ def test_enumerate_gpus_returns_empty_on_nonzero_or_bad_json(monkeypatch):
         ),
     )
 
-    assert local_vulkan._enumerate_gpus() == []
+    devices, probe_ok = local_vulkan._enumerate_gpus()
+    assert devices == []
+    assert probe_ok is False
+
+
+def test_enumerate_gpus_valid_empty_result_keeps_probe_ok(monkeypatch):
+    monkeypatch.setattr(
+        local_vulkan.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            _args[0], 0, stdout="[]", stderr=""
+        ),
+    )
+
+    devices, probe_ok = local_vulkan._enumerate_gpus()
+
+    assert devices == []
+    assert probe_ok is True
+
+
+def test_budget_instance_create_info_requests_vulkan_1_1():
+    """The VRAM-budget probe must build its instance with a non-NULL
+    pApplicationInfo requesting Vulkan >= 1.1, so vkGetPhysicalDeviceMemoryProperties2
+    (a 1.1 core call) is conformant and the VK_EXT_memory_budget pNext chain is honored.
+    """
+    create_info, app_info = local_vulkan._make_instance_create_info()
+
+    # pApplicationInfo must be non-NULL...
+    assert create_info.pApplicationInfo
+    # ...and must address the very app-info object returned, proving the caller
+    # can retain it (pApplicationInfo stores only an address, not a reference).
+    assert create_info.pApplicationInfo == ctypes.addressof(app_info)
+    # ...and that app-info must request at least Vulkan 1.1.
+    referenced = ctypes.cast(
+        create_info.pApplicationInfo,
+        ctypes.POINTER(local_vulkan._VkApplicationInfo),
+    ).contents
+    assert referenced.sType == local_vulkan._VK_STRUCTURE_TYPE_APPLICATION_INFO
+    assert referenced.apiVersion >= 4198400
 
 
 def test_device_local_used_mib_parses_subprocess_json(monkeypatch):

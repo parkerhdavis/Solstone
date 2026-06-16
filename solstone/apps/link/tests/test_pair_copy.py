@@ -15,13 +15,11 @@ U4_COPY_VALUES = [
     copy.STEP_1,
     copy.STEP_2,
     copy.STEP_3,
-    copy.MANUAL_CODE_LABEL,
     copy.PAIR_NETWORK_LINE,
     copy.DETAILS_DISCLOSURE,
     copy.CA_FP_LABEL,
     copy.CA_FP_NOTE,
     copy.DEVICE_LABEL_FIELD_LABEL,
-    copy.DEVICE_LABEL_DEFAULT_FORMAT,
     copy.EXPIRED_BUTTON,
     copy.PAIR_ERROR_BODY,
     copy.SUCCESS_HEADING,
@@ -59,7 +57,6 @@ def test_u4_copy_values_are_locked() -> None:
     assert copy.STEP_1 == "open the camera on the device you're adding"
     assert copy.STEP_2 == "point it at this code"
     assert copy.STEP_3 == "tap the link to open solstone"
-    assert copy.MANUAL_CODE_LABEL == "can't scan? type this on the device:"
     assert copy.PAIR_NETWORK_LINE == (
         "this device needs to be on your network (or your VPN) to pair. "
         "expires in 5:00."
@@ -87,7 +84,7 @@ def test_u4_copy_values_are_locked() -> None:
     assert copy.DEVICE_LABEL_PLACEHOLDER == "e.g. my iPhone"
     assert copy.HERO_TITLE == "let's connect a device"
     assert copy.HERO_BODY == (
-        "your journal lives here, on this machine. to read it from your phone or "
+        "your journal lives here, on this device. to read it from your phone or "
         "laptop, that device needs a way to reach it. right now it can be reached "
         "on your home network."
     )

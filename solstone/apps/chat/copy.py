@@ -11,9 +11,9 @@ TALENT_LABEL_READ_ERRORED = "Couldn't finish reading your journal"
 TALENT_LABEL_EXEC_RUNNING = "Making that change…"
 TALENT_LABEL_EXEC_FINISHED = "Made the change"
 TALENT_LABEL_EXEC_ERRORED = "Couldn't finish the change"
-TALENT_LABEL_SUPPORT_RUNNING = "Reaching sol pbc…"
-TALENT_LABEL_SUPPORT_FINISHED = "Reached sol pbc"
-TALENT_LABEL_SUPPORT_ERRORED = "Couldn't reach sol pbc"
+TALENT_LABEL_SUPPORT_RUNNING = "Reaching solstone support…"
+TALENT_LABEL_SUPPORT_FINISHED = "Reached solstone support"
+TALENT_LABEL_SUPPORT_ERRORED = "Couldn't reach solstone support"
 
 # T1.4 — queue depth indicators (lowercase "sol" per system-anatomy canon)
 CHAT_QUEUE_INDICATOR_SINGULAR = "1 message waiting"
@@ -40,6 +40,11 @@ CHAT_THINKING_OPT_ON_TAP = "Show on tap"
 CHAT_THINKING_OPT_ALWAYS = "Always show"
 CHAT_THINKING_OPT_NEVER = "Never show"
 CHAT_THINKING_SETTING_HELP = "sol does some thinking before replying. Choose how much you want to see."
+
+# Deterministic support-offer gate (backend-emitted; rides the sol_message text).
+# Brand rule: "solstone support", never "sol pbc".
+CHAT_OFFER_SUPPORT_PROMPT = "Sounds like something's not working — want me to bring in solstone support?"
+CHAT_OFFER_SUPPORT_DECLINE = "Okay — I'll keep this local. Tell me if you'd like me to bring in solstone support after all."
 # fmt: on
 
 from typing import Literal

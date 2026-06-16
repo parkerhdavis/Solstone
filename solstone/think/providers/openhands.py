@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import shutil
 import sys
@@ -37,8 +38,9 @@ from solstone.think.cogitate_policy import (
     DEFAULT_READ_CALL_BUDGET,
     DEFAULT_RUN_COST_CAP_USD,
     MAX_TURNS,
+    MAX_TURNS_HEADROOM,
+    TURN_WARN_FRACS,
     CogitatePolicy,
-    MaxTurnsExhausted,
     resolve_read_scope,
 )
 from solstone.think.providers.cli import QuotaExhaustedError, assemble_prompt
@@ -122,6 +124,20 @@ def _build_llm(provider: str, model: str) -> Any:
     from openhands.sdk import LLM
 
     if provider == "local":
+        from solstone.think.providers.local_endpoint import resolve_local_endpoint
+
+        endpoint = resolve_local_endpoint()
+        if not endpoint.is_bundled:
+            return LLM(
+                model=f"openai/{endpoint.served_model_id}",
+                base_url=f"{endpoint.base_url}/v1",
+                api_key=endpoint.credential or "EMPTY",
+                native_tool_calling=False,
+                input_cost_per_token=0,
+                output_cost_per_token=0,
+                litellm_extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            )
+
         from solstone.think.providers import local_server
 
         server = local_server.connect()
@@ -400,10 +416,14 @@ class _OpenHandsTranslator:
         self.finish_message: str | None = None
         self.final_message: str | None = None
         self.max_turns_exhausted = False
-        self._max_turns_event_emitted = False
         self._wrapup_nudged = False
         self._final_turn_armed = False
         self._cost_force_stopped = False
+        self._observed_turns: int = 0
+        self._seen_response_ids: set[str] = set()
+        self._turn_warnings_fired: set[float] = set()
+        self._turn_final_armed: bool = False
+        self._turn_force_stopped: bool = False
 
     def on_event(self, event: Any) -> None:
         if isinstance(event, self.ActionEvent):
@@ -452,6 +472,8 @@ class _OpenHandsTranslator:
             return
 
         self._check_resource_ceiling()
+        response_id = str(getattr(event, "llm_response_id", "") or "")
+        self._check_turn_budget(response_id)
         self.tool_calls[call_id] = {"tool": tool_name, "args": args}
         self.callback.emit(
             {
@@ -528,6 +550,70 @@ class _OpenHandsTranslator:
                 f"with the best complete result you can produce."
             )
             self._wrapup_nudged = True
+
+    def _check_turn_budget(self, response_id: str) -> None:
+        if self.conversation is None or self._turn_force_stopped:
+            return
+
+        # A parallel/duplicate action from an already-counted response is the
+        # same turn; dedupe before the armed check so an arming turn cannot
+        # immediately force-stop itself.
+        if response_id and response_id in self._seen_response_ids:
+            return
+
+        # Stage 3: a new non-final turn after the ultimatum -> hard backstop.
+        if self._turn_final_armed:
+            self.conversation.pause()
+            self._turn_force_stopped = True
+            self.max_turns_exhausted = True
+            return
+
+        if response_id:
+            self._seen_response_ids.add(response_id)
+        self._observed_turns += 1
+
+        used = self._observed_turns
+        limit = self.max_turns
+        remaining = limit - used
+        finish_tool = self._finish_tool_name()
+
+        # Stage 2: one or fewer turns remains; threshold warnings collapse here.
+        if used >= limit - 1:
+            self.conversation.send_message(
+                f"Turn budget reached: this is your last turn. Stop gathering more "
+                f"context or using tools, and call {finish_tool} now with the best "
+                f"result available."
+            )
+            self._turn_final_armed = True
+            return
+
+        # Stage 1: threshold warnings, each latched once.
+        for frac in TURN_WARN_FRACS:
+            if frac not in self._turn_warnings_fired and used >= math.ceil(
+                frac * limit
+            ):
+                percent = int(frac * 100)
+                if percent == 50:
+                    instruction = (
+                        "Start converging on the final result and call "
+                        f"{finish_tool} as soon as useful work is complete."
+                    )
+                elif percent == 75:
+                    instruction = (
+                        "Stop broad gathering; use the remaining turns only for "
+                        f"synthesis and final checks, then call {finish_tool}."
+                    )
+                else:
+                    instruction = (
+                        "Finish now unless one more tool call is essential; call "
+                        f"{finish_tool} with the best complete result available."
+                    )
+                self.conversation.send_message(
+                    f"Turn budget warning: you've used {percent}% of your turn "
+                    f"budget so far: {used} of {limit} turns, {remaining} turns "
+                    f"left. {instruction}"
+                )
+                self._turn_warnings_fired.add(frac)
 
     def _emit_reasoning(self, event: Any, raw: list[dict[str, Any]]) -> None:
         reasoning_content = getattr(event, "reasoning_content", None)
@@ -613,6 +699,7 @@ class _OpenHandsTranslator:
                 "provider": self.provider,
                 "trace": "",
                 "raw": _raw_event(event),
+                "terminal": False,
                 "ts": now_ms(),
             }
         )
@@ -621,19 +708,6 @@ class _OpenHandsTranslator:
         if getattr(event, "code", None) != "MaxIterationsReached":
             return
         self.max_turns_exhausted = True
-        self.emit_max_turns_exhausted()
-
-    def emit_max_turns_exhausted(self) -> None:
-        if self._max_turns_event_emitted:
-            return
-        self.callback.emit(
-            {
-                "event": "max_turns_exhausted",
-                "max_turns": self.max_turns,
-                "ts": now_ms(),
-            }
-        )
-        self._max_turns_event_emitted = True
 
     def result(self) -> str | None:
         if self.expects_emit_final:
@@ -858,6 +932,26 @@ def _suppress_litellm_cost_warnings() -> Any:
             logger.removeFilter(warning_filter)
 
 
+def _conversation_execution_status(conversation: Any) -> str | None:
+    try:
+        state = conversation.state
+    except AttributeError:
+        return None
+    if state is None:
+        return None
+    try:
+        status = state.execution_status
+    except AttributeError:
+        return None
+    if status is None:
+        return None
+    try:
+        value = status.value
+    except AttributeError:
+        value = status
+    return value if isinstance(value, str) else None
+
+
 async def run_cogitate(
     config: dict[str, Any],
     on_event: Callable[[dict], None] | None = None,
@@ -867,6 +961,8 @@ async def run_cogitate(
     provider = str(config["provider"])
     model = str(config["model"])
 
+    llm: Any | None = None
+    usage_start: dict[str, int] | None = None
     try:
         from openhands.sdk import Agent, Conversation
         from openhands.sdk.tool.registry import register_tool
@@ -956,7 +1052,7 @@ async def run_cogitate(
             conversation_id=conversation_id,
             callbacks=[translator.on_event],
             token_callbacks=[translator.on_token],
-            max_iteration_per_run=max_turns,
+            max_iteration_per_run=max_turns + MAX_TURNS_HEADROOM,
             stuck_detection=True,
             visualizer=None,
         )
@@ -965,27 +1061,73 @@ async def run_cogitate(
         with _suppress_litellm_cost_warnings():
             await conversation.arun()
 
-        if translator.max_turns_exhausted:
-            raise MaxTurnsExhausted(
-                f"max_turns_exhausted: OpenHands cogitate exceeded {max_turns} turns"
-            )
-
         result = translator.result()
-        if translator._cost_force_stopped and not (result and result.strip()):
+        usage = _usage_delta(usage_start, llm)
+        if translator._cost_force_stopped or translator.max_turns_exhausted:
+            reason_code = (
+                "token_budget_exceeded"
+                if translator._cost_force_stopped
+                else "max_turns_exhausted"
+            )
+            has_partial = bool(result and result.strip())
+            if reason_code == "token_budget_exceeded":
+                error_text = (
+                    "token_budget_exceeded: cogitate run reached its per-run "
+                    "resource budget and was force-finished with a partial result "
+                    "preserved"
+                    if has_partial
+                    else "token_budget_exceeded: cogitate run reached its per-run "
+                    "resource budget and was force-finished before emitting a final "
+                    "result"
+                )
+            else:
+                error_text = (
+                    "max_turns_exhausted: cogitate run reached its turn budget and "
+                    "was force-finished with a partial result preserved"
+                    if has_partial
+                    else "max_turns_exhausted: cogitate run reached its turn budget "
+                    "and was force-finished before emitting a final result"
+                )
+            conversation.close()
             callback.emit(
                 {
                     "event": "error",
-                    "error": (
-                        "token_budget_exceeded: cogitate run reached its per-run "
-                        "resource budget before emitting a final result"
-                    ),
-                    "reason_code": "token_budget_exceeded",
+                    "error": error_text,
+                    "reason_code": reason_code,
                     "provider": provider,
+                    "result": result,
+                    "usage": usage,
                     "terminal": True,
+                    "cli_session_id": str(conversation_id),
                     "ts": now_ms(),
                 }
             )
-            return None
+            return result
+        execution_status = _conversation_execution_status(conversation)
+        if execution_status in {"stuck", "paused"}:
+            has_partial = bool(result and result.strip())
+            error_text = (
+                "agent_stuck: cogitate run was interrupted/stuck with a partial "
+                "result preserved"
+                if has_partial
+                else "agent_stuck: cogitate run was interrupted/stuck before "
+                "emitting a final result"
+            )
+            conversation.close()
+            callback.emit(
+                {
+                    "event": "error",
+                    "error": error_text,
+                    "reason_code": "agent_stuck",
+                    "provider": provider,
+                    "result": result,
+                    "usage": usage,
+                    "terminal": True,
+                    "cli_session_id": str(conversation_id),
+                    "ts": now_ms(),
+                }
+            )
+            return result
         if wants_emit_final and not (result and result.strip()):
             callback.emit(
                 {
@@ -1005,7 +1147,7 @@ async def run_cogitate(
             {
                 "event": "finish",
                 "result": result,
-                "usage": _usage_delta(usage_start, llm),
+                "usage": usage,
                 "cli_session_id": str(conversation_id),
                 "ts": now_ms(),
             }
@@ -1013,24 +1155,53 @@ async def run_cogitate(
         return result
     except QuotaExhaustedError:
         raise
-    except MaxTurnsExhausted:
-        raise
     except Exception as exc:
         provider_exc = _unwrap_provider_exception(exc)
-        if classify_provider_error(provider_exc, provider) == "provider_quota_exceeded":
+        reason_code = None
+        local_endpoint = None
+        if provider == "local":
+            from solstone.think.providers.local_endpoint import (
+                classify_byo_cogitate_error,
+                local_endpoint_reason_copy,
+                redact_local_endpoint_credential,
+                resolve_local_endpoint,
+            )
+
+            local_endpoint = resolve_local_endpoint()
+            if not local_endpoint.is_bundled:
+                reason_code = classify_byo_cogitate_error(provider_exc)
+                if reason_code:
+                    setattr(exc, "reason_code", reason_code)
+                    setattr(provider_exc, "reason_code", reason_code)
+        reason_code = reason_code or classify_provider_error(provider_exc, provider)
+        error_text = str(exc)
+        trace_text = traceback.format_exc()
+        if local_endpoint is not None:
+            fixed_copy = local_endpoint_reason_copy(reason_code)
+            if fixed_copy:
+                error_text = fixed_copy
+            if not local_endpoint.is_bundled:
+                error_text = redact_local_endpoint_credential(
+                    error_text, local_endpoint
+                )
+                trace_text = redact_local_endpoint_credential(
+                    trace_text, local_endpoint
+                )
+        if reason_code == "provider_quota_exceeded":
             raise QuotaExhaustedError(
                 str(provider_exc), _retry_delay_ms(provider_exc)
             ) from exc
-        callback.emit(
-            {
-                "event": "error",
-                "error": str(exc),
-                "reason_code": classify_provider_error(provider_exc, provider),
-                "provider": provider,
-                "trace": traceback.format_exc(),
-                "ts": now_ms(),
-            }
-        )
+        error_event = {
+            "event": "error",
+            "error": error_text,
+            "reason_code": reason_code,
+            "provider": provider,
+            "trace": trace_text,
+        }
+        if usage_start is not None and llm is not None:
+            error_event["usage"] = _usage_delta(usage_start, llm)
+        error_event["ts"] = now_ms()
+        callback.emit(error_event)
         setattr(exc, "_evented", True)
         raise
 

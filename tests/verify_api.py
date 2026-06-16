@@ -22,7 +22,7 @@ try:
         FROZEN_DATE,
         FROZEN_TZ_OFFSET,
         isolated_app_env,
-        make_logged_in_test_client,
+        make_test_client,
         prepare_isolated_journal,
     )
 except ModuleNotFoundError:
@@ -30,7 +30,7 @@ except ModuleNotFoundError:
         FROZEN_DATE,
         FROZEN_TZ_OFFSET,
         isolated_app_env,
-        make_logged_in_test_client,
+        make_test_client,
         prepare_isolated_journal,
     )
 
@@ -187,7 +187,7 @@ ENDPOINTS = [
     {
         "app": "observer",
         "name": "ingest-day",
-        "path": "/app/observer/ingest/example-key/segments/20260304",
+        "path": "/app/observer/ingest/segments/20260304",
         "params": {},
         "status": 401,
     },
@@ -224,16 +224,16 @@ ENDPOINTS = [
         "status": 200,
     },
     {
-        "app": "settings",
+        "app": "thinking",
         "name": "providers",
-        "path": "/app/settings/api/providers",
+        "path": "/app/thinking/api/providers",
         "params": {},
         "status": 200,
     },
     {
-        "app": "settings",
+        "app": "thinking",
         "name": "generators",
-        "path": "/app/settings/api/generators",
+        "path": "/app/thinking/api/generators",
         "params": {},
         "status": 200,
     },
@@ -702,7 +702,7 @@ def client_context(
         journal_path = prepare_isolated_journal(Path(tmpdir) / "journal")
         with freeze_time(FROZEN_DATE, tz_offset=FROZEN_TZ_OFFSET):
             with isolated_app_env(journal_path):
-                yield make_logged_in_test_client(journal_path), str(journal_path)
+                yield make_test_client(journal_path), str(journal_path)
 
 
 def main(argv: list[str] | None = None) -> int:

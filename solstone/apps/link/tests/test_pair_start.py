@@ -21,10 +21,8 @@ from solstone.think.link.paths import LinkState, ca_dir
 PAIR_START_KEYS = [
     "nonce",
     "pair_link",
-    "manual_code",
     "expires_in",
     "device_label",
-    "lan_url",
     "ca_fingerprint",
 ]
 
@@ -41,23 +39,65 @@ def test_pair_start_shape_and_locked_order(link_env) -> None:
     payload = response.get_json()
     assert list(payload.keys()) == PAIR_START_KEYS
     assert re.fullmatch(
-        r"^https://link\.solpbc\.org/p#[0-9A-HJKMNP-TV-Z]{64}$",
+        r"^https://go\.solstone\.app/p#[0-9A-HJKMNP-TV-Z]{64}$",
         payload["pair_link"],
-    )
-    assert re.fullmatch(
-        r"^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$",
-        payload["manual_code"],
     )
     snap = link_routes._nonces().snapshot()
     assert payload["expires_in"] == NONCE_TTL_SECONDS
     assert len(snap) == 1
     assert snap[0].expires_at - snap[0].issued_at == NONCE_TTL_SECONDS
-    assert "://" not in payload["lan_url"]
     assert "pair_url" not in payload
     assert "qr_payload" not in payload
 
 
-def test_pair_start_mints_distinct_nonce_and_manual_code(link_env) -> None:
+def test_pair_start_omitted_assigned_label_stores_empty(link_env) -> None:
+    env = link_env()
+
+    response = env.client.post("/app/link/pair-start", json={})
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert list(payload.keys()) == PAIR_START_KEYS
+    assert payload["device_label"] == ""
+    snap = link_routes._nonces().snapshot()
+    assert len(snap) == 1
+    assert snap[0].device_label == ""
+
+
+def test_pair_start_blank_assigned_label_stores_empty(link_env) -> None:
+    env = link_env()
+
+    response = env.client.post(
+        "/app/link/pair-start",
+        json={"device_label": "   "},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["device_label"] == ""
+    snap = link_routes._nonces().snapshot()
+    assert len(snap) == 1
+    assert snap[0].device_label == ""
+
+
+def test_pair_start_allows_lenient_assigned_label(link_env) -> None:
+    env = link_env()
+    label = "device — added Jun 13!"
+
+    response = env.client.post(
+        "/app/link/pair-start",
+        json={"device_label": label},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["device_label"] == label
+    snap = link_routes._nonces().snapshot()
+    assert len(snap) == 1
+    assert snap[0].device_label == label
+
+
+def test_pair_start_mints_distinct_nonce(link_env) -> None:
     env = link_env()
 
     first = env.client.post(
@@ -70,7 +110,6 @@ def test_pair_start_mints_distinct_nonce_and_manual_code(link_env) -> None:
     ).get_json()
 
     assert first["nonce"] != second["nonce"]
-    assert first["manual_code"] != second["manual_code"]
 
 
 def test_pair_start_uses_host_address_override_for_direct_qr(link_env) -> None:
@@ -90,18 +129,35 @@ def test_pair_start_uses_host_address_override_for_direct_qr(link_env) -> None:
     decoded = _decode_pair_link(payload["pair_link"])
     assert decoded[0:2] == b"\x04\x01"
     assert decoded[2:6] == ipaddress.IPv4Address("192.0.2.44").packed
-    assert int.from_bytes(decoded[6:8], "big") == 7070
-    assert payload["lan_url"] == "192.0.2.44:7070"
-    assert "://" not in payload["lan_url"]
+    assert int.from_bytes(decoded[6:8], "big") == link_routes._secure_listener_port()
+    assert int.from_bytes(decoded[6:8], "big") != 7070
 
 
-def test_pair_start_rejects_non_ipv4_pair_link_host(link_env, monkeypatch) -> None:
+def test_pair_start_direct_pair_link_port_uses_secure_listener_source(
+    link_env,
+    monkeypatch,
+) -> None:
     env = link_env()
-    monkeypatch.setattr(
-        link_routes,
-        "_resolve_host_port",
-        lambda: "mylab.local:7070",
+    config_path = env.journal / "config" / "journal.json"
+    config = json.loads(config_path.read_text("utf-8"))
+    config["pairing"] = {"host_url": "http://192.0.2.44:7070"}
+    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    monkeypatch.setattr(link_routes.interface_watcher, "LINK_DIRECT_PORT", 8765)
+
+    response = env.client.post(
+        "/app/link/pair-start",
+        json={"device_label": "Test Phone"},
     )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    decoded = _decode_pair_link(payload["pair_link"])
+    assert decoded[2:6] == ipaddress.IPv4Address("192.0.2.44").packed
+    assert int.from_bytes(decoded[6:8], "big") == 8765
+
+
+def test_pair_start_no_candidates_rejected_without_nonce(link_env) -> None:
+    env = link_env(local_endpoints=[])
 
     response = env.client.post(
         "/app/link/pair-start",
@@ -111,7 +167,7 @@ def test_pair_start_rejects_non_ipv4_pair_link_host(link_env, monkeypatch) -> No
     assert response.status_code == 400
     payload = response.get_json()
     assert payload["reason_code"] == "pairing_request_invalid"
-    assert "mylab.local" in payload["detail"]
+    assert payload["detail"] == "pair-link requires an IPv4 LAN address; none found"
     assert link_routes._nonces().snapshot() == []
 
 
@@ -149,28 +205,6 @@ def test_pair_start_spl_mints_relay_form_pair_link(link_env) -> None:
     assert decoded[37:53] == bytes.fromhex(ca.spki_fingerprint_sha256())[:16]
     assert decoded[53] == 0x00
     assert len(decoded) == 54
-
-
-def test_pair_start_spl_allows_non_ipv4_host(link_env, monkeypatch) -> None:
-    env = link_env(posture="spl", totp_secret="GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
-    monkeypatch.setattr(
-        link_routes,
-        "_resolve_host_port",
-        lambda: "mylab.local:7070",
-    )
-
-    response = env.client.post(
-        "/app/link/pair-start",
-        json={"device_label": "Test Phone"},
-    )
-
-    assert response.status_code == 200
-    payload = response.get_json()
-    assert re.fullmatch(
-        r"^https://link\.solpbc\.org/p#[0-9A-HJKMNP-TV-Z]+$",
-        payload["pair_link"],
-    )
-    assert _decode_pair_link(payload["pair_link"])[0] == 0x03
 
 
 def test_pair_start_spl_uses_thirty_second_expiry_and_nonce_ttl(link_env) -> None:

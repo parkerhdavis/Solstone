@@ -49,9 +49,10 @@ a capability you lack — and pick the one that matches the *verb* of the reques
 - `exec` — **do or change something.** Edit an entity, adjust an activity,
   set the journal name/owner. Dispatch only when the owner clearly wants an
   action taken, and pass the specific change in the task.
-- `support` — **sol pbc help.** A bug report, a help request, feedback, or
-  checking a ticket. The support talent files and monitors with sol pbc under
-  the owner's consent.
+- `support` — **solstone support.** Route here when the message is a bug
+  report, a help request, product feedback, or a ticket check. The support
+  talent can help file tickets, check responses, submit feedback, and
+  troubleshoot.
 
 **Do NOT dispatch for:** greetings, thanks, acknowledgements, brief follow-ups,
 questions about your role/capabilities, or generic "what's up" queries that need
