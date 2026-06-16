@@ -24,6 +24,7 @@ VENV := .venv
 VENV_BIN := $(VENV)/bin
 VENV_PY := $(VENV_BIN)/python
 PYTHON := $(VENV_PY)
+HOST_ARCH := $(shell uname -m)
 PARAKEET_ONNX_VARIANT ?= $(shell if nvidia-smi -L >/dev/null 2>&1; then echo cuda; else echo cpu; fi)
 
 # Dev install extras: install exactly ONE journal-host bundle for this host.
@@ -37,8 +38,12 @@ PARAKEET_ONNX_VARIANT ?= $(shell if nvidia-smi -L >/dev/null 2>&1; then echo cud
 #     module named 'onnxruntime'".
 #   - on Darwin, --all-extras also forces resolution of cuda's nvidia-* wheels,
 #     which have no arm64 builds, so `uv sync` errors out outright.
-# Pick the GPU bundle only on NVIDIA hosts; everyone else gets the CPU bundle.
-JOURNAL_EXTRA := $(if $(filter cuda,$(PARAKEET_ONNX_VARIANT)),journal-cuda,journal)
+# Pick the GPU bundle only on NVIDIA x86_64 hosts; everyone else gets the CPU
+# bundle. onnxruntime-gpu ships x86_64 wheels only, so on NVIDIA aarch64 hosts
+# (e.g. the GB10 Spark) [journal-cuda] can't resolve -- those use the CPU
+# [journal] extra and get GPU STT from faster-whisper (CTranslate2 bundles its
+# own CUDA), matching this fork's whisper-on-aarch64 transcription backend.
+JOURNAL_EXTRA := $(if $(filter cuda,$(PARAKEET_ONNX_VARIANT)),$(if $(filter x86_64,$(HOST_ARCH)),journal-cuda,journal),journal)
 EXTRAS_ARGS := --extra $(JOURNAL_EXTRA)
 
 # Require uv only for goals that actually use it. `preflight` is a pure

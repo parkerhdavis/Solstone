@@ -21,6 +21,7 @@ EXPECTED_CODES = {
     "local_model_installing",
     "local_model_loading",
     "local_model_not_ready",
+    "unsupported_capability",
     "local_server_unhealthy",
     "local_endpoint_unreachable",
     "local_endpoint_contract_failed",

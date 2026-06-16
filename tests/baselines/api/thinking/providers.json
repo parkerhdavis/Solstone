@@ -80,15 +80,15 @@
       "context": null,
       "detail": "Finish local model setup, then try the request again.",
       "interface": "generate",
-      "model": "local/qwen3.5-4b",
-      "operator_detail": "reason_code=local_model_missing; provider=local; status=blocked; model=local/qwen3.5-4b; interface=generate",
+      "model": "local/qwen3.6-35b-a3b",
+      "operator_detail": "reason_code=local_model_missing; provider=local; status=blocked; model=local/qwen3.6-35b-a3b; interface=generate",
       "provider": "local",
       "reason_code": "local_model_missing",
       "recovery_action": {
         "href": "/app/thinking/#local-setup",
         "label": "Open Local Model Setup"
       },
-      "semantic_key": "local_model_missing:local:local/qwen3.5-4b",
+      "semantic_key": "local_model_missing:local:local/qwen3.6-35b-a3b",
       "severity": "blocker",
       "status": "blocked",
       "summary": "local model setup is not finished",

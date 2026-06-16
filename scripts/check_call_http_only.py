@@ -134,7 +134,14 @@ EXCLUDED_PREFIXES: tuple[str, ...] = ()
 # Committed allowlist of current direct app-call violations, keyed by
 # (posix-relative-path, kind) -> allowed count. Ratchets toward empty: lower a
 # count as occurrences are converted; stale entries fail until lowered/removed.
-ALLOWLIST: dict[tuple[str, str], int] = {}
+ALLOWLIST: dict[tuple[str, str], int] = {
+    # Fork-only benchmark CLI: reads solstone.think.benchmark heuristics +
+    # static tables and the hardware probe directly (it computes local-model
+    # speed estimates, not journal CRUD). Pre-existing on this fork. Ratchet to
+    # 0 once it is converted to the /app/benchmark/api/* HTTP endpoints in the
+    # standalone-benchmark-UI follow-up.
+    ("solstone/apps/benchmark/call.py", "import"): 4,
+}
 
 
 def _is_under_namespace(module: str) -> bool:

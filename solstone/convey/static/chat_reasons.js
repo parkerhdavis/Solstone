@@ -50,6 +50,10 @@
       "template": "the local model is starting up",
       "action": null
     },
+    "unsupported_capability": {
+      "template": "the local model can't handle that kind of input",
+      "action": {"label": "Open Settings", "href": "/app/thinking/#main"}
+    },
     "local_server_unhealthy": {
       "template": "the local model isn't responding",
       "action": {"label": "Open Local Model Setup", "href": "/app/thinking/#local-setup"}

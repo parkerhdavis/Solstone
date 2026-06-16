@@ -150,6 +150,16 @@ _ENTRIES: dict[str, _Entry] = {
         detail="The local model is not ready yet. Try again shortly.",
         recovery_action=None,
     ),
+    "unsupported_capability": _Entry(
+        klass="generic",
+        summary="the local model can't handle that kind of input",
+        detail=(
+            "The local model doesn't support that capability — for example, the "
+            "bundle doesn't serve audio (that runs through the Whisper pipeline "
+            "instead). Use a cloud provider for it, or pick a model that does."
+        ),
+        recovery_action=_SETTINGS_ACTION,
+    ),
     "local_server_unhealthy": _Entry(
         klass="provider",
         summary="the local model isn't responding",

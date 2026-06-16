@@ -128,6 +128,23 @@ def _compute_runtime_label() -> str:
         return "unsupported"
 
 
+def _fresh_hardware() -> dict[str, Any] | None:
+    """Return the host's current hardware probe for settings UI endpoints.
+
+    Always attempts a fresh probe so a stale cache (e.g. an empty-GPU
+    snapshot written during driver warmup at boot) self-heals on the
+    next page load. Falls back to the cached probe if a fresh one
+    raises. Returns None only if both fail.
+    """
+    from solstone.think.hardware import load_hardware, probe_hardware
+
+    try:
+        return probe_hardware()
+    except Exception as exc:
+        logger.warning("fresh hardware probe failed; using cache: %s", exc)
+        return load_hardware()
+
+
 def _service_key_validation(config: dict[str, Any]) -> dict[str, Any]:
     providers_config = config.get("providers", {})
     key_validation = (
@@ -486,6 +503,57 @@ def get_transcribe() -> Any:
         backends = get_backend_list()
         runtime_label = _compute_runtime_label()
 
+        # Decorate each backend with supported_hardware from transcribers.json
+        # so the settings UI can flag hardware/backend incompatibilities. The
+        # benchmark module is fork-only; if it's unavailable we fall back to
+        # leaving supported_hardware unset (UI treats missing as "no claim").
+        try:
+            from solstone.think.benchmark import load_transcribers
+
+            transcribers_catalog = load_transcribers().get("transcribers", {}) or {}
+        except Exception:
+            transcribers_catalog = {}
+        for backend in backends:
+            spec = transcribers_catalog.get(backend["name"], {})
+            backend["supported_hardware"] = spec.get("supported_hardware")
+            backend["fallback"] = spec.get("fallback")
+
+        # Probe the host's hardware class so the UI can compare it against
+        # supported_hardware lists for each backend. Cached probe is preferred;
+        # fall back to a fresh probe; tolerate failures.
+        hardware_payload: dict[str, Any] = {
+            "probed": False,
+            "class": "cpu-only",
+            "label": None,
+        }
+        try:
+            from solstone.think.benchmark.estimate import (
+                load_reference,
+                resolve_hardware_class,
+            )
+
+            hardware = _fresh_hardware()
+            if hardware is not None:
+                gpus = hardware.get("gpus") or []
+                hardware_class = (
+                    resolve_hardware_class(gpus[0].get("name")) if gpus else "cpu-only"
+                )
+                ref_label = (
+                    load_reference()
+                    .get("classes", {})
+                    .get(hardware_class, {})
+                    .get("label")
+                )
+                hardware_payload = {
+                    "probed": True,
+                    "class": hardware_class,
+                    "label": ref_label,
+                    "platform": hardware.get("platform"),
+                    "gpus": hardware.get("gpus", []),
+                }
+        except Exception as exc:
+            logger.debug("hardware-class enrichment skipped: %s", exc)
+
         # Check API key status for each backend
         api_keys = {}
         for backend in backends:
@@ -511,6 +579,7 @@ def get_transcribe() -> Any:
                 "api_keys": api_keys,
                 "config": transcribe_config,
                 "runtime_label": runtime_label,
+                "hardware": hardware_payload,
                 "resource": resource,
             }
         )
