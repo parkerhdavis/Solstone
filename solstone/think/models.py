@@ -43,6 +43,9 @@ TIER_LITE = 3
 # E.g., "gpt-5.2-high" → reasoning_effort="high", "gpt-5.2" → omitted.
 OPENAI_EFFORT_SUFFIXES = ("-none", "-low", "-medium", "-high", "-xhigh")
 
+# Finite default HTTP timeout for network model calls; explicit timeout_s wins.
+DEFAULT_PROVIDER_TIMEOUT_S = 120
+
 
 class _Family(NamedTuple):
     key: tuple[str, str | None]
@@ -1206,6 +1209,8 @@ def generate(
     # Get provider module via registry (raises ValueError for unknown providers)
     provider_mod = get_provider_module(provider)
 
+    timeout_s = DEFAULT_PROVIDER_TIMEOUT_S if timeout_s is None else timeout_s
+
     # Call provider's run_generate (returns GenerateResult)
     result = provider_mod.run_generate(
         contents=contents,
@@ -1413,6 +1418,8 @@ def generate_with_result(
 
     provider_mod = get_provider_module(provider)
 
+    timeout_s = DEFAULT_PROVIDER_TIMEOUT_S if timeout_s is None else timeout_s
+
     result = provider_mod.run_generate(
         contents=contents,
         model=model,
@@ -1517,6 +1524,8 @@ async def agenerate(
     # Get provider module via registry (raises ValueError for unknown providers)
     provider_mod = get_provider_module(provider)
 
+    timeout_s = DEFAULT_PROVIDER_TIMEOUT_S if timeout_s is None else timeout_s
+
     # Call provider's run_agenerate (returns GenerateResult)
     result = await provider_mod.run_agenerate(
         contents=contents,
@@ -1560,6 +1569,7 @@ __all__ = [
     "GEMINI_FLASH",
     "GPT_5",
     "CLAUDE_SONNET_4",
+    "DEFAULT_PROVIDER_TIMEOUT_S",
     "QWEN_35_9B",
     "GEMMA4_26B_A4B_4BIT",
     "LOCAL_MODEL",
