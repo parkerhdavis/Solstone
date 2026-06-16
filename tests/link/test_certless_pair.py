@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from solstone.think.link.auth import AuthorizedClients
-from solstone.think.link.client import _build_csr
+from solstone.think.link.join_cli import _build_csr
 from solstone.think.link.nonces import NonceStore
 from solstone.think.link.paths import authorized_clients_path, nonces_path
 from tests.link.certless_helpers import (
@@ -20,9 +20,11 @@ from tests.link.certless_helpers import (
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["pl-via-spl", "pl-direct"])
 async def test_certless_pair_request_executes_handler_and_authorizes_client(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    mode: str,
 ) -> None:
     app, _journal = make_convey_app(tmp_path, monkeypatch, link={"posture": "spl"})
     nonce = "0123456789abcdef"
@@ -39,7 +41,7 @@ async def test_certless_pair_request_executes_handler_and_authorizes_client(
 
     response = await dispatch_request(
         app,
-        certless_identity(),
+        certless_identity(mode),
         "POST",
         "/app/link/pair",
         body=body,
@@ -55,16 +57,18 @@ async def test_certless_pair_request_executes_handler_and_authorizes_client(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["pl-via-spl", "pl-direct"])
 async def test_certless_identity_is_refused_at_non_pair_route(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    mode: str,
 ) -> None:
     app, _journal = make_convey_app(tmp_path, monkeypatch, link={"posture": "spl"})
     NonceStore(nonces_path()).add("fedcba9876543210", "phone")
 
     response = await dispatch_request(
         app,
-        certless_identity(),
+        certless_identity(mode),
         "GET",
         "/app/link/api/status",
     )

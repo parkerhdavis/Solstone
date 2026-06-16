@@ -9,15 +9,18 @@ import requests
 from typer.testing import CliRunner
 
 from solstone.apps.link import call as link_call
+from solstone.apps.link import routes as link_routes
+from solstone.apps.link.tests.conftest import _StubWatcher
 from solstone.think.convey_client import ConveyClient
 from solstone.think.link.auth import AuthorizedClients
+from solstone.think.link.local_endpoints import LocalEndpoint
 from solstone.think.link.nonces import NonceStore
 from solstone.think.link.paths import (
     LinkState,
     authorized_clients_path,
     nonces_path,
 )
-from tests._baseline_harness import make_logged_in_test_client
+from tests._baseline_harness import make_test_client
 
 PAIRED_AT = "2026-04-19T00:00:00Z"
 LAST_SEEN_AT = "2026-04-19T00:30:00Z"
@@ -32,7 +35,6 @@ def journal(tmp_path, monkeypatch):
     (config_dir / "journal.json").write_text(
         json.dumps(
             {
-                "convey": {"trust_localhost": True},
                 "setup": {"completed_at": 1700000000000},
             },
             indent=2,
@@ -44,7 +46,7 @@ def journal(tmp_path, monkeypatch):
 
 @pytest.fixture
 def runner(journal, monkeypatch):
-    client = ConveyClient(session=make_logged_in_test_client(journal), base_url="")
+    client = ConveyClient(session=make_test_client(journal), base_url="")
     monkeypatch.setattr("solstone.apps.link.call.get_client", lambda: client)
     return CliRunner()
 
@@ -57,6 +59,19 @@ def _nonces() -> NonceStore:
     return NonceStore(nonces_path())
 
 
+def _install_pair_watcher(
+    monkeypatch: pytest.MonkeyPatch,
+    endpoints: list[LocalEndpoint] | None = None,
+) -> None:
+    if endpoints is None:
+        endpoints = [LocalEndpoint(ip="192.168.1.50", port=7657, scope="lan")]
+    monkeypatch.setattr(
+        link_routes,
+        "get_interface_watcher",
+        lambda: _StubWatcher(endpoints),
+    )
+
+
 def _add_device(
     fingerprint: str,
     label: str,
@@ -64,9 +79,17 @@ def _add_device(
     role: str = "",
     paired_at: str = PAIRED_AT,
     last_seen_at: str | None = None,
+    client_label: str = "",
 ) -> None:
     store = _authorized()
-    store.add(fingerprint, label, "inst-1", role=role, paired_at=paired_at)
+    store.add(
+        fingerprint,
+        label,
+        "inst-1",
+        role=role,
+        paired_at=paired_at,
+        client_label=client_label,
+    )
     if last_seen_at is not None:
         store.touch_last_seen(fingerprint, now=_parse_iso(last_seen_at))
 
@@ -114,7 +137,7 @@ def test_pair_rejects_invalid_roles_without_minting(runner):
 
 
 def test_pair_mints_nonce_prints_payload_and_times_out(runner, monkeypatch):
-    monkeypatch.setattr(link_call, "_detect_lan_ip", lambda: None)
+    _install_pair_watcher(monkeypatch)
     monkeypatch.setattr(link_call, "time", _TimeoutTime())
 
     result = runner.invoke(
@@ -124,13 +147,20 @@ def test_pair_mints_nonce_prints_payload_and_times_out(runner, monkeypatch):
 
     assert result.exit_code == 2
     assert result.stderr == ""
-    assert "Pair code: " in result.stdout
-    assert re.search(
-        r"manual code: [0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}",
+    pair_link_match = re.search(
+        r"pair-link: (https://go\.solstone\.app/p#[0-9A-HJKMNP-TV-Z]{64})",
         result.stdout,
     )
-    assert "Pair URL: http://localhost:5015/app/link/pair?token=" in result.stdout
+    assert pair_link_match
+    pair_link = pair_link_match.group(1)
+    assert "link this device with:\n" in result.stdout
+    assert "  sol link join --code " in result.stdout
+    assert pair_link in result.stdout
+    assert "--label" in result.stdout
     assert "CA fingerprint: sha256:" in result.stdout
+    assert "relay short-code" not in result.stdout
+    assert "Pair URL: http" not in result.stdout
+    assert "Pair code:" not in result.stdout
     assert "Device: Test Phone\n\nWaiting for linked system…\n" in result.stdout
     assert result.stdout.endswith("Timed out. Pair code expired.\n")
     nonces = _nonces().snapshot()
@@ -149,7 +179,7 @@ def test_pair_mints_nonce_prints_payload_and_times_out(runner, monkeypatch):
 def test_pair_mints_default_and_peer_roles(
     runner, monkeypatch, extra_args, expected_role
 ):
-    monkeypatch.setattr(link_call, "_detect_lan_ip", lambda: None)
+    _install_pair_watcher(monkeypatch)
     monkeypatch.setattr(link_call, "time", _TimeoutTime())
 
     result = runner.invoke(
@@ -170,25 +200,23 @@ def test_pair_mints_default_and_peer_roles(
     assert nonces[0].role == expected_role
 
 
-def test_pair_uses_minted_port_and_convey_host_override(runner, monkeypatch):
-    monkeypatch.setattr(link_call, "_detect_lan_ip", lambda: "192.168.1.50")
+def test_pair_without_device_label_mints_empty_label(
+    runner,
+    monkeypatch,
+):
+    _install_pair_watcher(monkeypatch)
     monkeypatch.setattr(link_call, "time", _TimeoutTime())
 
     result = runner.invoke(
         link_call.app,
-        [
-            "pair",
-            "--device-label",
-            "Phone",
-            "--convey-host",
-            "lab.local",
-            "--timeout",
-            "1",
-        ],
+        ["pair", "--timeout", "1"],
     )
 
     assert result.exit_code == 2
-    assert "Pair URL: http://lab.local:5015/app/link/pair?token=" in result.stdout
+    assert "\nDevice: " not in result.stdout
+    nonces = _nonces().snapshot()
+    assert len(nonces) == 1
+    assert nonces[0].device_label == ""
 
 
 def test_pair_reports_newly_paired_device(runner, monkeypatch):
@@ -196,7 +224,7 @@ def test_pair_reports_newly_paired_device(runner, monkeypatch):
         if not _authorized().snapshot():
             _add_device("sha256:" + ("1" * 64), "Phone")
 
-    monkeypatch.setattr(link_call, "_detect_lan_ip", lambda: None)
+    _install_pair_watcher(monkeypatch)
     monkeypatch.setattr(link_call, "time", _PairingTime(on_sleep=add_device))
 
     result = runner.invoke(
@@ -212,13 +240,35 @@ def test_pair_reports_newly_paired_device(runner, monkeypatch):
     ) in result.stdout
 
 
+def test_pair_reports_display_label_for_newly_paired_device(runner, monkeypatch):
+    def add_device() -> None:
+        if not _authorized().snapshot():
+            _add_device(
+                "sha256:" + ("1" * 64),
+                "",
+                client_label="client-host",
+            )
+
+    _install_pair_watcher(monkeypatch)
+    monkeypatch.setattr(link_call, "time", _PairingTime(on_sleep=add_device))
+
+    result = runner.invoke(link_call.app, ["pair", "--timeout", "5"])
+
+    assert result.exit_code == 0
+    assert (
+        "Paired: client-host\n"
+        "  fingerprint: sha256:1111111111111111111111111111111111111111111111111111111111111111\n"
+        f"  paired_at:   {PAIRED_AT}\n"
+    ) in result.stdout
+
+
 def test_pair_reports_nonce_consumed_fallback(runner, monkeypatch):
     def consume_nonce() -> None:
         nonces = _nonces().snapshot()
         if nonces and not nonces[0].used:
             _nonces().consume(nonces[0].value)
 
-    monkeypatch.setattr(link_call, "_detect_lan_ip", lambda: None)
+    _install_pair_watcher(monkeypatch)
     monkeypatch.setattr(link_call, "time", _PairingTime(on_sleep=consume_nonce))
 
     result = runner.invoke(
@@ -231,6 +281,19 @@ def test_pair_reports_nonce_consumed_fallback(runner, monkeypatch):
         "Pair request completed; device should appear in `sol call link list`.\n"
         in result.stdout
     )
+
+
+def test_pair_reports_no_lan_address_without_nonce(runner, monkeypatch):
+    _install_pair_watcher(monkeypatch, [])
+
+    result = runner.invoke(
+        link_call.app,
+        ["pair", "--device-label", "Phone", "--timeout", "1"],
+    )
+
+    assert result.exit_code == 1
+    assert "isn't reachable on a network address" in result.stderr
+    assert _nonces().snapshot() == []
 
 
 def test_list_empty_store(runner):
@@ -290,6 +353,49 @@ def test_list_grouped_output_and_device_line(runner, monkeypatch):
     )
 
 
+def test_list_uses_display_label_when_assigned_label_is_empty(runner, monkeypatch):
+    monkeypatch.setattr(link_call, "_now_utc", lambda: _parse_iso(FROZEN_NOW))
+    _add_device(
+        "sha256:0123456789abcdef0000",
+        "",
+        paired_at=PAIRED_AT,
+        client_label="client-host",
+    )
+
+    result = runner.invoke(link_call.app, ["list"])
+
+    assert result.exit_code == 0
+    assert result.stdout == (
+        "Linked systems:\n"
+        "- client-host — added 1 hour ago — last seen never [0123456789abcdef]\n"
+    )
+
+
+def test_list_uses_server_composed_display_labels(runner, monkeypatch):
+    monkeypatch.setattr(link_call, "_now_utc", lambda: _parse_iso(FROZEN_NOW))
+    _add_device(
+        "sha256:" + ("a" * 64),
+        "laptop",
+        paired_at=PAIRED_AT,
+        client_label="host-1",
+    )
+    _add_device(
+        "sha256:" + ("b" * 64),
+        "phone",
+        paired_at=PAIRED_AT,
+        client_label="phone",
+    )
+
+    result = runner.invoke(link_call.app, ["list"])
+
+    assert result.exit_code == 0
+    lines = [line for line in result.stdout.splitlines() if line.startswith("- ")]
+    assert len(lines) == 2
+    assert lines[0] != lines[1]
+    assert any("laptop (host-1)" in line for line in lines)
+    assert any(line.startswith("- phone —") for line in lines)
+
+
 def test_list_legacy_observer_role_uses_linked_systems_heading(runner):
     _add_device("sha256:bbbbbbbbbbbbbbbb0000", "observer", role="observer")
 
@@ -298,6 +404,52 @@ def test_list_legacy_observer_role_uses_linked_systems_heading(runner):
     assert result.exit_code == 0
     assert "Linked systems:\n" in result.stdout
     assert "Peers:" not in result.stdout
+
+
+def test_authorized_clients_flat_view(runner, monkeypatch):
+    monkeypatch.setattr(link_call, "_now_utc", lambda: _parse_iso(FROZEN_NOW))
+    first_fingerprint = "sha256:" + ("a" * 64)
+    second_fingerprint = "sha256:" + ("b" * 64)
+    _add_device(
+        first_fingerprint,
+        "laptop",
+        paired_at=PAIRED_AT,
+        last_seen_at=LAST_SEEN_AT,
+        client_label="host-1",
+    )
+    _add_device(
+        second_fingerprint,
+        "phone",
+        paired_at=PAIRED_AT,
+        client_label="phone",
+    )
+
+    result = runner.invoke(link_call.app, ["authorized-clients"])
+
+    assert result.exit_code == 0
+    assert result.stdout == (
+        f"{first_fingerprint}  laptop (host-1)  last seen 30 minutes ago\n"
+        f"{second_fingerprint}  phone  last seen never\n"
+    )
+
+
+def test_authorized_clients_empty_store(runner):
+    result = runner.invoke(link_call.app, ["authorized-clients"])
+
+    assert result.exit_code == 0
+    assert result.stdout == "No authorized clients.\n"
+
+
+def test_observer_pause_stub_does_not_require_service(runner, monkeypatch):
+    def fail_get_client():
+        raise AssertionError("observer-pause must not make an HTTP request")
+
+    monkeypatch.setattr(link_call, "get_client", fail_get_client)
+
+    result = runner.invoke(link_call.app, ["observer-pause"])
+
+    assert result.exit_code == 0
+    assert result.stdout == "observer-pause is not yet available.\n"
 
 
 def test_unpair_success_and_not_found_outputs(runner):
@@ -341,8 +493,10 @@ def test_status_provisioned_and_not_provisioned(journal, runner):
     assert provisioned.stdout == (
         f"Instance ID:   {state.instance_id}\n"
         f"Home label:    {state.home_label}\n"
-        "Relay URL:     https://spl-relay-staging.jer-3f2.workers.dev\n"
+        "Relay URL:     https://link.solstone.app\n"
         "Enrolled:      no\n"
+        "Reach posture: direct\n"
+        "Private link:  not enabled\n"
         "Paired devices: 1\n"
         "Listen-WS state: (query convey /app/link/api/status for live state)\n"
     )
@@ -360,8 +514,10 @@ def test_status_unprovisioned_does_not_write_state(journal, runner, monkeypatch)
     assert result.stdout == (
         "Instance ID:   (not provisioned — pair a device to provision)\n"
         "Home label:    (not provisioned)\n"
-        "Relay URL:     https://spl-relay-staging.jer-3f2.workers.dev\n"
+        "Relay URL:     https://link.solstone.app\n"
         "Enrolled:      no\n"
+        "Reach posture: direct\n"
+        "Private link:  not enabled\n"
         "Paired devices: 0\n"
         "Listen-WS state: (query convey /app/link/api/status for live state)\n"
     )

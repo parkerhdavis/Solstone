@@ -13,8 +13,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
-import hashlib
 import logging
+import secrets
 import urllib.parse
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Protocol
@@ -22,17 +22,17 @@ from typing import Protocol
 import requests
 import websockets
 from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.x509.oid import NameOID
 from OpenSSL import SSL, crypto
 from websockets.asyncio.client import ClientConnection
 from websockets.exceptions import ConnectionClosed
 
 from solstone.convey.secure_listener.framing import (
+    CONTROL_NONCE_LEN,
     FLAG_CLOSE,
     FLAG_DATA,
     FLAG_OPEN,
+    FLAG_PING,
+    FLAG_PONG,
     FLAG_RESET,
     FLAG_WINDOW,
     INITIAL_WINDOW,
@@ -48,17 +48,21 @@ from solstone.convey.secure_listener.framing import (
     build_close,
     build_data,
     build_open,
+    build_ping,
+    build_pong,
     build_reset,
     build_window,
+    parse_control_nonce,
     parse_reset_reason,
     parse_window_credit,
 )
-from solstone.think.link.ca import cert_fingerprint
 from solstone.think.link.tls import TlsError as _TlsError
 
 LOG = logging.getLogger(__name__)
 _CONNECT_TIMEOUT_SECONDS = 15
 _HTTP_TIMEOUT_SECONDS = 30
+_KEEPALIVE_INTERVAL_SECONDS = 20
+_KEEPALIVE_TIMEOUT_SECONDS = 45
 
 
 class StreamResetError(ConnectionError):
@@ -204,9 +208,14 @@ class _DialerStream:
 
 
 class _DialerMultiplexer:
-    def __init__(self, send_frame: Callable[[bytes], Awaitable[None]]) -> None:
+    def __init__(
+        self,
+        send_frame: Callable[[bytes], Awaitable[None]],
+        on_inbound: Callable[[], None] | None = None,
+    ) -> None:
         self._decoder = FrameDecoder()
         self._send_frame = send_frame
+        self._on_inbound = on_inbound
         self._streams: dict[int, _StreamState] = {}
         self._next_local_id = 1
         self._closed = False
@@ -230,6 +239,8 @@ class _DialerMultiplexer:
     async def feed(self, plaintext: bytes) -> None:
         if self._closed or not plaintext:
             return
+        if self._on_inbound is not None:
+            self._on_inbound()
         self._decoder.feed(plaintext)
         while True:
             try:
@@ -251,6 +262,13 @@ class _DialerMultiplexer:
             self._close_stream(state, forget=True)
 
     async def _dispatch(self, frame: Frame) -> None:
+        if frame.stream_id == 0:
+            await self._dispatch_control(frame)
+            return
+        if frame.flags & (FLAG_PING | FLAG_PONG):
+            self.close()
+            return
+
         if frame.flags & FLAG_OPEN:
             await self._emit(build_reset(frame.stream_id, RESET_PROTOCOL_ERROR))
             return
@@ -307,6 +325,23 @@ class _DialerMultiplexer:
             except ProtocolError:
                 state.reset_reason = RESET_PROTOCOL_ERROR
             self._close_stream(state, forget=True)
+
+    async def _dispatch_control(self, frame: Frame) -> None:
+        is_ping = bool(frame.flags & FLAG_PING)
+        is_pong = bool(frame.flags & FLAG_PONG)
+        if is_ping == is_pong:
+            self.close()
+            return
+        if frame.flags & ~(FLAG_PING | FLAG_PONG):
+            self.close()
+            return
+        try:
+            nonce = parse_control_nonce(frame)
+        except ProtocolError:
+            self.close()
+            return
+        if is_ping:
+            await self._emit(build_pong(nonce))
 
     async def _emit(self, frame: Frame) -> None:
         if self._closed:
@@ -382,17 +417,35 @@ class TunnelSession:
         *,
         transport: EncryptedTransport,
         tls: _TlsClientState,
-        identity: ClientIdentity,
+        identity: ClientIdentity | None = None,
+        keepalive_interval: float = _KEEPALIVE_INTERVAL_SECONDS,
+        keepalive_timeout: float = _KEEPALIVE_TIMEOUT_SECONDS,
     ) -> None:
         self._transport = transport
         self._tls = tls
         self._identity = identity
+        self._keepalive_interval = keepalive_interval
+        self._keepalive_timeout = keepalive_timeout
         self._tls_lock = asyncio.Lock()
-        self._mux = _DialerMultiplexer(self._send_plaintext)
+        self._mux = _DialerMultiplexer(
+            self._send_plaintext,
+            on_inbound=self._record_activity,
+        )
         self._closed = asyncio.Event()
+        self._last_activity = asyncio.get_running_loop().time()
+        self._dead = False
+        task_name = (
+            f"link-client-{identity.home_instance_id}"
+            if identity is not None
+            else "link-pair"
+        )
         self._reader_task = asyncio.create_task(
             self._read_transport(),
-            name=f"link-client-{identity.home_instance_id}",
+            name=task_name,
+        )
+        self._keepalive_task: asyncio.Task[None] | None = asyncio.create_task(
+            self._keepalive_loop(),
+            name=f"{task_name}-keepalive",
         )
 
     async def __aenter__(self) -> TunnelSession:
@@ -400,6 +453,18 @@ class TunnelSession:
 
     async def __aexit__(self, *_exc: object) -> None:
         await self.close()
+
+    def peer_certificate(self) -> x509.Certificate | None:
+        """The leaf certificate the TLS peer presented, post-handshake.
+
+        Used during pairing to bind the live TLS endpoint to the pinned CA so a
+        relay that merely echoes the real CA chain in the response body cannot
+        masquerade as the home. Returns None if no peer certificate is set.
+        """
+        cert = self._tls.conn.get_peer_certificate()
+        if cert is None:
+            return None
+        return cert.to_cryptography()
 
     async def request(
         self,
@@ -439,10 +504,15 @@ class TunnelSession:
     async def close(self) -> None:
         if self._closed.is_set():
             return
+        await self._cancel_keepalive()
         self._mux.close()
         await self._transport.close()
         await self._reader_task
         self._closed.set()
+
+    @property
+    def is_alive(self) -> bool:
+        return not (self._closed.is_set() or self._mux._closed or self._dead)
 
     async def _read_transport(self) -> None:
         try:
@@ -457,7 +527,16 @@ class TunnelSession:
                 if plaintext:
                     await self._mux.feed(plaintext)
         finally:
+            await self._cancel_keepalive()
             self._mux.close()
+            # Close the transport here too: on a peer-initiated close (e.g. the
+            # home journal restarting), recv() returns None and the reader exits
+            # with `_closed` unset. A later close() then early-returns on the set
+            # flag and never reaches `_transport.close()`, leaving the socket in
+            # CLOSE-WAIT and leaking a fd per reconnect. Closing here (idempotent
+            # with close()) retires the dead socket on every reader exit.
+            with contextlib.suppress(Exception):
+                await self._transport.close()
             self._closed.set()
 
     async def _send_plaintext(self, plaintext: bytes) -> None:
@@ -466,69 +545,37 @@ class TunnelSession:
         if outbound:
             await self._transport.send(outbound)
 
+    def _record_activity(self) -> None:
+        self._last_activity = asyncio.get_running_loop().time()
+
+    async def _keepalive_loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self._keepalive_interval)
+                if self._closed.is_set():
+                    return
+                idle = asyncio.get_running_loop().time() - self._last_activity
+                if idle > self._keepalive_timeout:
+                    self._dead = True
+                    await self._transport.close()
+                    return
+                nonce = secrets.token_bytes(CONTROL_NONCE_LEN)
+                await self._send_plaintext(build_ping(nonce).encode())
+        except asyncio.CancelledError:
+            raise
+        except (OSError, _TlsError):
+            self._dead = True
+
+    async def _cancel_keepalive(self) -> None:
+        task = self._keepalive_task
+        if task is None or task.done():
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
 
 class Client:
-    @staticmethod
-    def pair(
-        lan_url: str,
-        device_label: str,
-        *,
-        ca_fingerprint_pin: str | None = None,
-    ) -> ClientIdentity:
-        base_url = lan_url.rstrip("/")
-        LOG.info("client %s: pair start", device_label)
-        pair_start = _post_json(
-            f"{base_url}/app/link/pair-start",
-            {"device_label": device_label},
-        )
-        nonce = pair_start.get("nonce")
-        if not isinstance(nonce, str) or not nonce:
-            raise RuntimeError("pair-start returned no nonce")
-
-        private_key_pem, csr_pem = _build_csr(device_label)
-        paired = _post_json(
-            f"{base_url}/app/link/pair",
-            {
-                "nonce": nonce,
-                "csr": csr_pem,
-                "device_label": device_label,
-            },
-        )
-
-        client_cert_pem = _required_str(paired, "client_cert")
-        ca_chain = paired.get("ca_chain")
-        if not isinstance(ca_chain, list) or not ca_chain:
-            raise RuntimeError("pair returned no ca_chain")
-        if not all(isinstance(item, str) and item for item in ca_chain):
-            raise RuntimeError("pair returned invalid ca_chain")
-        ca_chain_pem = "".join(ca_chain)
-        ca_fingerprint = _cert_sha256_hex(_first_cert_pem(ca_chain_pem))
-        if ca_fingerprint_pin is not None and ca_fingerprint != ca_fingerprint_pin:
-            raise RuntimeError(
-                f"CA fingerprint mismatch: got {ca_fingerprint}, expected {ca_fingerprint_pin}"
-            )
-
-        fingerprint = _required_str(paired, "fingerprint")
-        if cert_fingerprint(client_cert_pem) != fingerprint:
-            raise RuntimeError("pair returned certificate fingerprint mismatch")
-
-        identity = ClientIdentity(
-            private_key_pem=private_key_pem,
-            client_cert_pem=client_cert_pem,
-            ca_chain_pem=ca_chain_pem,
-            fingerprint=fingerprint,
-            home_instance_id=_required_str(paired, "instance_id"),
-            home_label=_required_str(paired, "home_label"),
-            home_attestation=_required_str(paired, "home_attestation"),
-            local_endpoints=_optional_endpoint_dicts(paired.get("local_endpoints")),
-        )
-        LOG.info(
-            "client %s: paired to %s",
-            device_label,
-            identity.home_instance_id,
-        )
-        return identity
-
     @staticmethod
     def enroll_device(relay_url: str, identity: ClientIdentity) -> EnrolledDevice:
         endpoint = f"{relay_url.rstrip('/')}/enroll/device"
@@ -582,8 +629,32 @@ async def _open_tunnel_session(
     transport: EncryptedTransport,
     identity: ClientIdentity,
 ) -> TunnelSession:
+    tls = _new_tls_client(_build_tls_client_ctx(identity))
+    pending_plaintext = await _drive_client_handshake(transport, tls)
+    session = TunnelSession(
+        transport=transport,
+        tls=tls,
+        identity=identity,
+    )
+    if pending_plaintext:
+        await session._mux.feed(bytes(pending_plaintext))
+    return session
+
+
+async def _open_pairing_session(transport: EncryptedTransport) -> TunnelSession:
+    tls = _new_tls_client(_build_no_cert_client_ctx())
+    pending_plaintext = await _drive_client_handshake(transport, tls)
+    session = TunnelSession(transport=transport, tls=tls)
+    if pending_plaintext:
+        await session._mux.feed(bytes(pending_plaintext))
+    return session
+
+
+async def _drive_client_handshake(
+    transport: EncryptedTransport,
+    tls: _TlsClientState,
+) -> bytearray:
     try:
-        tls = _new_tls_client(_build_tls_client_ctx(identity))
         pending_plaintext = bytearray()
         outbound, plaintext = _drive_tls_client(tls)
         if outbound:
@@ -603,33 +674,7 @@ async def _open_tunnel_session(
     except Exception:
         await transport.close()
         raise
-
-    session = TunnelSession(
-        transport=transport,
-        tls=tls,
-        identity=identity,
-    )
-    if pending_plaintext:
-        await session._mux.feed(bytes(pending_plaintext))
-    return session
-
-
-def _build_csr(device_label: str) -> tuple[str, str]:
-    private_key = ec.generate_private_key(ec.SECP256R1())
-    csr = (
-        x509.CertificateSigningRequestBuilder()
-        .subject_name(
-            x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, device_label)])
-        )
-        .sign(private_key, hashes.SHA256())
-    )
-    private_key_pem = private_key.private_bytes(
-        serialization.Encoding.PEM,
-        serialization.PrivateFormat.PKCS8,
-        serialization.NoEncryption(),
-    ).decode("ascii")
-    csr_pem = csr.public_bytes(serialization.Encoding.PEM).decode("ascii")
-    return private_key_pem, csr_pem
+    return pending_plaintext
 
 
 def _build_tls_client_ctx(identity: ClientIdentity) -> SSL.Context:
@@ -659,6 +704,18 @@ def _build_tls_client_ctx(identity: ClientIdentity) -> SSL.Context:
     return ctx
 
 
+def _build_no_cert_client_ctx() -> SSL.Context:
+    ctx = SSL.Context(SSL.TLS_METHOD)
+    ctx.set_min_proto_version(SSL.TLS1_3_VERSION)
+    ctx.set_max_proto_version(SSL.TLS1_3_VERSION)
+    ctx.set_verify(SSL.VERIFY_PEER, _accept_any_server_cert)
+    return ctx
+
+
+def _accept_any_server_cert(*_args: object) -> bool:
+    return True
+
+
 def _verify_server_cert(
     _conn: SSL.Connection,
     _cert: crypto.X509,
@@ -685,7 +742,15 @@ def _drive_tls_client(
         state.conn.bio_write(inbound)
     if plaintext_out:
         try:
-            state.conn.send(plaintext_out)
+            # sendall, not send: pyOpenSSL's Connection.send() writes at most one
+            # TLS record (16 KiB) per call and returns the partial count. Calling
+            # send() once and ignoring the return value silently truncated any
+            # frame larger than one record on the wire, so the peer's frame
+            # decoder blocked forever waiting for the dropped tail (manifested as
+            # ~30s link-tunnel timeouts on observer-segment uploads >16 KiB).
+            # sendall() loops SSL_write internally until the whole buffer is
+            # encrypted into the write BIO.
+            state.conn.sendall(plaintext_out)
         except SSL.WantReadError:
             pass
         except SSL.Error as exc:
@@ -815,12 +880,6 @@ def _required_str(payload: dict[str, object], key: str) -> str:
     return value
 
 
-def _optional_endpoint_dicts(value: object) -> tuple[dict[str, object], ...]:
-    if not isinstance(value, list):
-        return ()
-    return tuple(item for item in value if isinstance(item, dict))
-
-
 def _split_pem_chain(pem_bundle: str) -> list[bytes]:
     marker = "-----END CERTIFICATE-----"
     certs: list[bytes] = []
@@ -830,18 +889,6 @@ def _split_pem_chain(pem_bundle: str) -> list[bytes]:
             continue
         certs.append(f"{chunk}\n{marker}\n".encode("ascii"))
     return certs
-
-
-def _first_cert_pem(pem_bundle: str) -> str:
-    certs = _split_pem_chain(pem_bundle)
-    if not certs:
-        raise RuntimeError("empty certificate chain")
-    return certs[0].decode("ascii")
-
-
-def _cert_sha256_hex(cert_pem: str) -> str:
-    cert = x509.load_pem_x509_certificate(cert_pem.encode("ascii"))
-    return hashlib.sha256(cert.public_bytes(serialization.Encoding.DER)).hexdigest()
 
 
 def _to_ws(url: str) -> str:

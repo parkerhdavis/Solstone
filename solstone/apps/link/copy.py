@@ -5,20 +5,12 @@
 
 from __future__ import annotations
 
-from solstone.think.link.nonces import NONCE_TTL_SECONDS
-
-PAIR_LINK_HOST = "link.solpbc.org"
+PAIR_LINK_HOST = "go.solstone.app"
 PAIR_LINK_PATH = "/p"
-MANUAL_CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"  # Crockford base32.
-MANUAL_CODE_LEN = 8
-MANUAL_CODE_GROUP = 4
-PAIR_CODE_TTL_SECONDS = NONCE_TTL_SECONDS
-CLI_MANUAL_CODE_LABEL = "manual code"
 MODAL_TITLE = "pair a device"
 STEP_1 = "open the camera on the device you're adding"
 STEP_2 = "point it at this code"
 STEP_3 = "tap the link to open solstone"
-MANUAL_CODE_LABEL = "can't scan? type this on the device:"
 PAIR_NETWORK_LINE = (
     "this device needs to be on your network (or your VPN) to pair. expires in 5:00."
 )
@@ -50,52 +42,16 @@ SUCCESS_VERIFY_NOTE_ANYWHERE = (
     "fingerprint should match what it shows. didn't do this?"
 )
 SUCCESS_REMOVE_LABEL = "that wasn't me — remove"
-PAIR_WEB_PASSWORD_SETTINGS_LINK = "set a web password for this page in settings →"
-
 # --- U4 first-run hero ---
 HERO_TITLE = "let's connect a device"
 HERO_BODY = (
-    "your journal lives here, on this machine. to read it from your phone or "
+    "your journal lives here, on this device. to read it from your phone or "
     "laptop, that device needs a way to reach it. right now it can be reached "
     "on your home network."
 )
 HERO_HOW_REACH_LABEL = "how reach works ▸"
 
-# --- U5 LAN banner ---
-LAN_BANNER_TITLE = "let devices reach this solstone"
-LAN_BANNER_BODY = (
-    "pairing needs this web interface to accept connections from your network. "
-    "you can turn that on here."
-)
-LAN_BANNER_ENABLE_CTA = "turn on network access"
-LAN_BANNER_PASSWORD_INTRO = (
-    "set a web password first. other devices will need it before opening your journal."
-)
-LAN_BANNER_PASSWORD_LABEL = "web password"
-LAN_BANNER_CONFIRM_LABEL = "confirm web password"
-LAN_BANNER_PASSWORD_TOO_SHORT = "password must be at least 8 characters."
-LAN_BANNER_PASSWORD_MISMATCH = "passwords do not match."
-LAN_BANNER_RESTARTING = "turning on network access..."
-LAN_BANNER_SLOW = (
-    "saved. this is taking longer than usual. reload in a moment to check."
-)
-LAN_BANNER_STILL_UNREACHABLE = (
-    "network access is on, but this page still cannot see a network address. "
-    "try the steps below."
-)
-LAN_BANNER_RETRY = "couldn't turn on network access. try again."
-LAN_BANNER_DIY_LABEL = "do it yourself ▸"
-LAN_BANNER_DIY_BODY = (
-    "if you're running from source, start convey on your network with "
-    "make dev PORT=0.0.0.0:5015, or set convey.host in your journal config "
-    "to a non-loopback interface, then reload this page."
-)
-
 # --- U2 reach-shell copy ---
-# No unconditional header trust line: relay-trust messaging is posture-specific
-# (direct card = "no one in the middle"; sol private link card = POSTURE_SPL_DESC). An always-on
-# "sol pbc carries the connection" claim is false in direct posture (spec § problem).
-POSTURE_MODAL_FOOTER = "switching is gentle — devices you've paired keep working either way, no re-pairing."
 STATUS_SENTENCES = {
     "direct_online": "your solstone is reachable on your network.",
     "direct_online_vpn": "your solstone is reachable on your network and over your VPN.",
@@ -103,45 +59,78 @@ STATUS_SENTENCES = {
     "offline": "can't reach your solstone right now.",
     "lan_unreachable": "your solstone is running, but devices can't reach it to pair yet.",
     "spl_online": "your solstone is reachable from anywhere.",
-    "spl_finishing_setup": "finishing setup with sol private link...",
+    "spl_finishing_setup": "finishing setup with solstone private link...",
     "spl_offline": (
         "your solstone isn't reaching the network right now — devices can't connect "
         "from away. on your home wifi they still work."
     ),
     "checking": "checking your solstone...",
 }
-REACH_CARD_TITLE = "how your devices reach home"
-REACH_DIRECT_LABEL = "on your network or your own VPN (free)"
-REACH_DIRECT_DETAIL = (
-    "your devices connect to this solstone directly, with no one in the middle."
+BRANDLOCK_LINE = "your journal is always private, only yours."
+REACH_SELECTOR_TITLE = "how your devices reach your journal"
+REACH_SELECTOR_HINT = (
+    "your choice — switch anytime. either way, what syncs is end-to-end encrypted "
+    "and only your devices can read it."
 )
+MODE_BYO_NAME = "your own"
+MODE_BYO_DESC = (
+    "your devices reach your journal over your own network — same wifi, or your own "
+    "VPN. the default."
+)
+MODE_BYO_DISCLOSURE = "sol pbc is never in the path"
+MODE_HOSTED_NAME = "solstone hosted"
+MODE_HOSTED_DESC = (
+    "reach your journal from anywhere, through a relay sol pbc runs for you."
+)
+MODE_HOSTED_DISCLOSURE = "operated by sol pbc"
+MODE_BYO_BODY_NOTE = (
+    "your journal stays on this device. your other devices connect straight to it — "
+    "nothing routes through sol pbc."
+)
+MODE_HOSTED_SETUP_NOTE = (
+    "your journal stays on this device; the relay only passes along encrypted traffic "
+    "it can't read."
+)
+MODE_HOSTED_SETUP_CTA = "set up the relay →"
+APP_ONOFF_LABEL = "link"
+APP_ONOFF_SUB_BYO = "on — reachable over your own network"
+APP_ONOFF_SUB_HOSTED = "on — reachable from anywhere"
 REACH_HOME_ADDRESS_LABEL = "home address"
 REACH_HOST_ADDRESS_DISCLOSURE = "▸ use a different address"
-REACH_HOST_ADDRESS_PLACEHOLDER = "192.168.1.44:5015"
+REACH_HOST_ADDRESS_PLACEHOLDER = "192.168.1.44:7657"
 REACH_HOST_ADDRESS_APPLY_LABEL = "apply"
 REACH_HOST_ADDRESS_CLEAR_LABEL = "clear"
 REACH_VPN_CANDIDATE_LABEL = "VPN address"
 REACH_VPN_USE_THIS = "use this"
-REACH_CHANGE_LABEL = "change"
-REACH_UPGRADE_TITLE = "reach from anywhere"
-REACH_UPGRADE_BODY = (
-    "when you're away, sol private link can carry the connection for paired devices."
-)
-REACH_UPGRADE_LINK_LABEL = "set up sol private link at services.solstone.app"
 REACH_SPL_ACTIVE_BODY = "your devices reach home over the internet, wherever you are."
 REACH_SPL_TRUST_LINE = (
     "the connection is end-to-end encrypted — sol pbc and cloudflare can see "
     "that your device and home met, and nothing inside."
 )
-REACH_SPL_MANAGE_LABEL = "manage sol private link at services.solstone.app →"
+REACH_SPL_MANAGE_LABEL = "manage solstone private link at services.solstone.app →"
 REACH_SPL_CONNECTING_NOTE = "your home is connecting. this is usually quick."
 CHECK_AGAIN_LABEL = "check again"
-POSTURE_MODAL_TITLE = "how should your devices reach home?"
-POSTURE_DIRECT_DESC = "devices connect locally or through your own VPN."
-POSTURE_SPL_TITLE = "from anywhere · sol private link"
-POSTURE_SPL_DESC = "sol pbc carries the connection and cannot see inside it."
-POSTURE_SPL_SETUP_LABEL = "set up sol private link at services.solstone.app →"
-POSTURE_SPL_MANAGE_LABEL = "manage at services.solstone.app →"
+PRIVATE_LINK_DISABLE_CTA = "turn off solstone private link"
+PRIVATE_LINK_SETTING_UP = "setting up solstone private link…"
+PRIVATE_LINK_BROWSER_FALLBACK = "couldn't open your browser. open this link to finish:"
+PRIVATE_LINK_SETUP_SUCCESS = (
+    "solstone private link is on. your devices can reach home from anywhere."
+)
+PRIVATE_LINK_SETUP_FAILED = "couldn't finish setting up solstone private link."
+PRIVATE_LINK_NEEDS_SUBSCRIPTION_HEADLINE = "private link needs a subscription"
+PRIVATE_LINK_NEEDS_SUBSCRIPTION_DETAIL = (
+    "your consent is saved. private link needs an active subscription before it can "
+    "turn on; set one up, then enable it again."
+)
+PRIVATE_LINK_NEEDS_SUBSCRIPTION_CTA = "set up a subscription"
+PRIVATE_LINK_DISABLE_SUCCESS = (
+    "solstone private link is off. devices connect directly again."
+)
+PRIVATE_LINK_DISABLE_FAILED = (
+    "couldn't turn off solstone private link — it's still on. try again."
+)
+PRIVATE_LINK_NEEDS_REPAIR = "solstone private link needs setting up again."
+PRIVATE_LINK_RETRY_CTA = "try again"
 
 # --- U3 device-section copy ---
 DEVICE_SECTION_TITLE = "your devices"

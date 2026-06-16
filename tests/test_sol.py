@@ -48,8 +48,10 @@ def service_alias_names() -> list[str]:
 def run_dispatch(monkeypatch, binary: str, name: str) -> dict[str, object]:
     result: dict[str, object] = {}
 
-    def fake_run_command(module_path: str) -> int:
+    def fake_run_command(module_path: str, *, surface: str, binary: str) -> int:
         result["module"] = module_path
+        result["surface"] = surface
+        result["binary"] = binary
         result["argv"] = sys.argv[:]
         return 0
 
@@ -73,9 +75,16 @@ class TestResolveCommand:
     def test_resolve_known_command(self):
         """Test resolving a known command from registry."""
         module_path, preset_args, surface = sol.resolve_command("import")
-        assert module_path == "solstone.think.importers.cli"
+        assert module_path == "solstone.think.import_client"
         assert preset_args == []
         assert surface == "access"
+
+    def test_resolve_importer_service_command(self):
+        """Test resolving the service-side import engine."""
+        module_path, preset_args, surface = sol.resolve_command("importer")
+        assert module_path == "solstone.think.importers.cli"
+        assert preset_args == []
+        assert surface == "service"
 
     def test_resolve_direct_module_path(self):
         """Test resolving a direct module path with dot."""
@@ -139,7 +148,9 @@ class TestRunCommand:
         mock_module.main = MagicMock(return_value=None)
 
         with patch("importlib.import_module", return_value=mock_module):
-            exit_code = sol.run_command("test.module")
+            exit_code = sol.run_command(
+                "test.module", surface="service", binary="journal"
+            )
             assert exit_code == 0
             mock_module.main.assert_called_once()
 
@@ -149,7 +160,9 @@ class TestRunCommand:
         mock_module.main = MagicMock(side_effect=SystemExit(0))
 
         with patch("importlib.import_module", return_value=mock_module):
-            exit_code = sol.run_command("test.module")
+            exit_code = sol.run_command(
+                "test.module", surface="service", binary="journal"
+            )
             assert exit_code == 0
 
     def test_run_command_with_nonzero_exit(self):
@@ -158,7 +171,9 @@ class TestRunCommand:
         mock_module.main = MagicMock(side_effect=SystemExit(1))
 
         with patch("importlib.import_module", return_value=mock_module):
-            exit_code = sol.run_command("test.module")
+            exit_code = sol.run_command(
+                "test.module", surface="service", binary="journal"
+            )
             assert exit_code == 1
 
     def test_run_command_with_string_exit(self, capsys):
@@ -167,7 +182,9 @@ class TestRunCommand:
         mock_module.main = MagicMock(side_effect=SystemExit("Error: something failed"))
 
         with patch("importlib.import_module", return_value=mock_module):
-            exit_code = sol.run_command("test.module")
+            exit_code = sol.run_command(
+                "test.module", surface="service", binary="journal"
+            )
             assert exit_code == 1
 
         captured = capsys.readouterr()
@@ -178,15 +195,46 @@ class TestRunCommand:
         with patch(
             "importlib.import_module", side_effect=ImportError("No module named 'fake'")
         ):
-            exit_code = sol.run_command("fake.module")
+            exit_code = sol.run_command(
+                "fake.module", surface="service", binary="journal"
+            )
             assert exit_code == 1
+
+    def test_run_command_missing_journal_dependency_prints_hint(self, capsys):
+        """Service commands missing third-party deps get the journal-extra hint."""
+        missing = ModuleNotFoundError("No module named 'flask'", name="flask")
+        with patch("importlib.import_module", side_effect=missing):
+            exit_code = sol.run_command(
+                "solstone.convey.cli", surface="service", binary="journal"
+            )
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert "this command needs the journal host dependencies" in captured.err
+        assert "pip install 'solstone[journal]'" in captured.err
+        assert "uv tool install 'solstone[journal]'" in captured.err
+
+    def test_run_command_access_import_error_keeps_raw_error(self, capsys):
+        """Access command import errors do not get the journal-extra hint."""
+        missing = ModuleNotFoundError("No module named 'numpy'", name="numpy")
+        with patch("importlib.import_module", side_effect=missing):
+            exit_code = sol.run_command(
+                "solstone.think.notify_cli", surface="access", binary="sol"
+            )
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert "Could not import module 'solstone.think.notify_cli'" in captured.err
+        assert "solstone[journal]" not in captured.err
 
     def test_run_command_no_main_function(self):
         """Test handling module without main() function."""
         mock_module = MagicMock(spec=[])  # No 'main' attribute
 
         with patch("importlib.import_module", return_value=mock_module):
-            exit_code = sol.run_command("test.module")
+            exit_code = sol.run_command(
+                "test.module", surface="service", binary="journal"
+            )
             assert exit_code == 1
 
     def test_main_propagates_integer_return_code_via_real_subprocess(self, tmp_path):
@@ -280,8 +328,10 @@ class TestMain:
         captured: dict[str, object] = {}
         calls = []
 
-        def fake_run_command(module_path: str) -> int:
+        def fake_run_command(module_path: str, *, surface: str, binary: str) -> int:
             captured["module"] = module_path
+            captured["surface"] = surface
+            captured["binary"] = binary
             captured["argv"] = sys.argv[:]
             return 0
 
@@ -303,7 +353,9 @@ class TestMain:
 
         rewritten_argv = captured["argv"]
         assert exc_info.value.code == 0
-        assert captured["module"] == "solstone.think.importers.cli"
+        assert captured["module"] == "solstone.think.import_client"
+        assert captured["surface"] == "access"
+        assert captured["binary"] == "sol"
         assert isinstance(rewritten_argv, list)
         assert rewritten_argv[0] == "sol import"
         assert "-v" not in rewritten_argv
@@ -434,6 +486,11 @@ class TestCommandRegistry:
         for cmd in critical:
             assert cmd in sol.COMMANDS, f"Critical command '{cmd}' not registered"
 
+    def test_services_namespace_removed(self):
+        """The dissolved services switchboard is not a journal CLI namespace."""
+        assert "services" not in sol.COMMANDS
+        assert "services" not in sol.service_help_group().commands
+
     def test_pyproject_declares_sol_and_journal_scripts(self):
         """Project scripts expose both top-level CLI entry points."""
         pyproject = tomllib.loads(
@@ -446,21 +503,38 @@ class TestCommandRegistry:
         assert scripts["sol"].startswith("solstone.think.sol_cli:")
         assert scripts["journal"].startswith("solstone.think.sol_cli:")
 
-    def test_pyproject_declares_linux_parakeet_base_dependencies(self):
-        """Linux/x86_64 base install includes the default Parakeet runtime."""
+    def test_pyproject_declares_journal_parakeet_dependencies(self):
+        """The default Parakeet/STT runtime ships in the journal-host extras,
+        not the thin base. After the package split, base carries no transcription
+        stack: [journal-host] pulls onnx-asr (Linux/x86_64) and [journal] pulls
+        the CPU onnxruntime, while [journal-cuda] swaps in the GPU runtime."""
         pyproject = tomllib.loads(
             (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )
-        dependencies = pyproject["project"]["dependencies"]
+        base = pyproject["project"]["dependencies"]
+        extras = pyproject["project"]["optional-dependencies"]
 
-        assert "onnxruntime>=1.20.0,!=1.24.1" in dependencies
-        assert (
-            "onnx-asr>=0.11.0; sys_platform == 'linux' and platform_machine == 'x86_64'"
-            in dependencies
+        # The thin base carries no ONNX / STT runtime.
+        assert not any("onnxruntime" in dep or "onnx-asr" in dep for dep in base), (
+            "thin base must not carry the transcription runtime"
         )
+
+        # [journal] (CPU default) pulls the CPU onnxruntime floor.
+        assert "onnxruntime>=1.20.0,!=1.24.1" in extras["journal"]
         assert (
             "onnxruntime>=1.25.0,!=1.24.1; sys_platform == 'linux' and platform_machine == 'x86_64'"
-            in dependencies
+            in extras["journal"]
+        )
+        # [journal-host] (shared core) pulls the parakeet STT lib on Linux/x86_64.
+        assert (
+            "onnx-asr>=0.11.0; sys_platform == 'linux' and platform_machine == 'x86_64'"
+            in extras["journal-host"]
+        )
+        # [journal-cuda] swaps in the GPU runtime and never the CPU onnxruntime.
+        assert "onnxruntime-gpu>=1.25.0" in extras["journal-cuda"]
+        assert not any(
+            dep.split(";")[0].strip() == "onnxruntime>=1.20.0,!=1.24.1"
+            for dep in extras["journal-cuda"]
         )
 
     def test_every_registry_entry_has_surface_tag(self):
@@ -515,7 +589,9 @@ class TestCommandRegistry:
         monkeypatch.setattr(
             sol,
             "run_command",
-            lambda _module_path: pytest.fail("access command should not run"),
+            lambda _module_path, **_kwargs: pytest.fail(
+                "access command should not run"
+            ),
         )
         monkeypatch.setattr(sys, "argv", ["journal", name])
 
@@ -525,6 +601,24 @@ class TestCommandRegistry:
         captured = capsys.readouterr()
         assert exc_info.value.code == 2
         assert JOURNAL_ACCESS_CMD_ERROR.format(cmd=name) in captured.err
+
+    def test_journal_import_keeps_access_routing_error(self, monkeypatch, capsys):
+        """The service-side engine is `journal importer`; `journal import` remains invalid."""
+        monkeypatch.setattr(
+            sol,
+            "run_command",
+            lambda _module_path, **_kwargs: pytest.fail(
+                "journal import should not run"
+            ),
+        )
+        monkeypatch.setattr(sys, "argv", ["journal", "import", "--help"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            sol.journal_main()
+
+        captured = capsys.readouterr()
+        assert exc_info.value.code == 2
+        assert JOURNAL_ACCESS_CMD_ERROR.format(cmd="import") in captured.err
 
     def test_journal_help_lists_service_and_universal_surfaces(self):
         """journal --help renders service and universal command lists."""
@@ -543,10 +637,15 @@ class TestCommandRegistry:
         )
 
         assert result.returncode == 0, result.stderr
+        rendered_commands = {
+            line.strip().split()[0]
+            for line in result.stdout.splitlines()
+            if line.startswith("  ") and line.strip()
+        }
         for name in service_command_names() + universal_command_names():
-            assert name in result.stdout
+            assert name in rendered_commands
         for name in access_command_names():
-            assert name not in result.stdout
+            assert name not in rendered_commands
         assert "sol call" not in result.stdout
 
     def test_sol_help_lists_access_groups_only(self):
@@ -599,7 +698,7 @@ class TestCommandRegistry:
     def test_setproctitle_prefix_uses_active_binary(self, monkeypatch):
         """The process title identifies whether sol or journal dispatched the command."""
         titles = []
-        monkeypatch.setattr(sol, "run_command", lambda _module_path: 0)
+        monkeypatch.setattr(sol, "run_command", lambda _module_path, **_kwargs: 0)
         monkeypatch.setattr(sol.setproctitle, "setproctitle", titles.append)
 
         monkeypatch.setattr(sys, "argv", ["sol", "chat"])

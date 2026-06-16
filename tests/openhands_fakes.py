@@ -141,6 +141,8 @@ class Conversation(FakeModel):
         super().__init__(**kwargs)
         self.messages: list[str] = []
         self.paused = False
+        self.closed = False
+        self.state = SimpleNamespace(execution_status=None)
         type(self).instances.append(self)
 
     def send_message(self, message: str) -> None:
@@ -148,6 +150,9 @@ class Conversation(FakeModel):
 
     def pause(self) -> None:
         self.paused = True
+
+    def close(self) -> None:
+        self.closed = True
 
     async def arun(self) -> None:
         if type(self).arun_impl is None:

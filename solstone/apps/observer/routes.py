@@ -6,7 +6,6 @@
 Provides endpoints for:
 - Managing observer registrations (UI)
 - Receiving file uploads from observers (ingest)
-- Receiving transferred segments from other instances (transfer ingest)
 - Serving segment manifests for transfer diffing
 - Relaying events from observers to local Callosum
 - Retrieving segment upload history for sync verification
@@ -24,7 +23,7 @@ import secrets
 from pathlib import Path
 from typing import Any
 
-from flask import Blueprint, Response, jsonify, request, stream_with_context
+from flask import Blueprint, Response, g, jsonify, request, stream_with_context
 from werkzeug.utils import secure_filename
 
 import solstone.convey.bridge as convey_bridge
@@ -55,6 +54,8 @@ from solstone.observe.utils import (
     compute_file_sha256,
     find_available_segment,
 )
+from solstone.think.link.auth import AuthorizedClients
+from solstone.think.link.paths import authorized_clients_path
 from solstone.think.streams import stream_name, update_stream, write_segment_stream
 from solstone.think.utils import day_path, iter_segments, now_ms, segment_path
 
@@ -67,7 +68,6 @@ from .utils import (
     get_observers_dir,
     list_observers,
     load_history,
-    load_observer,
     observer_filename_prefix,
     resolve_observer_identity,
     revoke_observer_record,
@@ -81,7 +81,7 @@ observer_bp = Blueprint(
     __name__,
     url_prefix="/app/observer",
 )
-OBSERVER_CALLOSUM_SSE_ROUTE = "/app/observer/<key>/callosum"
+OBSERVER_CALLOSUM_SSE_ROUTE = "/app/observer/callosum"
 _OBSERVER_CALLOSUM_SSE_RULE = OBSERVER_CALLOSUM_SSE_ROUTE.removeprefix(
     observer_bp.url_prefix or ""
 )
@@ -186,7 +186,7 @@ def _serialize_observer(observer: dict[str, Any], current_now: int) -> dict[str,
     )
     key_prefix = observer_filename_prefix(observer)
     return {
-        "key_prefix": key_prefix,
+        "prefix": key_prefix,
         "name": observer.get("name", ""),
         "created_at": observer.get("created_at", 0),
         "last_seen": observer.get("last_seen"),
@@ -219,7 +219,7 @@ def api_list() -> Any:
             group_order[observer.get("group", "inactive")],
             1 if observer.get("last_seen") is None else 0,
             -(observer.get("last_seen") or 0),
-            observer.get("key_prefix", ""),
+            observer.get("prefix", ""),
         )
     )
 
@@ -254,22 +254,16 @@ def api_list() -> Any:
 # The feed does NOT redact fields (v1 trust call; same trust boundary as the existing
 # Convey SSE bridge — observers are inside it).
 @observer_bp.route(_OBSERVER_CALLOSUM_SSE_RULE, methods=["GET"])
-def callosum_sse(key: str) -> Any:
+def callosum_sse() -> Any:
     """Stream Callosum events to an authenticated observer process."""
-    observer, key_prefix, error = resolve_observer_identity(key)
+    _observer, key_prefix, error = resolve_observer_identity()
     if error is not None:
         return error
-    auth_key = observer.get("key")
-    fingerprint = observer.get("fingerprint")
 
     handle = convey_bridge.register_sse_subscriber(key_prefix)
 
     def current_observer() -> dict | None:
-        if isinstance(fingerprint, str) and fingerprint:
-            return ObserverRegistry.singleton().by_fingerprint(fingerprint)
-        if isinstance(auth_key, str) and auth_key:
-            return load_observer(auth_key)
-        return None
+        return ObserverRegistry.singleton().by_prefix(key_prefix)
 
     def generate():
         try:
@@ -322,8 +316,7 @@ def api_create() -> Any:
     (apps/observer/workspace.html). Auto-registering observer clients use
     POST /app/observer/register instead, which takes a self-descriptor and
     locks a stream identity onto the record. This route is kept for the
-    human-facing management flow; it always mints and returns ``key_prefix``
-    (vs /register's ``prefix``).
+    human-facing management flow; it always mints and returns ``prefix``.
     """
     data = request.get_json(force=True) if request.is_json else {}
     name = data.get("name", "").strip()
@@ -367,7 +360,7 @@ def api_create() -> Any:
     return jsonify(
         {
             "key": key,
-            "key_prefix": key[:8],
+            "prefix": key[:8],
             "name": name,
             "ingest_url": ingest_url,
             "protocol_version": protocol.OBSERVER_PROTOCOL_VERSION,
@@ -379,7 +372,7 @@ _REGISTER_REQUIRED_FIELDS = ("platform", "hostname", "stream_type", "version")
 
 
 def _is_trusted_localhost() -> bool:
-    """Direct-loopback check mirroring the convey trust_localhost gate."""
+    """Direct-loopback check for observer-local endpoints."""
     is_localhost = request.remote_addr in ("127.0.0.1", "::1", "localhost")
     proxy_headers = (
         request.headers.get("X-Forwarded-For")
@@ -389,19 +382,35 @@ def _is_trusted_localhost() -> bool:
     return is_localhost and not proxy_headers
 
 
+def _is_authorized_pl_identity() -> bool:
+    """Return True when the request arrived through a currently authorized PL."""
+    identity = getattr(g, "identity", None)
+    if getattr(identity, "mode", None) not in {"pl-direct", "pl-via-spl"}:
+        return False
+    fingerprint = getattr(identity, "fingerprint", None)
+    if not isinstance(fingerprint, str) or not fingerprint:
+        return False
+    return AuthorizedClients(authorized_clients_path()).is_authorized(fingerprint)
+
+
+def _is_trusted_register_caller() -> bool:
+    return _is_trusted_localhost() or _is_authorized_pl_identity()
+
+
 @observer_bp.route("/register", methods=["POST"])
 def register() -> Any:
-    """Self-register a local observer and lock its stream identity.
+    """Self-register a local or through-link observer and lock stream identity.
 
-    Loopback-only (the in-handler guard is the sole gate) and require_login-exempt
-    so a local observer can register before setup completes. Mints the DL handle,
+    The in-handler guard is the sole gate: direct loopback, or a request that
+    arrived through an authorized PL identity. The route is require_access-exempt
+    so an observer can register before setup completes. Mints the DL handle,
     locks a stream onto the record, and returns the pinned descriptor response.
     """
-    # Localhost guard FIRST — non-local / proxy-headed callers mint nothing.
-    if not _is_trusted_localhost():
+    # Register guard FIRST — untrusted callers mint nothing.
+    if not _is_trusted_register_caller():
         return error_response(
             LOCAL_REQUEST_ONLY,
-            detail="Observer registration requires a direct localhost request.",
+            detail="Observer registration requires a direct localhost or paired-link request.",
         )
 
     parsed = request.get_json(force=True, silent=True)
@@ -613,10 +622,9 @@ def _save_to_failed(
 
 
 @observer_bp.route("/source/<stream>", methods=["DELETE"])
-@observer_bp.route("/source/<stream>/<key>", methods=["DELETE"])
-def delete_source(stream: str, key: str | None = None) -> Any:
+def delete_source(stream: str) -> Any:
     """Delete an allowed source stream for an authenticated observer."""
-    observer, key_prefix, error = resolve_observer_identity(key)
+    observer, key_prefix, error = resolve_observer_identity()
     if error is not None:
         return error
 
@@ -858,9 +866,10 @@ def _process_ingest_files(
 
 
 @observer_bp.route("/ingest", methods=["POST"])
-@observer_bp.route("/ingest/<key>", methods=["POST"])
-def ingest_upload(key: str | None = None) -> Any:
+def ingest_upload() -> Any:
     """Receive file uploads from observer.
+
+    Observer ingest is the live, single capture-segment stream from one observer.
 
     Expects multipart form with:
     - segment: Segment key (HHMMSS_LEN)
@@ -878,7 +887,7 @@ def ingest_upload(key: str | None = None) -> Any:
     - "duplicate": All files already received (no processing triggered)
     - "collision": New segment saved with adjusted key (directory conflict)
     """
-    observer, key_prefix, error = resolve_observer_identity(key)
+    observer, key_prefix, error = resolve_observer_identity()
     if error is not None:
         return error
 
@@ -993,86 +1002,10 @@ def ingest_upload(key: str | None = None) -> Any:
     return jsonify(body), status
 
 
-@observer_bp.route("/ingest/<key>/transfer", methods=["POST"])
-def ingest_transfer(key: str) -> Any:
-    """Receive transferred file uploads from another solstone instance."""
-    observer, key_prefix, error = resolve_observer_identity(key)
-    if error is not None:
-        return error
-
-    segment = request.form.get("segment", "").strip()
-    day = request.form.get("day", "").strip()
-    stream = request.form.get("stream", "").strip()
-    host = request.form.get("host", "").strip()
-    platform_name = request.form.get("platform", "").strip()
-    meta_str = request.form.get("meta", "").strip()
-
-    meta: dict = {}
-    if meta_str:
-        try:
-            meta = json.loads(meta_str)
-        except json.JSONDecodeError:
-            logger.warning(f"Invalid meta JSON from observer: {meta_str[:100]}")
-    if host and "host" not in meta:
-        meta["host"] = host
-    if platform_name and "platform" not in meta:
-        meta["platform"] = platform_name
-
-    if not segment:
-        return error_response(MISSING_REQUIRED_FIELD, detail="Missing segment")
-    if not day:
-        return error_response(MISSING_REQUIRED_FIELD, detail="Missing day")
-    if not stream:
-        return error_response(MISSING_REQUIRED_FIELD, detail="Missing stream")
-    if not re.match(r"^\d{6}_\d+$", segment):
-        return error_response(
-            INVALID_SEGMENT_OR_STREAM,
-            detail="Invalid segment format",
-        )
-    if not re.match(r"^\d{8}$", day):
-        return error_response(INVALID_DAY, detail="Invalid day format")
-    if not re.match(r"^[a-z0-9][a-z0-9._-]*$", stream):
-        return error_response(
-            INVALID_SEGMENT_OR_STREAM,
-            detail="Invalid stream format",
-        )
-
-    files = request.files.getlist("files")
-    if not files:
-        return error_response(INGEST_NO_FILES, detail="No files uploaded")
-
-    body, status = _process_ingest_files(
-        observer,
-        key_prefix,
-        segment,
-        day,
-        stream,
-        files,
-        source="transfer",
-    )
-    if status != 200 or body.get("status") == "duplicate":
-        return jsonify(body), status
-
-    observer_name = observer.get("name", "")
-    event_fields: dict[str, Any] = {
-        "segment": body["segment"],
-        "day": day,
-        "files": body["files"],
-        "observer": observer_name,
-        "stream": stream,
-    }
-    if meta:
-        event_fields["meta"] = meta
-    emit("observe", "transferred", **event_fields)
-
-    return jsonify(body), status
-
-
 @observer_bp.route("/ingest/manifest", methods=["GET"])
-@observer_bp.route("/ingest/<key>/manifest", methods=["GET"])
-def ingest_manifest(key: str | None = None) -> Any:
+def ingest_manifest() -> Any:
     """List available manifest days for an observer."""
-    _observer, key_prefix, error = resolve_observer_identity(key)
+    _observer, key_prefix, error = resolve_observer_identity()
     if error is not None:
         return error
 
@@ -1094,10 +1027,9 @@ def ingest_manifest(key: str | None = None) -> Any:
 
 
 @observer_bp.route("/ingest/manifest/<day>", methods=["GET"])
-@observer_bp.route("/ingest/<key>/manifest/<day>", methods=["GET"])
-def ingest_manifest_day(day: str, key: str | None = None) -> Any:
+def ingest_manifest_day(day: str) -> Any:
     """Return a transfer manifest for all segments on a given day."""
-    _observer, _key_prefix, error = resolve_observer_identity(key)
+    _observer, _key_prefix, error = resolve_observer_identity()
     if error is not None:
         return error
 
@@ -1130,8 +1062,7 @@ def ingest_manifest_day(day: str, key: str | None = None) -> Any:
 
 
 @observer_bp.route("/ingest/event", methods=["POST"])
-@observer_bp.route("/ingest/<key>/event", methods=["POST"])
-def ingest_event(key: str | None = None) -> Any:
+def ingest_event() -> Any:
     """Receive events from observer and relay to local Callosum.
 
     Expects JSON body with:
@@ -1139,7 +1070,7 @@ def ingest_event(key: str | None = None) -> Any:
     - event: Event name
     - ...additional fields
     """
-    observer, _key_prefix, error = resolve_observer_identity(key)
+    observer, _key_prefix, error = resolve_observer_identity()
     if error is not None:
         return error
 
@@ -1199,8 +1130,7 @@ def _respond_observer_segments(items: list[dict], *, client_pv: int) -> Any:
 
 
 @observer_bp.route("/ingest/segments/<day>")
-@observer_bp.route("/ingest/<key>/segments/<day>")
-def ingest_segments(day: str, key: str | None = None) -> Any:
+def ingest_segments(day: str) -> Any:
     """List uploaded segments for a day with file verification.
 
     Returns JSON array of segments with file status:
@@ -1210,9 +1140,8 @@ def ingest_segments(day: str, key: str | None = None) -> Any:
 
     Args:
         day: Day string (YYYYMMDD)
-        key: Observer authentication key (from URL path, legacy)
     """
-    observer, key_prefix, error = resolve_observer_identity(key)
+    observer, key_prefix, error = resolve_observer_identity()
     if error is not None:
         return error
 

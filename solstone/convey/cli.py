@@ -19,31 +19,9 @@ from .bridge import start_bridge, stop_bridge
 logger = logging.getLogger(__name__)
 
 
-def _resolve_config_password_hash() -> str:
-    """Return the configured Convey password hash from journal config."""
-    from solstone.think.utils import get_config
-
-    try:
-        config = get_config()
-        convey_config = config.get("convey", {})
-        return convey_config.get("password_hash", "")
-    except Exception:
-        # Intended fail-closed-on-unreadable-config: no hash means no password auth.
-        return ""
-
-
 def _resolve_bind_host() -> str:
-    """Return the configured bind host for Convey."""
-    from solstone.think.utils import get_config
-
-    try:
-        allow_network_access = (
-            get_config().get("convey", {}).get("allow_network_access", False)
-        )
-    except Exception:
-        # Intended fail-closed-on-unreadable-config: bind localhost only.
-        allow_network_access = False
-    return "0.0.0.0" if allow_network_access else "127.0.0.1"
+    """Return Convey's bind host — always loopback; :5015 is never network-exposed."""
+    return "127.0.0.1"
 
 
 def run_service(
@@ -99,13 +77,6 @@ def main() -> None:
     journal = get_journal()
 
     app = create_app(journal)
-    password = _resolve_config_password_hash()
-    if password:
-        logger.info("Password authentication enabled")
-    else:
-        logger.warning(
-            "no password configured. only required for non-localhost access."
-        )
 
     # Write port to health directory for discovery by other tools
     write_service_port("convey", args.port)

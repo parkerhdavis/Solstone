@@ -4,6 +4,75 @@ All notable changes to solstone (the Python package) will be documented in this 
 
 Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), aligned with `cmo/brand/changelog-voice.md`.
 
+## [0.6.5] - 2026-06-16
+
+### Changed
+- the local web interface no longer has its own password, login page, session cookie, or localhost-trust switch. once setup is complete, the local interface serves directly on the journal machine; linked devices continue to use their paired-device identity through link.
+
+## [0.6.4] - 2026-06-15
+
+### Added
+- `sol link serve --direct` keeps a linked machine's traffic on your private link's direct path and never falls back to the relay — useful when the journal's machine is reachable on the same network, so there's no dependency on the relay.
+
+### Fixed
+- an observer on a machine you've linked to your journal can now send everything it takes in over your private link, no matter the size. before, anything larger than a small message stalled partway and never arrived, so those observers couldn't finish uploading and uploads timed out; now they go through reliably. a separate cleanup issue that could leave a stale connection behind after a reconnect is also resolved.
+
+## [0.6.3] - 2026-06-15
+
+### Fixed
+- a machine that reaches your journal over your private link now stays connected. before, that connection would go quiet after a minute or two and not recover on its own, so observers on that machine stopped reaching your journal; it now sends a steady heartbeat to stay alive and reconnects automatically if it ever drops, so they keep streaming without interruption.
+
+## [0.6.2] - 2026-06-15
+
+### Changed
+- an observer running on another machine you've linked now streams to your journal over your private link. each observer is identified by its own handle, kept fully separate from the machine's link identity, so the two can change independently and one never stands in for the other. observers running on the same machine as your journal are unaffected. what your observers take in, and where your journal lives, are unchanged.
+
+## [0.6.1] - 2026-06-15
+
+### Changed
+- desktop observers now use the journal's current callosum connection path,
+  with the observer key kept in the authorization header.
+
+## [0.6.0] - 2026-06-14
+
+### Added
+- you can now run sol from one machine against a journal that lives on another. once you've paired the two over your solstone private link, `sol chat` and `sol call` reach the remote journal the same way they reach a local one, with live progress and answers streaming back as sol works. a machine set up this way runs its own observers and its own `sol`, while its journal stays on the machine that holds it.
+- managing your paired devices now has its own home in `journal link`: list what's paired, check a device's status, and unpair one when you're done with it. `sol link` stays the device-side command for joining and serving a link.
+
+### Changed
+- installing solstone now gives you the lightweight `sol` client by default. `pip install solstone` (or `uv tool install solstone`, or `uvx solstone`) installs a small client that talks to a journal running elsewhere, without the full set of components a journal host needs. to run a journal on this machine, install `solstone[journal]` for the full stack, or `solstone[journal-cuda]` for the version that uses your graphics card for transcription. the macOS app is unaffected; it still includes everything to run a journal.
+- your journal's local web and api address is now reachable only from the same machine. the older option that opened it to your network behind a password is gone. to use a journal from another device, you now pair that device over your solstone private link, the same pairing flow as before, rather than opening a port. this is a tightening of how a journal can be reached; what your observers take in, where your journal lives, and what leaves the machine are all unchanged.
+
+## [0.5.6] - 2026-06-14
+
+### Added
+- the backup page now lets you choose where your encrypted backup lives. keep using your own bucket as before, or pick solstone hosted, which is on the way and shown as coming later with a clear path back to your own bucket in the meantime.
+
+### Changed
+- the backup page got a clearer pass over its layout and wording, the routine actions sit apart from the one that erases a backup, and the page now carries the same naming as the rest of solstone, including the `journal backup` terminal command's help text.
+- the link page now matches the rest of solstone's look. the pairing button and links on that surface read in the warm palette instead of an off-tone blue, so the page reads as one piece.
+
+### Fixed
+- pairing a new device over your solstone private link now completes instead of stalling. before, the join would reach your journal but hang for about half a minute and then give up; it now connects cleanly, with a plain one-line message if anything goes wrong. what travels and where your journal lives are unchanged; this is the connection itself finishing the way it should.
+- the recovery-key Copy button on the backup page now copies your key, where before it could copy a stray bit of internal text. some loose setup labels that were never meant to show are gone too.
+- when sol's background thinking is cut short at a budget or step limit, that run now closes honestly and its cost shows up on your spending view like any other. before, a cut-short run could sit in limbo and its spend never appeared, so your spending view was lower than what was actually used. a cut-short run now reads plainly as cut short rather than as a clean finish, and keeps whatever partial work it had.
+
+## [0.5.5] - 2026-06-14
+
+### Added
+- before sol reaches solstone support on your behalf, it now asks first. reaching support is the one moment something may leave your machine, so sol offers it in the chat bar and waits for your yes; decline and the conversation stays entirely local. when you do say yes, the chat bar shows the reach-out plainly as it happens, and the offer survives a reload so you never lose your place.
+- there's a new Thinking app in your journal that owns how sol thinks. provider, key, and on-device setup all live there now, with three clear lanes: become a solstone scout, bring your own key for Claude, Gemini, or GPT, or run local thinking models on your own device. first-run setup now routes you straight into Thinking to pick your lane instead of asking for a single key up front.
+- you can now point the local (on-device) option at your own OpenAI-compatible server instead of the bundled engine. when you configure an endpoint, sol's generation and background thinking run there, including screen content for vision; transcription always stays on your machine, and there is no silent fallback to the cloud. it's your server, by your choice, and the local card spells out plainly what goes where.
+- linux machines with an arm64 GPU (like the NVIDIA DGX Spark / GB10) can now run the local on-device option, and on-device transcription defaults to whisper on those boxes. previously these setups had no on-device path for sol's thinking.
+
+### Changed
+- pairing a new device over your home network is smoother and clearer. a brand-new device on your local network now reaches the pairing step to earn its credentials, the same step it always had to pass; it still has to present your one-shot pairing code, can only talk to the pairing endpoint, and your journal stays local-only until you pair. the pairing command now hands you a ready-to-use link to paste on the other device, and a refused or mistyped attempt now tells you exactly what went wrong instead of a generic error. a paired device also keeps both the name you give it and its own hostname, so they no longer overwrite each other in the list.
+- setting up how sol reaches the world is reorganized around the apps that own each piece. Thinking owns scout and your provider setup, Link owns your solstone private link, and the old "your services" switchboard is gone; Settings now opens to a simple guide that points you to each app. the Thinking app also reads scout's real status directly (requested, invited, on), with a "check now" option, instead of guessing from local state.
+
+### Fixed
+- the web app's search summary now counts results correctly, reading "1 result" or "2 results" as it should.
+- internal stability improvements.
+
 ## [0.5.4] - 2026-06-12
 
 ### Added

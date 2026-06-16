@@ -49,10 +49,11 @@ def journal(tmp_path, monkeypatch):
 @pytest.fixture
 def cli(journal, monkeypatch):
     from solstone.think.convey_client import ConveyClient
-    from tests._baseline_harness import make_logged_in_test_client
+    from tests._baseline_harness import make_test_client, mark_setup_complete
 
+    mark_setup_complete(journal)
     client = ConveyClient(
-        session=make_logged_in_test_client(journal),
+        session=make_test_client(journal),
         base_url="",
         require_service=False,
     )
@@ -121,6 +122,33 @@ def test_config_route_reports_enabled_and_portal_url(support_client, monkeypatch
         "portal_url": "https://support.example.test",
     }
     _assert_no_credential_leak(resp.get_data(as_text=True))
+
+
+def test_portal_url_defaults_to_support_host(journal, monkeypatch):
+    from solstone.apps.support import portal
+
+    monkeypatch.delenv(portal.SUPPORT_PORTAL_URL_ENV, raising=False)
+
+    assert portal._get_portal_url_from_settings() == portal.DEFAULT_PORTAL_URL
+    assert portal.get_client(anonymous=True).portal_url == portal.DEFAULT_PORTAL_URL
+
+
+def test_portal_url_env_overrides_configured_host(journal, monkeypatch):
+    from solstone.apps.support import portal
+
+    config_dir = journal / "config"
+    config_dir.mkdir()
+    (config_dir / "config.json").write_text(
+        json.dumps({"support": {"portal_url": "https://support.solstone.app"}})
+    )
+    monkeypatch.setenv(
+        portal.SUPPORT_PORTAL_URL_ENV, "https://support-sink.example.test/"
+    )
+
+    assert portal._get_portal_url_from_settings() == "https://support-sink.example.test"
+    assert portal.get_client(anonymous=True).portal_url == (
+        "https://support-sink.example.test"
+    )
 
 
 def test_config_route_ungated_when_disabled(support_client, monkeypatch):

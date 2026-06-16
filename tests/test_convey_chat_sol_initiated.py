@@ -19,7 +19,9 @@ def _setup_journal(tmp_path, monkeypatch):
     journal = tmp_path / "journal"
     journal.mkdir()
     monkeypatch.setenv("SOLSTONE_JOURNAL", str(journal))
-    monkeypatch.setattr("solstone.convey.chat_stream.index_file", lambda *_args: True)
+    monkeypatch.setattr(
+        "solstone.think.indexer.journal.index_file", lambda *_args: True
+    )
     return journal
 
 
@@ -170,41 +172,32 @@ def test_sol_request_open_endpoint_broadcast_suppresses_push(
     assert (tract, kind) == ("chat", KIND_OWNER_CHAT_OPEN)
     assert kwargs["request_id"] == "req-1"
 
-    monkeypatch.setattr(triggers, "is_configured", lambda: True)
-    devices = [{"token": "a" * 64}]
-    monkeypatch.setattr(triggers, "_eligible_devices", lambda: devices)
-    monkeypatch.setattr(triggers.time, "time", lambda: 123.0)
-    sent_calls = []
-
-    def fake_send_many(push_devices, payload, *, collapse_id, priority, push_type):
-        sent_calls.append(
+    monkeypatch.setattr(triggers, "push_relay_token", lambda: "tok")
+    monkeypatch.setattr(
+        triggers,
+        "load_devices",
+        lambda: [
             {
-                "devices": push_devices,
-                "payload": payload,
-                "collapse_id": collapse_id,
-                "priority": priority,
-                "push_type": push_type,
+                "fingerprint": "fp-1",
+                "token": "a" * 64,
+                "bundle_id": "org.solpbc.solstone-swift",
+                "environment": "development",
+                "platform": "ios",
+                "registered_at": 1,
             }
-        )
-        return 1, 0
-
-    monkeypatch.setattr(triggers, "send_many", fake_send_many)
+        ],
+    )
+    relay_calls = []
+    monkeypatch.setattr(
+        triggers,
+        "dispatch_dedup_via_portal",
+        lambda **kwargs: relay_calls.append(kwargs) or {"ok": True},
+    )
     message = {"tract": tract, "event": kind, **kwargs}
 
     triggers.handle_chat_lifecycle(message)
 
-    assert sent_calls == [
-        {
-            "devices": devices,
-            "payload": {
-                "aps": {"mutable-content": 1, "content-available": 1},
-                "data": {"action": KIND_OWNER_CHAT_OPEN, "request_id": "req-1"},
-            },
-            "collapse_id": f"sol_chat_lifecycle:req-1:{KIND_OWNER_CHAT_OPEN}",
-            "priority": 5,
-            "push_type": "background",
-        }
-    ]
+    assert relay_calls == [{"request_id": "req-1", "action": KIND_OWNER_CHAT_OPEN}]
 
 
 def test_sol_request_open_endpoint_requires_request_id(tmp_path, monkeypatch) -> None:

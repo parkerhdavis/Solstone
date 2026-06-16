@@ -61,46 +61,27 @@ def test_loading_skeletons_present(link_env) -> None:
     assert 'class="surface-loading"' not in body
 
 
-def test_lan_banner_replaces_nudge_and_blocks_pairing(link_env) -> None:
+def test_lan_banner_removed_and_pair_blocking_stays(link_env) -> None:
     env = link_env()
     response = env.client.get("/app/link/")
 
     assert response.status_code == 200
     body = response.get_data(as_text=True)
-    body_text = _normalized_body(body)
 
-    assert 'id="link-lan-banner"' in body
-    assert re.search(r'<section id="link-lan-banner"[^>]{0,200}\bhidden\b', body)
-    assert 'tabindex="-1"' in body
+    assert 'id="link-lan-banner"' not in body
     old_nudge_id = "link-lan-" + "nudge"
     old_nudge_class = ".link-lan-" + "nudge"
     assert f'id="{old_nudge_id}"' not in body
     assert old_nudge_class not in body
-    assert 'aria-live="polite"' in body
-    assert 'id="link-lan-diy"' in body
-
-    for value in (
-        copy.LAN_BANNER_TITLE,
-        copy.LAN_BANNER_BODY,
-        copy.LAN_BANNER_ENABLE_CTA,
-        copy.LAN_BANNER_PASSWORD_INTRO,
-        copy.LAN_BANNER_DIY_LABEL,
-        copy.LAN_BANNER_DIY_BODY,
-    ):
-        assert value in body_text
-    assert "make dev PORT=0.0.0.0:5015" in body_text
-    assert "convey.host" in body_text
+    assert 'id="link-lan-diy"' not in body
 
     assert "function pairBlocked()" in body
     assert "latestStatus?.reachability === 'lan-unreachable'" in body
-    assert "document.querySelectorAll('.link-pair-btn')" in body
     assert "button.disabled = pairBlocked()" in body
     assert "button.setAttribute('aria-disabled', String(pairBlocked()))" in body
     assert "function openPairModal()" in body
-    assert "revealLanBanner();" in body
-    assert "'/app/link/network-access'" in body
-    assert "await refreshStatus()" in body
-    assert "lanDiy.open = true" in body
+    assert "revealLanBanner" not in body
+    assert "'/app/link/network-access'" not in body
 
 
 def test_qr_expired_overlay_renders(link_env) -> None:
@@ -173,6 +154,30 @@ def test_pair_complete_single_refresh(link_env) -> None:
     init_body = body[init_start:init_end]
     assert "pair_complete" in init_body
     assert "refreshDevices" in init_body
+
+
+def test_workspace_uses_server_display_label_for_device_titles(link_env) -> None:
+    env = link_env()
+    response = env.client.get("/app/link/")
+
+    assert response.status_code == 200
+    body = response.get_data(as_text=True)
+
+    assert "label.textContent = device.display_label || '';" in body
+    assert "label.textContent = `${device.display_label || ''}${suffix}`;" in body
+    assert (
+        ".replace('{label}', device.display_label || device.device_label || '')" in body
+    )
+    assert "const previous = device.device_label || '';" in body
+    assert "String(device.device_label || '').toLowerCase().includes(needle)" in body
+
+    commit_start = body.index("async function commit()")
+    commit_end = body.index("function cancel()", commit_start)
+    commit_body = body[commit_start:commit_end]
+    assert "device.device_label = persisted;" in commit_body
+    assert "replaceRenameInput(input, persisted);" in commit_body
+    assert "refreshDevices();" in commit_body
+    assert "renderRecentlyPaired(latestDevices);" not in commit_body
 
 
 def test_pair_modal_error_state_present(link_env) -> None:

@@ -1,8 +1,23 @@
 # observer-over-pl
 
-> Superseded note, link-mess step 2: the role-at-pair-time mechanism described
-> below is historical. Observers now self-register with `POST
-> /app/observer/register`; pairing is role-less except for the `peer` path.
+> **⚠️ SUPERSEDED — historical design doc.** This describes a now-shipped lode
+> whose implementation diverged from the design below. Do not treat the code
+> references here as current. Current reality:
+> - There is **no `ObserverClient` class** (deleted 2026-05-30). PL observer
+>   transport runs through `TunnelClient` (`solstone/think/link/dialer.py`) +
+>   `PlHttpSession` (`solstone/observe/pl_http.py`), constructed inline in
+>   `send_segments_pl` (`solstone/observe/transfer.py`) and the export path
+>   (`solstone/observe/export.py`); client identity/fingerprint comes from
+>   `load_client_identity` (`solstone/think/link/bundle.py`).
+> - The **DL transport is retired**. `:5015` is loopback-only; the legacy
+>   key-in-URL observer ingest routes and the `url_key` auth fallback are gone.
+>   Observer identity resolves PL-fingerprint-first, then `Authorization: Bearer`.
+> - Observers self-register with `POST /app/observer/register`; pairing is
+>   role-less except for the `peer` path (which provisions a journal-content
+>   source). The role-at-pair-time mechanism described below is historical.
+>
+> For current architecture see `solstone/AGENTS.md` and the connection-topology
+> overview; this file is kept only for design provenance.
 
 ## Summary
 
@@ -28,9 +43,8 @@ Rationale: all current imports are named imports from `tests.link.client`:
 `tests/link/test_lan_direct.py:16`, `tests/link/test_integration.py:13`, and
 `tests/link/test_identity_stamp.py:14`. A shim preserves those tests unchanged.
 The lifted module should define `__all__` so the shim's star import includes the
-private test helper `_http_request_bytes`. Keep `Client.pair` on the lifted
-class because existing integration tests call it directly, for example
-`tests/link/test_identity_stamp.py:37` and `tests/link/test_integration.py:42`.
+private test helper `_http_request_bytes`. The lifted class no longer exposes
+the historical plain-HTTP pair helper.
 
 The public exported names are:
 
@@ -90,8 +104,7 @@ Chosen: generate all cryptographic response material first, then perform the
 two durable writes in order: observer record first, authorized client second.
 
 Rationale: `/pair` consumes its nonce before `_complete_pairing()` at
-`solstone/apps/link/routes.py:384-398`; `/by-code` does the same at
-`solstone/apps/link/routes.py:424-437`. `NonceStore.consume()` writes the used
+`solstone/apps/link/routes.py:384-398`. `NonceStore.consume()` writes the used
 state immediately (`solstone/think/link/nonces.py:72-93`), so pairing is
 single-use regardless of downstream failures.
 
@@ -473,7 +486,7 @@ All branches preserve:
 
 State sequence for observer role:
 
-1. Nonce is consumed by `/pair` or `/by-code`.
+1. Nonce is consumed by `/pair`.
 2. CSR is signed and response material is built in memory.
 3. `mint_pl_observer_record()` writes `<fp-prefix-16>.json`.
 4. `AuthorizedClients.add()` writes `journal/link/authorized_clients.json`.

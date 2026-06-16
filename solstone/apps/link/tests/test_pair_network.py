@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -34,9 +36,9 @@ def _start_pair(env) -> dict:
     return response.get_json()
 
 
-def _spl_identity() -> ConveyIdentity:
+def _certless_identity(mode: Literal["pl-via-spl", "pl-direct"]) -> ConveyIdentity:
     return ConveyIdentity(
-        mode="pl-via-spl",
+        mode=mode,
         fingerprint=None,
         device_label=None,
         paired_at=None,
@@ -67,7 +69,8 @@ def _assert_network_result(env, calls, expected_network: str, response) -> None:
     ("environ_overrides", "expected_network"),
     [
         (None, "network"),
-        ({"pl.identity": _spl_identity()}, "anywhere"),
+        ({"pl.identity": _certless_identity("pl-via-spl")}, "anywhere"),
+        ({"pl.identity": _certless_identity("pl-direct")}, "network"),
     ],
 )
 def test_pair_route_network_persists_to_devices_and_pair_complete_event(
@@ -95,39 +98,3 @@ def test_pair_route_network_persists_to_devices_and_pair_complete_event(
     )
 
     _assert_network_result(env, calls, expected_network, response)
-
-
-def test_by_code_route_network_defaults_to_on_network(
-    link_env,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    env = link_env()
-    calls = []
-
-    def mock_emit(*args, **kwargs):
-        calls.append((args, kwargs))
-        return True
-
-    monkeypatch.setattr(link_routes, "emit", mock_emit)
-    started = _start_pair(env)
-
-    response = env.client.post(
-        "/app/link/by-code",
-        json={"code": started["manual_code"], "csr": _make_csr("by-code-network")},
-    )
-
-    _assert_network_result(env, calls, "network", response)
-
-
-def test_by_code_certless_pairing_is_confined(link_env) -> None:
-    env = link_env()
-    started = _start_pair(env)
-
-    # certless_target_allowed confines cert-less pl-via-spl pairing to /pair.
-    response = env.client.post(
-        "/app/link/by-code",
-        json={"code": started["manual_code"], "csr": _make_csr("by-code-confined")},
-        environ_overrides={"pl.identity": _spl_identity()},
-    )
-
-    assert response.status_code == 403

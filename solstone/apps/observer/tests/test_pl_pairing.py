@@ -16,8 +16,9 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from solstone.apps.link import routes as link_routes
-from solstone.apps.observer.utils import load_observer_by_fingerprint
+from solstone.apps.link.tests.conftest import _StubWatcher
 from solstone.convey.secure_listener import ConveyIdentity
+from solstone.think.link.local_endpoints import LocalEndpoint
 from solstone.think.link.nonces import Nonce
 
 
@@ -32,7 +33,6 @@ def pair_env(tmp_path, monkeypatch):
         (config_dir / "journal.json").write_text(
             json.dumps(
                 {
-                    "convey": {"trust_localhost": True},
                     "setup": {"completed_at": 1700000000000},
                 },
                 indent=2,
@@ -44,6 +44,13 @@ def pair_env(tmp_path, monkeypatch):
 
         app = create_app(journal=str(journal))
         client = app.test_client()
+        monkeypatch.setattr(
+            link_routes,
+            "get_interface_watcher",
+            lambda: _StubWatcher(
+                [LocalEndpoint(ip="192.168.1.50", port=7657, scope="lan")]
+            ),
+        )
 
         class Env:
             def __init__(self) -> None:
@@ -108,7 +115,6 @@ def test_role_less_pairing_does_not_mint_observer_record(pair_env) -> None:
 
     response = _pair(env, label="Linked System")
 
-    assert load_observer_by_fingerprint(response["fingerprint"]) is None
     assert _observer_record_paths(env) == []
     entries = link_routes._authorized().snapshot()
     assert len(entries) == 1
@@ -159,7 +165,6 @@ def test_attestation_failure_does_not_write_observer_or_authorized(
         issued_at=now,
         expires_at=now + 300,
         used=True,
-        manual_code=None,
         role="",
     )
 
@@ -168,6 +173,7 @@ def test_attestation_failure_does_not_write_observer_or_authorized(
             consumed,
             _make_csr("attestation"),
             "Observer Laptop",
+            "",
             network="network",
         )
 
@@ -192,7 +198,6 @@ def test_peer_journal_source_rolls_back_when_authorized_add_fails(
         issued_at=now,
         expires_at=now + 300,
         used=True,
-        manual_code=None,
         role="peer",
     )
 
@@ -201,6 +206,7 @@ def test_peer_journal_source_rolls_back_when_authorized_add_fails(
             consumed,
             _make_csr("rollback"),
             "Peer Laptop",
+            "",
             network="network",
         )
 
