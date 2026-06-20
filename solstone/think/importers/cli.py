@@ -401,6 +401,8 @@ def _import_one_from_args(args: argparse.Namespace) -> dict[str, Any] | None:
     global _stage_start_time, _stages_run, _status_thread, _status_running
 
     args.media = os.path.expanduser(args.media)
+    if args.source == "quick":
+        args.source = None
 
     _file_importer = None
     import_source = None
@@ -949,7 +951,9 @@ def _import_one_from_args(args: argparse.Namespace) -> dict[str, Any] | None:
                     )
 
             # Write import manifest for dedup tracking
-            from solstone.think.importers.shared import write_manifest
+            from solstone.think.importers.shared import read_provenance, write_manifest
+
+            _prov = read_provenance(journal_root, args.timestamp)
 
             write_manifest(
                 journal_root,
@@ -958,6 +962,9 @@ def _import_one_from_args(args: argparse.Namespace) -> dict[str, Any] | None:
                 source_hash=_source_hash,
                 entry_count=result.entries_written,
                 files_created=result.files_created,
+                imported_via=_prov["imported_via"],
+                link_id=_prov["link_id"],
+                observer_handle=_prov["observer_handle"],
             )
 
             if args.json:
@@ -1136,6 +1143,7 @@ def _import_one_from_args(args: argparse.Namespace) -> dict[str, Any] | None:
                         f"transcribed successfully ({total_elapsed}s)"
                     )
 
+            _touch_health_marker(day)
             _callosum.emit("supervisor", "drain", day=day)
 
         # Complete processing metadata
@@ -1158,7 +1166,9 @@ def _import_one_from_args(args: argparse.Namespace) -> dict[str, Any] | None:
         # theirs in the file-importer branch above (line ~887); guard prevents a
         # double write since all branches fall through this common tail.
         if _file_importer is None:
-            from solstone.think.importers.shared import write_manifest
+            from solstone.think.importers.shared import read_provenance, write_manifest
+
+            _prov = read_provenance(journal_root, args.timestamp)
 
             write_manifest(
                 journal_root,
@@ -1168,6 +1178,9 @@ def _import_one_from_args(args: argparse.Namespace) -> dict[str, Any] | None:
                 entry_count=len(all_created_files),
                 files_created=all_created_files,
                 days_affected=[day],
+                imported_via=_prov["imported_via"],
+                link_id=_prov["link_id"],
+                observer_handle=_prov["observer_handle"],
             )
 
         imported_path = import_dir / "imported.json"
@@ -1434,7 +1447,12 @@ def main() -> None:
         if args.force:
             extra["force"] = True
         extra["auto"] = args.auto
-        _run_sync(args.sync, dry_run=not args.save, verbose=args.verbose, **extra)
+        _run_sync(
+            args.sync,
+            dry_run=args.dry_run or not args.save,
+            verbose=args.verbose,
+            **extra,
+        )
         return
 
     if not args.media:

@@ -15,21 +15,32 @@ import re
 import threading
 from collections import deque
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
+import httpx
 from flask import Blueprint, jsonify, request
 
+import solstone.convey.chat_stream as chat_stream
 from solstone.apps.chat.copy import (
     CHAT_CLOSER_DIFFERENT_ANGLE_SUFFIX,
     CHAT_CLOSER_LOOP_EXHAUSTED_PREFIX,
+    CHAT_CLOSER_SUPPORT_SEND_FAILED,
     CHAT_CLOSER_TALENT_ERRORED_FORMAT,
     CHAT_CLOSER_TALENT_ERRORED_GENERIC,
+    CHAT_LIVENESS_TASK_FORMAT,
     CHAT_OFFER_SUPPORT_DECLINE,
     CHAT_OFFER_SUPPORT_PROMPT,
+    CHAT_SUPPORT_ATTACH_FILED_FORMAT,
+    CHAT_SUPPORT_DRAFT_CANCELLED,
+    CHAT_SUPPORT_DRAFT_READY,
+    CHAT_SUPPORT_SUBMIT_AMBIGUOUS,
+    CHAT_SUPPORT_SUBMIT_FAILED,
+    CHAT_SUPPORT_SUBMIT_FILED_FORMAT,
 )
+from solstone.apps.support.tools import support_attach, support_create, support_reply
+from solstone.convey.chat_sources import parse_sol_sources
 from solstone.convey.chat_stream import (
     append_chat_event,
     find_unresponded_trigger,
@@ -51,6 +62,7 @@ from solstone.convey.sol_initiated import (
 from solstone.convey.sol_initiated.copy import KIND_SOL_CHAT_REQUEST, SURFACE_CONVEY
 from solstone.convey.utils import error_response
 from solstone.think.callosum import CallosumConnection, callosum_send
+from solstone.think.cogitate_policy import DETERMINISTIC_FAILURE_REASON_CODES
 from solstone.think.cortex_client import CortexSpawnUnavailable
 from solstone.think.utils import get_journal, now_ms
 
@@ -62,7 +74,6 @@ MAX_ACTIVE_TALENTS = 2
 _WATCHDOG_TIMEOUTS = {"chat": 30, "talent": 180}
 _DEFAULT_WATCHDOG_SECONDS = 180
 _RESERVED_USE_ID_CAP = 256
-MAX_ACTIVE_REASON = "max active — waiting for one to finish"
 
 _state_lock = threading.Lock()
 _runtime_lock = threading.Lock()
@@ -109,6 +120,15 @@ class ChatSpawnResult:
     detail: str = ""
 
 
+@dataclass(frozen=True)
+class SupportDraftSubmitResult:
+    ok: bool
+    outcome: str
+    text: str
+    result_fields: dict[str, Any]
+    ticket_id: Any = None
+
+
 @chat_bp.route("", methods=["POST"])
 def post_chat() -> Any:
     """Accept an owner message and schedule the chat singleton."""
@@ -142,7 +162,6 @@ def post_chat() -> Any:
         "type": "owner_message",
         "message": message,
     }
-    outbound_approval = uuid4().hex
 
     with _state_lock:
         if _current_chat_use_id is not None and len(_queued_triggers) >= 10:
@@ -152,23 +171,10 @@ def post_chat() -> Any:
 
     start_info: dict[str, Any] | None = None
     with _state_lock:
-        if _current_chat_use_id is None:
-            logical_use_id = _reserve_use_id_locked()
-            start_info = _activate_current_locked(
-                logical_use_id,
-                trigger,
-                location,
-                outbound_approval=outbound_approval,
-            )
-            queued = False
-            response_use_id = logical_use_id
-        else:
-            response_use_id = _enqueue_trigger_locked(
-                trigger,
-                location,
-                outbound_approval=outbound_approval,
-            )
-            queued = True
+        response_use_id, queued, start_info = _activate_or_enqueue_trigger_locked(
+            trigger,
+            location,
+        )
 
     if start_info is not None:
         spawn_result = _spawn_chat_generate(start_info)
@@ -255,8 +261,139 @@ def decline_offer() -> Any:
         notes="owner declined the support offer",
         requested_target=None,
         requested_task=None,
+        sources=[],
+        answer_state="answered",
     )
     return jsonify(ok=True)
+
+
+@chat_bp.route("/support/draft/confirm", methods=["POST"])
+def confirm_support_draft() -> Any:
+    """Owner confirmed a captured support draft; submit it through support tools."""
+    payload = request.get_json(force=True, silent=True) or {}
+    draft_id = str(payload.get("draft_id") or "").strip()
+    if not draft_id:
+        return error_response(MISSING_REQUIRED_FIELD, detail="draft_id required")
+
+    resolved = _resolve_support_draft(draft_id)
+    if resolved is None:
+        return jsonify(ok=False, outcome="not_found")
+    draft_event, captured_day = resolved
+
+    with chat_stream._CHAT_LOCK:
+        # Lock order: hold only _CHAT_LOCK here; accepted v1 crash-window leaves a claim without TTL.
+        events = chat_stream.read_chat_events(captured_day)
+        if _draft_is_terminal(events, draft_id):
+            return jsonify(ok=False, outcome="already_submitted")
+        latest_draft = _latest_support_draft(captured_day)
+        latest_draft_id = str((latest_draft or {}).get("draft_id") or "")
+        if latest_draft_id != draft_id:
+            return jsonify(ok=False, outcome="superseded")
+        stored_claim = chat_stream.append_chat_events_locked(
+            [
+                (
+                    "support_submit_claim",
+                    {
+                        "ts": _next_chat_ts_for_day(captured_day, events),
+                        "draft_id": draft_id,
+                    },
+                )
+            ],
+            _lock_already_held=True,
+        )
+    chat_stream._finalize_chat_event_appends(stored_claim)
+
+    submit_result = _submit_support_draft(draft_event, draft_id)
+    append_chat_event(
+        "result",
+        ts=_next_chat_ts_for_day(
+            captured_day,
+            chat_stream.read_chat_events(captured_day),
+        ),
+        **submit_result.result_fields,
+    )
+    # Lock order: reserve under _state_lock after _CHAT_LOCK is fully released.
+    with _state_lock:
+        use_id = _reserve_use_id_locked()
+    append_chat_event(
+        "sol_message",
+        ts=_next_chat_ts_for_day(
+            captured_day,
+            chat_stream.read_chat_events(captured_day),
+        ),
+        use_id=use_id,
+        text=submit_result.text,
+        notes=f"support draft {submit_result.outcome}",
+        requested_target=None,
+        requested_task=None,
+        sources=[],
+        answer_state="answered",
+    )
+
+    response: dict[str, Any] = {
+        "ok": submit_result.ok,
+        "outcome": submit_result.outcome,
+    }
+    if submit_result.outcome == "submitted":
+        response["ticket_id"] = submit_result.ticket_id
+    return jsonify(response)
+
+
+@chat_bp.route("/support/draft/cancel", methods=["POST"])
+def cancel_support_draft() -> Any:
+    """Owner cancelled a captured support draft without contacting support."""
+    payload = request.get_json(force=True, silent=True) or {}
+    draft_id = str(payload.get("draft_id") or "").strip()
+    if not draft_id:
+        return error_response(MISSING_REQUIRED_FIELD, detail="draft_id required")
+
+    resolved = _resolve_support_draft(draft_id)
+    if resolved is None:
+        return jsonify(ok=False, outcome="not_found")
+    _draft_event, captured_day = resolved
+
+    # Lock order: reserve under _state_lock before _CHAT_LOCK is acquired.
+    with _state_lock:
+        use_id = _reserve_use_id_locked()
+    with chat_stream._CHAT_LOCK:
+        # Lock order: hold only _CHAT_LOCK here; accepted v1 crash-window leaves a claim without TTL.
+        events = chat_stream.read_chat_events(captured_day)
+        if _draft_is_terminal(events, draft_id):
+            return jsonify(ok=False, outcome="already_submitted")
+        latest_draft = _latest_support_draft(captured_day)
+        latest_draft_id = str((latest_draft or {}).get("draft_id") or "")
+        if latest_draft_id != draft_id:
+            return jsonify(ok=False, outcome="superseded")
+        terminal_ts = _next_chat_ts_for_day(captured_day, events)
+        stored = chat_stream.append_chat_events_locked(
+            [
+                (
+                    "result",
+                    {
+                        "ts": terminal_ts,
+                        "draft_id": draft_id,
+                        "ok": False,
+                        "cancelled": True,
+                    },
+                ),
+                (
+                    "sol_message",
+                    {
+                        "ts": terminal_ts,
+                        "use_id": use_id,
+                        "text": CHAT_SUPPORT_DRAFT_CANCELLED,
+                        "notes": "support draft cancelled",
+                        "requested_target": None,
+                        "requested_task": None,
+                        "sources": [],
+                        "answer_state": "answered",
+                    },
+                ),
+            ],
+            _lock_already_held=True,
+        )
+    chat_stream._finalize_chat_event_appends(stored)
+    return jsonify(ok=True, outcome="cancelled")
 
 
 @chat_bp.route("/talent-log/<use_id>", methods=["GET"])
@@ -409,7 +546,7 @@ def _on_cortex_finish(message: dict[str, Any]) -> None:
     if not use_id:
         return
 
-    next_info: dict[str, Any] | None = None
+    next_actions: list[dict[str, Any] | None] = []
     finish_payload: dict[str, Any] | None = None
     error_payload: dict[str, Any] | None = None
 
@@ -431,7 +568,7 @@ def _on_cortex_finish(message: dict[str, Any]) -> None:
                     _current_chat_state["retry_count"] = (
                         int(_current_chat_state.get("retry_count", 0) or 0) + 1
                     )
-                    next_info = _build_spawn_info_locked(logical_use_id)
+                    next_actions.append(_build_spawn_info_locked(logical_use_id))
                 else:
                     _evict_thinking_locked(use_id)
                     append_chat_event(
@@ -445,7 +582,7 @@ def _on_cortex_finish(message: dict[str, Any]) -> None:
                         "use_id": logical_use_id,
                         "reason": "provider_response_invalid",
                     }
-                    next_info = _clear_current_locked()
+                    next_actions.append(_clear_current_locked())
             else:
                 message_text = parsed["message"] or ""
                 requested_target = (
@@ -459,6 +596,7 @@ def _on_cortex_finish(message: dict[str, Any]) -> None:
                     else None
                 )
                 offer: dict[str, Any] | None = None
+                answer_state = "answered"
                 trigger = _current_chat_state.get("trigger") or {}
                 trigger_type = trigger.get("type")
                 if trigger_type in {"talent_finished", "talent_errored"}:
@@ -470,11 +608,45 @@ def _on_cortex_finish(message: dict[str, Any]) -> None:
                     message_text = _compose_terminal_closer(
                         exit_mode,
                         message_text,
+                        talent_name=trigger.get("name"),
                         talent_errored_reason=trigger.get("reason"),
+                        talent_errored_reason_code=trigger.get("reason_code"),
                         talent_finished_summary=trigger.get("summary"),
+                    )
+                    answer_state = (
+                        "failed" if exit_mode == "talent_errored" else "partial"
                     )
                     requested_target = None
                     requested_task = None
+                draft: dict[str, Any] | None = None
+                if (
+                    trigger_type == "talent_finished"
+                    and trigger.get("name") in OUTBOUND_TALENTS
+                    and _support_draft_state(_today_day()) == "pending"
+                ):
+                    latest_draft = _latest_support_draft(_today_day())
+                    if latest_draft is not None:
+                        message_text = CHAT_SUPPORT_DRAFT_READY
+                        verb = str(latest_draft.get("verb") or "")
+                        if verb == "attach":
+                            source_payload = latest_draft["payload"]
+                            marker_payload = {
+                                "ticket_id": source_payload["ticket_id"],
+                                "filename": source_payload["filename"],
+                                "content_type": source_payload["content_type"],
+                                "byte_size": source_payload["byte_size"],
+                            }
+                        else:
+                            marker_payload = latest_draft.get("payload")
+                        draft = {
+                            "draft_id": latest_draft.get("draft_id"),
+                            "verb": verb,
+                            "payload": marker_payload,
+                            "diagnostics_snapshot": latest_draft.get(
+                                "diagnostics_snapshot"
+                            ),
+                        }
+                        answer_state = "answered"
                 if requested_target in OUTBOUND_TALENTS:
                     consent = _support_consent_state(_today_day())
                     if consent == "none":
@@ -486,6 +658,12 @@ def _on_cortex_finish(message: dict[str, Any]) -> None:
                         requested_target = None
                         requested_task = None
                     # consent in {"pending", "confirmed"}: allow the spawn, no offer.
+                if requested_target:
+                    message_text = _dispatch_ack_text(
+                        requested_target,
+                        requested_task,
+                        message_text,
+                    )
                 thinking = _drain_thinking_locked(use_id, message)
                 sol_message_fields: dict[str, Any] = {
                     "use_id": logical_use_id,
@@ -493,11 +671,18 @@ def _on_cortex_finish(message: dict[str, Any]) -> None:
                     "notes": parsed["notes"],
                     "requested_target": requested_target,
                     "requested_task": requested_task,
+                    "sources": parse_sol_sources(message_text),
+                    "answer_state": answer_state,
                 }
                 if thinking is not None:
                     sol_message_fields["thinking"] = thinking
                 if offer is not None:
                     sol_message_fields["offer"] = offer
+                if draft is not None:
+                    sol_message_fields["draft"] = draft
+                origin = trigger.get("origin")
+                if origin is not None and not requested_target:
+                    sol_message_fields["origin"] = origin
                 append_chat_event(
                     "sol_message",
                     **sol_message_fields,
@@ -505,42 +690,14 @@ def _on_cortex_finish(message: dict[str, Any]) -> None:
                 _current_chat_state["retry_count"] = 0
                 _set_current_raw_use_locked(logical_use_id, None)
                 if requested_target:
-                    active_talent_count = _active_talent_count_for_today_locked()
-                    if active_talent_count >= MAX_ACTIVE_TALENTS:
-                        _current_chat_state["trigger"] = {
-                            "type": "synthetic-max-active",
-                            "reason": MAX_ACTIVE_REASON,
-                        }
-                        synthetic_use_id = _reserve_use_id_locked()
-                        _set_current_raw_use_locked(logical_use_id, synthetic_use_id)
-                        next_info = _build_spawn_info_locked(logical_use_id)
-                    else:
-                        talent_use_id = _reserve_use_id_locked()
-                        _active_talents[talent_use_id] = {
-                            "chat_use_id": logical_use_id,
-                            "target": requested_target,
-                            "task": requested_task,
-                            "location": dict(_current_chat_state["location"]),
-                        }
-                        append_chat_event(
-                            "talent_spawned",
-                            use_id=talent_use_id,
-                            name=requested_target,
-                            task=requested_task,
-                            started_at=int(talent_use_id),
-                        )
-                        next_info = {
-                            "kind": "talent",
-                            "logical_use_id": logical_use_id,
-                            "target": requested_target,
-                            "use_id": talent_use_id,
-                            "task": requested_task,
-                            "context": parsed["talent_request"].get("context") or {},
-                            "location": dict(_current_chat_state["location"]),
-                            "outbound_approval": _current_chat_state.get(
-                                "outbound_approval"
-                            ),
-                        }
+                    dispatch_job = _build_dispatch_job_locked(
+                        logical_use_id,
+                        requested_target,
+                        requested_task,
+                        parsed["talent_request"].get("context") or {},
+                    )
+                    next_actions.append(_clear_current_locked())
+                    next_actions.append(_spawn_or_defer_dispatch_locked(dispatch_job))
                 else:
                     if not message_text:
                         provider = str(message.get("provider") or "")
@@ -562,16 +719,18 @@ def _on_cortex_finish(message: dict[str, Any]) -> None:
                         }
                     if not message_text:
                         _evict_thinking_locked(use_id)
-                    next_info = _clear_current_locked()
+                    next_actions.append(_clear_current_locked())
 
         elif use_id in _active_talents:
             summary = str(message.get("result") or "").strip()
-            next_info = _handle_talent_terminal_locked(
-                use_id,
-                "talent_finished",
-                "summary",
-                summary,
-                terminal_message=message,
+            next_actions.extend(
+                _handle_talent_terminal_locked(
+                    use_id,
+                    "talent_finished",
+                    "summary",
+                    summary,
+                    terminal_message=message,
+                )
             )
         elif _is_superseded_raw_use_id_locked(use_id):
             logger.debug(
@@ -589,7 +748,7 @@ def _on_cortex_finish(message: dict[str, Any]) -> None:
                     "no matching active chat-generate or talent",
                 )
 
-    _run_next_action(next_info)
+    _run_next_actions(next_actions)
     if finish_payload is not None:
         _emit_finish(finish_payload["use_id"], finish_payload["message"])
     if error_payload is not None:
@@ -601,7 +760,7 @@ def _on_cortex_error(message: dict[str, Any]) -> None:
     if not use_id:
         return
 
-    next_info: dict[str, Any] | None = None
+    next_actions: list[dict[str, Any] | None] = []
     error_payload: dict[str, Any] | None = None
 
     with _state_lock:
@@ -627,15 +786,19 @@ def _on_cortex_error(message: dict[str, Any]) -> None:
                 "provider": provider,
                 "detail": detail,
             }
-            next_info = _clear_current_locked()
+            next_actions.append(_clear_current_locked())
         elif use_id in _active_talents:
             reason = str(message.get("error") or "unknown")
+            reason_code = message.get("reason_code") or None
             _evict_thinking_locked(use_id)
-            next_info = _handle_talent_terminal_locked(
-                use_id,
-                "talent_errored",
-                "reason",
-                reason,
+            next_actions.extend(
+                _handle_talent_terminal_locked(
+                    use_id,
+                    "talent_errored",
+                    "reason",
+                    reason,
+                    reason_code=reason_code,
+                )
             )
         elif _is_superseded_raw_use_id_locked(use_id):
             logger.debug(
@@ -653,7 +816,7 @@ def _on_cortex_error(message: dict[str, Any]) -> None:
                     "no matching active chat-generate or talent",
                 )
 
-    _run_next_action(next_info)
+    _run_next_actions(next_actions)
     if error_payload is not None:
         _emit_error(
             error_payload["use_id"],
@@ -669,39 +832,43 @@ def _handle_talent_terminal_locked(
     result_field_name: str,
     result_value: str,
     *,
+    reason_code: str | None = None,
     terminal_message: dict[str, Any] | None = None,
-) -> dict[str, Any] | None:
+) -> list[dict[str, Any] | None]:
     _cancel_watchdog_locked(use_id)
     talent_state = _active_talents.pop(use_id)
     logical_use_id = str(talent_state["chat_use_id"])
     talent_name = str(talent_state["target"])
+    origin = {
+        "logical_use_id": logical_use_id,
+        "ask": str(talent_state.get("ask") or ""),
+    }
     trigger = _talent_terminal_trigger(
         kind,
         use_id,
         talent_name,
         result_field_name,
         result_value,
+        reason_code=reason_code,
+        origin=origin,
     )
     event_fields: dict[str, Any] = {
         "use_id": use_id,
         "name": talent_name,
         result_field_name: result_value,
     }
+    if reason_code:
+        event_fields["reason_code"] = reason_code
     if kind == "talent_finished" and terminal_message is not None:
         thinking = _drain_thinking_locked(use_id, terminal_message)
         if thinking is not None:
             event_fields["thinking"] = thinking
     append_chat_event(kind, **event_fields)
-    if _current_chat_use_id != logical_use_id or _current_chat_state is None:
-        return None
-
-    _current_chat_state["trigger"] = trigger
-    _set_current_raw_use_locked(
-        logical_use_id,
-        _reserve_use_id_locked(),
+    _, _, synth_action = _activate_or_enqueue_trigger_locked(
+        trigger,
+        dict(talent_state["location"]),
     )
-    _current_chat_state["retry_count"] = 0
-    return _build_spawn_info_locked(logical_use_id)
+    return [synth_action, _promote_deferred_spawn_locked(_today_day())]
 
 
 def _run_next_action(action: dict[str, Any] | None) -> None:
@@ -726,6 +893,11 @@ def _run_next_action(action: dict[str, Any] | None) -> None:
                 "talent",
                 str(action["logical_use_id"]),
             )
+
+
+def _run_next_actions(actions: list[dict[str, Any] | None]) -> None:
+    for action in actions:
+        _run_next_action(action)
 
 
 def _spawn_chat_generate(action: dict[str, Any]) -> ChatSpawnResult:
@@ -792,7 +964,6 @@ def _spawn_talent(action: dict[str, Any]) -> bool:
         "path": action["location"]["path"],
         "facet": action["location"]["facet"],
         "chat_parent_use_id": action["logical_use_id"],
-        "outbound_approval": action.get("outbound_approval"),
     }
     spawn_name = DISPATCH_SPAWN_NAMES.get(action["target"], action["target"])
     try:
@@ -812,30 +983,36 @@ def _spawn_talent(action: dict[str, Any]) -> bool:
 
 
 def _handle_talent_spawn_failure(action: dict[str, Any]) -> None:
-    next_info: dict[str, Any] | None = None
+    next_actions: list[dict[str, Any] | None] = []
     with _state_lock:
-        _cancel_watchdog_locked(str(action["use_id"]))
-        _active_talents.pop(str(action["use_id"]), None)
+        use_id = str(action["use_id"])
+        _cancel_watchdog_locked(use_id)
+        talent_state = _active_talents.pop(use_id, None)
+        logical_use_id = str(
+            (talent_state or {}).get("chat_use_id") or action["logical_use_id"]
+        )
+        talent_name = str((talent_state or {}).get("target") or action["target"])
+        ask = str((talent_state or {}).get("ask") or "")
+        location = dict((talent_state or {}).get("location") or action["location"])
         append_chat_event(
             "talent_errored",
-            use_id=action["use_id"],
-            name=action["target"],
+            use_id=use_id,
+            name=talent_name,
             reason="unknown",
         )
-        if _current_chat_use_id == action["logical_use_id"] and _current_chat_state:
-            _current_chat_state["trigger"] = {
-                "type": "talent_errored",
-                "use_id": action["use_id"],
-                "name": action["target"],
-                "reason": "unknown",
-            }
-            _set_current_raw_use_locked(
-                str(action["logical_use_id"]),
-                _reserve_use_id_locked(),
-            )
-            _current_chat_state["retry_count"] = 0
-            next_info = _build_spawn_info_locked(action["logical_use_id"])
-    _run_next_action(next_info)
+        trigger = _talent_terminal_trigger(
+            "talent_errored",
+            use_id,
+            talent_name,
+            "reason",
+            "unknown",
+            origin={"logical_use_id": logical_use_id, "ask": ask},
+        )
+        _, _, synth_action = _activate_or_enqueue_trigger_locked(trigger, location)
+        next_actions.extend(
+            [synth_action, _promote_deferred_spawn_locked(_today_day())]
+        )
+    _run_next_actions(next_actions)
 
 
 def _handle_chat_failure(
@@ -869,6 +1046,7 @@ def _recover_active_talents_locked(day: str) -> None:
     events = read_chat_events(day)
     latest_owner_message: dict[str, Any] | None = None
     latest_sol_message: dict[str, Any] | None = None
+    queued_events: dict[str, dict[str, Any]] = {}
     spawned: dict[str, dict[str, Any]] = {}
     latest_parent_kind: str | None = None
 
@@ -882,37 +1060,69 @@ def _recover_active_talents_locked(day: str) -> None:
             latest_sol_message = event
             latest_parent_kind = "sol_message"
             continue
+        if kind == "talent_queued":
+            use_id = str(event.get("use_id") or "")
+            if use_id:
+                queued_events[use_id] = event
+            continue
         if kind == "talent_spawned":
             use_id = str(event.get("use_id") or "")
             if not use_id:
                 continue
-            if latest_sol_message is None or latest_owner_message is None:
+            queued_event = queued_events.get(use_id)
+            if queued_event is None and (
+                latest_sol_message is None or latest_owner_message is None
+            ):
                 logger.warning(
                     "skipping active-talent recovery for %s: no parent chat turn",
                     use_id,
                 )
                 continue
-            chat_use_id = str(latest_sol_message.get("use_id") or "")
+            chat_use_id = str(
+                (queued_event or {}).get("chat_use_id")
+                or (latest_sol_message or {}).get("use_id")
+                or ""
+            )
             if not chat_use_id:
                 logger.warning(
                     "skipping active-talent recovery for %s: sol_message missing use_id",
                     use_id,
                 )
                 continue
+            location_source = (
+                queued_event.get("location")
+                if queued_event is not None
+                and isinstance(queued_event.get("location"), dict)
+                else None
+            )
             spawned[use_id] = {
                 "chat_use_id": chat_use_id,
                 "target": str(event.get("name") or ""),
                 "task": str(event.get("task") or ""),
                 "trigger": latest_parent_kind or "sol_message",
-                "location": _normalize_location(
-                    latest_owner_message.get("app"),
-                    latest_owner_message.get("path"),
-                    latest_owner_message.get("facet"),
+                "location": (
+                    _normalize_location(
+                        location_source.get("app"),
+                        location_source.get("path"),
+                        location_source.get("facet"),
+                    )
+                    if location_source is not None
+                    else _normalize_location(
+                        (latest_owner_message or {}).get("app"),
+                        (latest_owner_message or {}).get("path"),
+                        (latest_owner_message or {}).get("facet"),
+                    )
+                ),
+                "ask": str(
+                    (queued_event or {}).get("ask")
+                    or (latest_owner_message or {}).get("text")
+                    or ""
                 ),
             }
             continue
         if kind in {"talent_finished", "talent_errored"}:
             spawned.pop(str(event.get("use_id") or ""), None)
+            queued_events.pop(str(event.get("use_id") or ""), None)
 
     for use_id, state in spawned.items():
         # recovery blind spot: pre-crash reservations are not seen here
@@ -931,36 +1141,48 @@ def _recover_active_talents_locked(day: str) -> None:
 
 def _recover_chat_if_needed() -> None:
     day = _today_day()
-    start_info: dict[str, Any] | None = None
+    start_actions: list[dict[str, Any]] = []
 
     with _state_lock:
         _recover_active_talents_locked(day)
+        while _active_talent_count_for_today_locked() < MAX_ACTIVE_TALENTS:
+            promotion = _promote_deferred_spawn_locked(day)
+            if promotion is None:
+                break
+            start_actions.append(promotion)
         if _current_chat_use_id is not None:
-            return
-        unresolved = find_unresponded_trigger(day)
-        if unresolved is None:
-            return
-        location = _location_for_trigger(day, unresolved)
-        logical_use_id = _reserve_use_id_locked()
-        trigger = _trigger_from_stream_event(unresolved)
-        # Recovered triggers are disk-derived and intentionally carry no approval.
-        start_info = _activate_current_locked(logical_use_id, trigger, location)
+            unresolved = None
+        else:
+            unresolved = find_unresponded_trigger(day)
+        if unresolved is not None:
+            location = _location_for_trigger(day, unresolved)
+            trigger = _trigger_from_stream_event(day, unresolved)
+            _, _, start_info = _activate_or_enqueue_trigger_locked(trigger, location)
+            if start_info is not None:
+                start_actions.append(start_info)
 
-    if start_info is not None:
-        spawn_result = _spawn_chat_generate(start_info)
-        if not spawn_result.ok:
-            _handle_chat_failure(
-                start_info["logical_use_id"],
-                spawn_result.reason,
-                detail=spawn_result.detail,
-            )
+    _run_next_actions(start_actions)
+
+
+def _activate_or_enqueue_trigger_locked(
+    trigger: dict[str, Any],
+    location: dict[str, str],
+) -> tuple[str, bool, dict[str, Any] | None]:
+    if _current_chat_use_id is None:
+        logical_use_id = _reserve_use_id_locked()
+        return (
+            logical_use_id,
+            False,
+            _activate_current_locked(logical_use_id, trigger, location),
+        )
+    queued_use_id = _enqueue_trigger_locked(trigger, location)
+    return queued_use_id, True, None
 
 
 def _activate_current_locked(
     logical_use_id: str,
     trigger: dict[str, Any],
     location: dict[str, str],
-    outbound_approval: str | None = None,
 ) -> dict[str, Any]:
     global _current_chat_use_id, _current_chat_state
 
@@ -972,7 +1194,6 @@ def _activate_current_locked(
         "trigger": dict(trigger),
         "location": dict(location),
         "retry_count": 0,
-        "outbound_approval": outbound_approval,
     }
     _set_current_raw_use_locked(logical_use_id, raw_use_id)
     return _build_spawn_info_locked(logical_use_id)
@@ -989,16 +1210,157 @@ def _build_spawn_info_locked(logical_use_id: str) -> dict[str, Any]:
     }
 
 
+def _dispatch_ack_text(target: str, task: str | None, message_text: str) -> str:
+    text = message_text.strip()
+    if text:
+        return text
+    return CHAT_LIVENESS_TASK_FORMAT.format(
+        label=chat_stream._talent_label(target, "running"),
+        task=task or "",
+    ).strip()
+
+
+def _current_trigger_ask_locked() -> str:
+    if _current_chat_state is None:
+        return ""
+    trigger = _current_chat_state.get("trigger") or {}
+    message = trigger.get("message")
+    if message:
+        return str(message)
+    origin = trigger.get("origin")
+    if isinstance(origin, dict) and origin.get("ask"):
+        return str(origin["ask"])
+    return ""
+
+
+def _build_dispatch_job_locked(
+    logical_use_id: str,
+    target: str,
+    task: str | None,
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    assert _current_chat_state is not None
+    return {
+        "use_id": _reserve_use_id_locked(),
+        "chat_use_id": logical_use_id,
+        "target": target,
+        "task": task,
+        "context": dict(context),
+        "location": dict(_current_chat_state["location"]),
+        "ask": _current_trigger_ask_locked(),
+    }
+
+
+def _spawn_or_defer_dispatch_locked(job: dict[str, Any]) -> dict[str, Any] | None:
+    if _active_talent_count_for_today_locked() >= MAX_ACTIVE_TALENTS:
+        append_chat_event(
+            "talent_queued",
+            use_id=job["use_id"],
+            name=job["target"],
+            task=job["task"],
+            queued_at=now_ms(),
+            chat_use_id=job["chat_use_id"],
+            ask=job["ask"],
+            context=dict(job["context"]),
+            location=dict(job["location"]),
+        )
+        return None
+    return _register_talent_spawn_locked(job, started_at=int(str(job["use_id"])))
+
+
+def _register_talent_spawn_locked(
+    job: dict[str, Any],
+    *,
+    started_at: int,
+) -> dict[str, Any]:
+    use_id = str(job["use_id"])
+    chat_use_id = str(job["chat_use_id"])
+    _reserved_use_ids[use_id] = None
+    _reserved_use_ids[chat_use_id] = None
+    _active_talents[use_id] = {
+        "chat_use_id": chat_use_id,
+        "target": str(job["target"]),
+        "task": job["task"],
+        "location": dict(job["location"]),
+        "ask": str(job.get("ask") or ""),
+    }
+    append_chat_event(
+        "talent_spawned",
+        use_id=use_id,
+        name=str(job["target"]),
+        task=job["task"],
+        started_at=started_at,
+    )
+    return {
+        "kind": "talent",
+        "logical_use_id": chat_use_id,
+        "target": str(job["target"]),
+        "use_id": use_id,
+        "task": job["task"],
+        "context": dict(job["context"]),
+        "location": dict(job["location"]),
+    }
+
+
+def _promote_deferred_spawn_locked(day: str) -> dict[str, Any] | None:
+    if _active_talent_count_for_today_locked() >= MAX_ACTIVE_TALENTS:
+        return None
+    event = _oldest_unpromoted_queued_talent(day)
+    if event is None:
+        return None
+    job = {
+        "use_id": str(event["use_id"]),
+        "chat_use_id": str(event["chat_use_id"]),
+        "target": str(event["name"]),
+        "task": event.get("task"),
+        "context": dict(event.get("context") or {}),
+        "location": _normalize_location(
+            (event.get("location") or {}).get("app")
+            if isinstance(event.get("location"), dict)
+            else "",
+            (event.get("location") or {}).get("path")
+            if isinstance(event.get("location"), dict)
+            else "",
+            (event.get("location") or {}).get("facet")
+            if isinstance(event.get("location"), dict)
+            else "",
+        ),
+        "ask": str(event.get("ask") or ""),
+    }
+    return _register_talent_spawn_locked(job, started_at=now_ms())
+
+
+def _oldest_unpromoted_queued_talent(day: str) -> dict[str, Any] | None:
+    queued: dict[str, dict[str, Any]] = {}
+    for event in read_chat_events(day):
+        use_id = str(event.get("use_id") or "")
+        if not use_id:
+            continue
+        kind = event.get("kind")
+        if kind == "talent_queued":
+            queued[use_id] = event
+            continue
+        if kind in {"talent_spawned", "talent_finished", "talent_errored"}:
+            queued.pop(use_id, None)
+    if not queued:
+        return None
+    return sorted(
+        queued.values(),
+        key=lambda event: (
+            int(event.get("queued_at", 0) or 0),
+            str(event.get("use_id") or ""),
+        ),
+    )[0]
+
+
 def _enqueue_trigger_locked(
     trigger: dict[str, Any],
     location: dict[str, str],
-    outbound_approval: str | None = None,
 ) -> str:
     queued = {
         "use_id": _reserve_use_id_locked(),
         "trigger": dict(trigger),
         "location": dict(location),
-        "outbound_approval": outbound_approval,
     }
     _queued_triggers.append(queued)
     append_chat_event("chat_queue_depth", depth=len(_queued_triggers))
@@ -1025,7 +1387,6 @@ def _clear_current_locked() -> dict[str, Any] | None:
         str(queued["use_id"]),
         dict(queued["trigger"]),
         dict(queued["location"]),
-        outbound_approval=queued.get("outbound_approval"),
     )
 
 
@@ -1143,7 +1504,7 @@ def _is_routeable_cortex_use_id_locked(use_id: str) -> bool:
 
 
 def _on_watchdog_timeout(use_id: str, kind: str, logical_use_id: str) -> None:
-    next_info: dict[str, Any] | None = None
+    next_actions: list[dict[str, Any] | None] = []
     should_emit = False
 
     with _state_lock:
@@ -1168,7 +1529,7 @@ def _on_watchdog_timeout(use_id: str, kind: str, logical_use_id: str) -> None:
                 provider="",
                 detail="",
             )
-            next_info = _clear_current_locked()
+            next_actions.append(_clear_current_locked())
             should_emit = True
         elif kind == "talent":
             talent_state = _active_talents.get(use_id)
@@ -1184,33 +1545,21 @@ def _on_watchdog_timeout(use_id: str, kind: str, logical_use_id: str) -> None:
                 logical_use_id,
             )
             _evict_thinking_locked(use_id)
-            append_chat_event(
-                "talent_errored",
-                use_id=use_id,
-                name=str(talent_state["target"]),
-                reason="talent took too long",
+            next_actions.extend(
+                _handle_talent_terminal_locked(
+                    use_id,
+                    "talent_errored",
+                    "reason",
+                    "talent took too long",
+                )
             )
-            _active_talents.pop(use_id, None)
-            append_chat_event(
-                "chat_error",
-                reason="chat_timeout",
-                use_id=logical_use_id,
-                provider="",
-                detail="",
-            )
-            if (
-                _current_chat_use_id == logical_use_id
-                and _current_chat_state is not None
-                and not _current_chat_state.get("raw_use_id")
-            ):
-                next_info = _clear_current_locked()
-            should_emit = True
+            should_emit = False
         else:
             return
 
     if should_emit:
         _emit_error(logical_use_id, "chat_timeout")
-        _run_next_action(next_info)
+    _run_next_actions(next_actions)
 
 
 def _active_talent_count_for_today_locked() -> int:
@@ -1373,7 +1722,9 @@ def _compose_terminal_closer(
     exit_mode: str,
     raw_message: str | None,
     *,
+    talent_name: str | None = None,
     talent_errored_reason: str | None = None,
+    talent_errored_reason_code: str | None = None,
     talent_finished_summary: str | None = None,
 ) -> str:
     if exit_mode == "loop_exhausted":
@@ -1391,6 +1742,11 @@ def _compose_terminal_closer(
         )
 
     if exit_mode == "talent_errored":
+        if (
+            talent_name in OUTBOUND_TALENTS
+            and talent_errored_reason_code in DETERMINISTIC_FAILURE_REASON_CODES
+        ):
+            return CHAT_CLOSER_SUPPORT_SEND_FAILED
         reason = _clean_talent_errored_reason(talent_errored_reason)
         if reason:
             return CHAT_CLOSER_TALENT_ERRORED_FORMAT.format(reason=reason)
@@ -1572,7 +1928,7 @@ def _location_for_trigger(day: str, trigger: dict[str, Any]) -> dict[str, str]:
     return _normalize_location("", "", "")
 
 
-def _trigger_from_stream_event(event: dict[str, Any]) -> dict[str, Any]:
+def _trigger_from_stream_event(day: str, event: dict[str, Any]) -> dict[str, Any]:
     kind = event.get("kind")
     if kind == "owner_message":
         return {"type": "owner_message", "message": event.get("text", "")}
@@ -1593,6 +1949,7 @@ def _trigger_from_stream_event(event: dict[str, Any]) -> dict[str, Any]:
             event.get("name", "exec"),
             "summary",
             event.get("summary", ""),
+            origin=_reconstruct_origin_for_terminal(day, event),
         )
     if kind == "talent_errored":
         return _talent_terminal_trigger(
@@ -1601,8 +1958,58 @@ def _trigger_from_stream_event(event: dict[str, Any]) -> dict[str, Any]:
             event.get("name", "exec"),
             "reason",
             event.get("reason", ""),
+            reason_code=event.get("reason_code"),
+            origin=_reconstruct_origin_for_terminal(day, event),
         )
     raise ValueError(f"unsupported trigger event: {kind}")
+
+
+def _reconstruct_origin_for_terminal(
+    day: str,
+    terminal_event: dict[str, Any],
+) -> dict[str, str] | None:
+    terminal_use_id = str(terminal_event.get("use_id") or "")
+    if not terminal_use_id:
+        return None
+
+    latest_owner_message = ""
+    latest_dispatch_origin: dict[str, str] | None = None
+    origins_by_talent_use_id: dict[str, dict[str, str]] = {}
+
+    for event in read_chat_events(day):
+        kind = event.get("kind")
+        use_id = str(event.get("use_id") or "")
+
+        if event is terminal_event or (
+            kind == terminal_event.get("kind")
+            and use_id == terminal_use_id
+            and event.get("ts") == terminal_event.get("ts")
+        ):
+            return origins_by_talent_use_id.get(terminal_use_id)
+
+        if kind == "owner_message":
+            latest_owner_message = str(event.get("text") or "")
+            continue
+
+        if kind == "sol_message":
+            if event.get("requested_target") is not None:
+                latest_dispatch_origin = {
+                    "logical_use_id": str(event.get("use_id") or ""),
+                    "ask": latest_owner_message,
+                }
+            continue
+
+        if kind == "talent_queued" and use_id:
+            origins_by_talent_use_id[use_id] = {
+                "logical_use_id": str(event.get("chat_use_id") or ""),
+                "ask": str(event.get("ask") or ""),
+            }
+            continue
+
+        if kind == "talent_spawned" and use_id and latest_dispatch_origin is not None:
+            origins_by_talent_use_id.setdefault(use_id, latest_dispatch_origin)
+
+    return origins_by_talent_use_id.get(terminal_use_id)
 
 
 def _talent_terminal_trigger(
@@ -1611,13 +2018,21 @@ def _talent_terminal_trigger(
     name: Any,
     result_field_name: str,
     result_value: Any,
+    *,
+    reason_code: str | None = None,
+    origin: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    return {
+    trigger = {
         "type": kind,
         "use_id": use_id,
         "name": name,
         result_field_name: result_value,
     }
+    if reason_code:
+        trigger["reason_code"] = reason_code
+    if origin is not None:
+        trigger["origin"] = dict(origin)
+    return trigger
 
 
 def _read_talent_log(use_id: str) -> dict[str, Any] | None:
@@ -1726,6 +2141,148 @@ def _today_day() -> str:
     return datetime.now().strftime("%Y%m%d")
 
 
+def _resolve_support_draft(draft_id: str) -> tuple[dict[str, Any], str] | None:
+    today = _today_day()
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+    for day in (today, yesterday):
+        for event in read_chat_events(day):
+            if (
+                event.get("kind") == "support_draft"
+                and str(event.get("draft_id") or "") == draft_id
+            ):
+                return event, str(event["captured_day"])
+    return None
+
+
+def _draft_is_terminal(events: list[dict[str, Any]], draft_id: str) -> bool:
+    for event in events:
+        if event.get("kind") not in {"result", "support_submit_claim"}:
+            continue
+        if str(event.get("draft_id") or "") == draft_id:
+            return True
+    return False
+
+
+def _next_chat_ts_for_day(day: str, events: list[dict[str, Any]]) -> int:
+    day_start = datetime.strptime(day, "%Y%m%d")
+    start_ms = int(day_start.timestamp() * 1000)
+    end_ms = int((day_start + timedelta(days=1)).timestamp() * 1000) - 1
+    max_ts = max(
+        (
+            event["ts"]
+            for event in events
+            if isinstance(event.get("ts"), int)
+            and chat_stream.day_for_ts(int(event["ts"])) == day
+        ),
+        default=start_ms,
+    )
+    return min(max_ts + 1, end_ms)
+
+
+def _submit_support_draft(
+    draft_event: dict[str, Any],
+    draft_id: str,
+) -> SupportDraftSubmitResult:
+    verb = str(draft_event["verb"])
+    payload = draft_event["payload"]
+    diagnostics_snapshot = draft_event["diagnostics_snapshot"]
+
+    try:
+        if verb == "create":
+            result_obj = support_create(**payload)
+            ticket_id = result_obj.get("id")
+        elif verb == "feedback":
+            result_obj = support_create(
+                subject="User feedback",
+                description=payload["body"],
+                product=payload["product"],
+                severity="low",
+                category="feedback",
+                anonymous=payload["anonymous"],
+                auto_context=False,
+                user_context=diagnostics_snapshot,
+            )
+            ticket_id = result_obj.get("id")
+        elif verb == "reply":
+            support_reply(payload["ticket_id"], payload["content"])
+            ticket_id = payload["ticket_id"]
+        elif verb == "attach":
+            import base64
+            import tempfile
+            from pathlib import Path as AttachmentPath
+
+            suffix = AttachmentPath(payload["filename"]).suffix.lower()
+            data = base64.b64decode(payload["content_b64"])
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                tmp.write(data)
+                tmp_path = AttachmentPath(tmp.name)
+            try:
+                support_attach(
+                    payload["ticket_id"],
+                    str(tmp_path),
+                    filename=payload["filename"],
+                )
+            finally:
+                tmp_path.unlink(missing_ok=True)
+            ticket_id = payload["ticket_id"]
+        else:
+            raise ValueError(f"unknown draft verb: {verb}")
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
+        return _support_submit_exception_result(draft_id, exc, ambiguous=False)
+    except httpx.HTTPStatusError as exc:
+        return _support_submit_exception_result(
+            draft_id,
+            exc,
+            ambiguous=exc.response.status_code >= 500,
+        )
+    except RuntimeError as exc:
+        return _support_submit_exception_result(draft_id, exc, ambiguous=False)
+    except (httpx.ReadTimeout, httpx.WriteTimeout) as exc:
+        return _support_submit_exception_result(draft_id, exc, ambiguous=True)
+    except httpx.HTTPError as exc:
+        return _support_submit_exception_result(draft_id, exc, ambiguous=True)
+
+    return SupportDraftSubmitResult(
+        ok=True,
+        outcome="submitted",
+        text=(
+            CHAT_SUPPORT_ATTACH_FILED_FORMAT.format(ticket_id=ticket_id)
+            if verb == "attach"
+            else CHAT_SUPPORT_SUBMIT_FILED_FORMAT.format(ticket_id=ticket_id)
+        ),
+        ticket_id=ticket_id,
+        result_fields={"draft_id": draft_id, "ok": True, "ticket_id": ticket_id},
+    )
+
+
+def _support_submit_exception_result(
+    draft_id: str,
+    exc: BaseException,
+    *,
+    ambiguous: bool,
+) -> SupportDraftSubmitResult:
+    outcome = "ambiguous" if ambiguous else "failed"
+    logger.warning(
+        "Support draft submit %s with %s",
+        outcome,
+        exc.__class__.__name__,
+        exc_info=True,
+    )
+    fields: dict[str, Any] = {
+        "draft_id": draft_id,
+        "ok": False,
+        "error": exc.__class__.__name__,
+    }
+    if ambiguous:
+        fields["ambiguous"] = True
+    return SupportDraftSubmitResult(
+        ok=False,
+        outcome=outcome,
+        text=CHAT_SUPPORT_SUBMIT_AMBIGUOUS if ambiguous else CHAT_SUPPORT_SUBMIT_FAILED,
+        result_fields=fields,
+    )
+
+
 def _support_consent_state(day: str) -> str:
     """Deterministic, day-scoped support-consent state for the conversation.
 
@@ -1751,3 +2308,41 @@ def _support_consent_state(day: str) -> str:
     }:
         return "pending"
     return "none"
+
+
+def _support_draft_state(day: str) -> str:
+    """Deterministic, day-scoped support-draft state for the conversation.
+
+    Mirrors _support_consent_state. Walks history tracking the LATEST support_draft.
+    Returns:
+      "submitted" — a `result` event back-references the latest draft's draft_id
+                    (forward seam; no `result` writer exists yet, so this is
+                    present-but-inert today — the next lode adds only that writer).
+      "pending"   — a support_draft exists and is not yet submitted.
+      "none"      — no support_draft.
+    Precedence: submitted, then pending, else none.
+    """
+    latest_draft_id: str | None = None
+    result_draft_ids: set[str] = set()
+    for event in read_chat_events(day):
+        kind = event.get("kind")
+        if kind == "support_draft":
+            latest_draft_id = str(event.get("draft_id") or "")
+        elif kind == "result":
+            result_draft_id = str(event.get("draft_id") or "")
+            if result_draft_id:
+                result_draft_ids.add(result_draft_id)
+    if latest_draft_id and latest_draft_id in result_draft_ids:
+        return "submitted"
+    if latest_draft_id:
+        return "pending"
+    return "none"
+
+
+def _latest_support_draft(day: str) -> dict[str, Any] | None:
+    """Return the most recent support_draft event for ``day``, or None."""
+    latest: dict[str, Any] | None = None
+    for event in read_chat_events(day):
+        if event.get("kind") == "support_draft":
+            latest = event
+    return latest

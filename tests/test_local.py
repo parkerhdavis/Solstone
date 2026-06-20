@@ -280,7 +280,7 @@ def test_bench_run_once_emits_image_url(monkeypatch):
 
 
 def test_openhands_local_llm_kwargs(monkeypatch):
-    from solstone.think.providers import openhands
+    from solstone.think.providers import local_server, openhands
 
     captured = {}
     served_model_id = (
@@ -310,6 +310,7 @@ def test_openhands_local_llm_kwargs(monkeypatch):
         "native_tool_calling": False,
         "timeout": openhands.LLM_TIMEOUT_S,
         "num_retries": openhands.LLM_NUM_RETRIES,
+        "max_input_tokens": local_server.LOCAL_SERVER_CONTEXT_TOKENS,
         "input_cost_per_token": 0,
         "output_cost_per_token": 0,
         "litellm_extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
@@ -568,6 +569,19 @@ def test_openhands_local_byo_llm_kwargs(monkeypatch, credential, expected_key):
         "output_cost_per_token": 0,
         "litellm_extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
     }
+    assert "max_input_tokens" not in captured
+
+
+def test_local_context_window_single_source():
+    import inspect
+
+    from solstone.think import supervisor
+    from solstone.think.providers import local_server
+
+    assert local_server.LOCAL_SERVER_CONTEXT_TOKENS == 16384
+    src = inspect.getsource(supervisor.start_local_server)
+    assert "local_server.LOCAL_SERVER_CONTEXT_TOKENS" in src
+    assert '"16384"' not in src
 
 
 def test_llama_server_pins_are_real_b9291_digests():

@@ -4,10 +4,52 @@ All notable changes to solstone (the Python package) will be documented in this 
 
 Format adapted from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), aligned with `cmo/brand/changelog-voice.md`.
 
-## [0.6.5] - 2026-06-16
+## [0.6.9] - 2026-06-19
+
+### Fixed
+- the error view on your health page now opens the way you'd expect. the "errors today" count jumps you to recent errors every time you click it, not just the first time, and each error row opens in place to show the full plain-language message (and the technical detail when there is one). before, some rows wouldn't open at all. the "api keys" link in settings also now jumps you to the right section on a repeat click.
+
+## [0.6.8] - 2026-06-18
+
+### Added
+- you can now import a single image, and sol describes what's in it and adds the entry to your journal. drop in a png, jpeg, webp, gif, or tiff from the web interface or the command line, the same way you import a recording.
 
 ### Changed
+- chatting with sol no longer makes you wait. when sol kicks off a longer piece of work from a chat, it tells you what it's doing right away and keeps the conversation open, then folds the answer back in once it's ready. the chat shows how many jobs sol has running so you can keep going in the meantime.
+
+### Fixed
+- settings now save again. for the past several days, changes you made in settings would quietly revert on reload, with no save button and no error to tell you why. this resolves the underlying cause, so every section saves and sticks.
+- finishing the private link setup no longer looks unfinished. when you turned link on and paired a device, a leftover "continue to approve" prompt could linger next to the success message, and the pairing screen could show the wrong text and a code that didn't refresh. the screen now reflects what's actually happening.
+- on linux, installing solstone with gpu support no longer fails partway through. some installs pulled a graphics runtime that didn't match the rest of the install, so transcription couldn't load. the install now keeps the pieces in step.
+- previewing an import no longer imports it for real. on the command-line importer, asking for a preview while also passing the save flag would import the media live instead of just showing you what it found. a preview now always wins, so you can look before you commit.
+
+## [0.6.7] - 2026-06-18
+
+### Changed
+- stretches where nothing on your screen changes (a long overnight, a static window left open) now fold into a single continuation entry in your journal instead of many near-identical ones. sol skips re-describing what hasn't moved, so those stretches process faster and your journal reads cleaner.
+
+### Fixed
+- imported recordings now get their own activity record. before, an imported meeting that ran as one continuous stretch could finish without an activity record for it; now it gets one like everything else.
+- scheduled tasks that had quietly stopped running now run again on their own, with no action needed from you. an earlier change to how commands are named had left some saved schedules pointing at a form that no longer worked, and this repairs them.
+- a settings change you made could be lost if another change landed at the same moment. settings now save one at a time, so concurrent edits all stick.
+- your weekly reflection now completes and writes its summary reliably. before, it could spend its whole time budget looking in the wrong place and finish with nothing; it now reads from the right source and lands every time.
+
+## [0.6.5] - 2026-06-17
+
+### Added
+- you can mark a single day to be processed again with `journal reprocess DAY --mark-updated`. it re-queues that day even if it already finished, so you can pick up a day that needs another pass without re-running everything.
+
+### Changed
+- when sol files something with solstone support on your behalf, you now see and confirm the exact message before it leaves your machine. sol drafts the report, your journal shows you the full contents plus the diagnostic details that would be attached, and nothing is sent until you press send. sol has no path to send on its own; pressing send is the only way anything reaches support, and you can cancel instead and nothing leaves.
 - the local web interface no longer has its own password, login page, session cookie, or localhost-trust switch. once setup is complete, the local interface serves directly on the journal machine; linked devices continue to use their paired-device identity through link.
+- the connection-and-health indicator now shows the sol ring, with the ring itself carrying live status: whether your journal is reachable, whether observing is healthy, and whether a quiet notification is waiting. it updates continuously while the page is open.
+
+### Fixed
+- closed a window during device pairing where someone on your local network could have placed themselves in the middle of the exchange. when a new device pairs with your journal over the local network, it now cryptographically verifies it is talking to your real journal and refuses to continue if anything doesn't match. if you pair devices on shared or untrusted wi-fi, please update.
+- pairing a phone or tablet to your journal now works when the journal's machine has more than one network connection. before, the pairing code could advertise an address your other device couldn't actually reach, so the pairing would fail; it now offers every local address so your device can find one that works.
+- your journal keeps making progress even when one piece of work stalls. before, a single stuck step (transcribing a clip, thinking through a day, or a model call that never returned) could quietly freeze that part of your journal for hours or days while everything behind it waited; now every piece of work has a time limit, a stall surfaces instead of hiding, and the rest keeps flowing. re-processing a day that had no new activity also no longer loops on itself.
+- setting up a hosted service (private link or scout) from the web interface now works when your journal runs on a remote or headless machine. before, the approval step could stall at "setting up…" and never show you the link to continue; it now always gives you a one-tap link to approve.
+- installing from source on an aarch64 nvidia machine no longer fails partway through, and transcription works there. if you ran into this, this resolves it.
 
 ## [0.6.4] - 2026-06-15
 

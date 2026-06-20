@@ -17,7 +17,7 @@ import logging
 import sys
 import threading
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from solstone.think.activities import (
@@ -28,6 +28,7 @@ from solstone.think.activities import (
 )
 from solstone.think.activity_state_machine import ActivityStateMachine
 from solstone.think.callosum import CallosumConnection
+from solstone.think.change_detection import detect_segment_change, resolve_predecessor
 from solstone.think.cluster import cluster_segments
 from solstone.think.cogitate_policy import DETERMINISTIC_FAILURE_THRESHOLD
 from solstone.think.cortex_client import (
@@ -53,7 +54,12 @@ from solstone.think.pipeline_health import (
     read_segment_progress,
 )
 from solstone.think.runner import run_task
-from solstone.think.sense_splitter import write_idle_stubs, write_sense_outputs
+from solstone.think.sense_splitter import (
+    write_change_detection,
+    write_idle_stubs,
+    write_sense_outputs,
+)
+from solstone.think.streams import is_import_stream
 from solstone.think.talent import get_output_path, get_talent_configs
 from solstone.think.talent_provenance import (
     compute_activity_input_hash,
@@ -311,6 +317,116 @@ def _persist_and_maybe_run_activity_prompts(
                 activity_id_str,
                 input_hash,
             )
+
+
+def _run_activity_state_tail(
+    state_machine: ActivityStateMachine | None,
+    sense_json: dict,
+    segment: str,
+    day: str,
+    target_schedule: str,
+    *,
+    refresh: bool,
+    verbose: bool,
+    max_concurrency: int,
+    skip_activity_prompts: bool,
+) -> None:
+    """Advance the activity state machine for a processed segment and persist.
+
+    Shared by the active dispatch path and the redundant short-circuit so both
+    produce a byte-identical activity change-set and state snapshot for the same
+    ``sense_json`` (the state machine reads only ``sense_json``, never the
+    per-segment write-up talents' outputs).
+    """
+    if state_machine is None:
+        return
+    routing_day = state_machine.last_segment_day or day
+    changes = state_machine.update(sense_json, segment, day)
+    # Persist completed activity records before running activity agents
+    ended_triples = [
+        (c["id"], c["facet"], c.get("_change"))
+        for c in changes
+        if c.get("state") == "ended"
+    ]
+    completed_lookup = {}
+    for rec in state_machine.get_completed_activities():
+        completed_lookup.setdefault(rec["id"], rec)
+    if state_machine.journal_root is not None:
+        try:
+            snapshot = {
+                "last_segment_key": state_machine.last_segment_key,
+                "last_segment_day": state_machine.last_segment_day,
+                "active": {
+                    facet: {k: v for k, v in entry.items() if k != "_change"}
+                    for facet, entry in state_machine.state.items()
+                },
+            }
+            atomic_replace(
+                state_machine.journal_root / "awareness" / "activity_state.json",
+                json.dumps(snapshot),
+            )
+        except Exception:
+            logging.debug("Failed to write activity state snapshot", exc_info=True)
+    _persist_and_maybe_run_activity_prompts(
+        routing_day=routing_day,
+        log_day=day,
+        segment=segment,
+        target_schedule=target_schedule,
+        ended_triples=ended_triples,
+        completed_lookup=completed_lookup,
+        refresh=refresh,
+        verbose=verbose,
+        max_concurrency=max_concurrency,
+        skip_activity_prompts=skip_activity_prompts,
+    )
+
+
+def _flush_batch_state_machines(
+    batch_state_machines: dict,
+    day: str,
+    *,
+    refresh: bool,
+    verbose: bool,
+    max_concurrency: int,
+    skip_activity_prompts: bool,
+) -> None:
+    """Close dangling-active activities left when the segment batch ends.
+
+    Finality guard: import/finite streams are always safe to flush (a
+    recording's segments all exist at import time); live/observer streams are
+    flushed only when the day is capture-final (day strictly before today), so
+    an ongoing activity on today is never truncated.
+    """
+    current_day = datetime.now().strftime("%Y%m%d")
+    for stream, sm in batch_state_machines.items():
+        if sm.last_segment_key is None:
+            continue
+        stream_is_import = bool(stream) and is_import_stream(stream)
+        if not (stream_is_import or day < current_day):
+            continue
+        changes = sm.close_active(sm.last_segment_key)
+        ended_triples = [
+            (c["id"], c["facet"], c.get("_change"))
+            for c in changes
+            if c.get("state") == "ended"
+        ]
+        if not ended_triples:
+            continue
+        completed_lookup: dict = {}
+        for rec in sm.get_completed_activities():
+            completed_lookup.setdefault(rec["id"], rec)
+        _persist_and_maybe_run_activity_prompts(
+            routing_day=sm.last_segment_day or day,
+            log_day=day,
+            segment=sm.last_segment_key,
+            target_schedule="segment",
+            ended_triples=ended_triples,
+            completed_lookup=completed_lookup,
+            refresh=refresh,
+            verbose=verbose,
+            max_concurrency=max_concurrency,
+            skip_activity_prompts=skip_activity_prompts,
+        )
 
 
 def _log_skip(name: str, reason: str, detail: str, **extra) -> None:
@@ -691,6 +807,7 @@ def run_segment_sense(
     skip_activity_prompts: bool = False,
     skip_talents: frozenset[str] = frozenset(),
     live: bool = False,
+    predecessor: dict | None = None,
 ) -> tuple[int, int, list[str]]:
     """Run Sense-first linear orchestrator for a single segment.
 
@@ -910,6 +1027,25 @@ def run_segment_sense(
         recommend=sense_json.get("recommend") or {},
         **({"stream": stream} if stream else {}),
     )
+    change_result = detect_segment_change(
+        day,
+        stream,
+        segment,
+        seg_dir,
+        predecessor=predecessor,
+        timestamp=datetime.now(tz=timezone.utc).isoformat(),
+    )
+    write_change_detection(seg_dir, change_result)
+    _jsonl_log(
+        "sense.change_detect",
+        mode=target_schedule,
+        day=day,
+        segment=segment,
+        change_class=change_result["change_class"],
+        changed_sensors=change_result["changed_sensors"],
+        predecessor=change_result["predecessor"],
+        **({"stream": stream} if stream else {}),
+    )
 
     if density == "idle" and not refresh:
         write_idle_stubs(seg_dir)
@@ -967,6 +1103,51 @@ def run_segment_sense(
                         "Failed to write activity state snapshot", exc_info=True
                     )
 
+        duration_ms = int((time.time() - start_time) * 1000)
+        emit(
+            "completed",
+            mode=target_schedule,
+            day=day,
+            segment=segment,
+            success=total_success,
+            failed=total_failed,
+            failed_names=all_failed_names,
+            duration_ms=duration_ms,
+        )
+        return (total_success, total_failed, all_failed_names)
+
+    if change_result["change_class"] == "redundant" and not refresh:
+        from solstone.apps.timeline.talent.segment_summary import (
+            write_continuation_summary,
+        )
+
+        predecessor_segment = change_result["predecessor"]["segment"]
+        write_continuation_summary(seg_dir, predecessor_segment)
+        logging.info(
+            "Segment %s is redundant (continues %s), skipping write-up talents",
+            segment,
+            predecessor_segment,
+        )
+        _log_skip(
+            "*",
+            "change_redundant",
+            f"Segment {segment} unchanged vs {predecessor_segment}, "
+            "skipping write-up talents",
+            mode=target_schedule,
+            day=day,
+            segment=segment,
+        )
+        _run_activity_state_tail(
+            state_machine,
+            sense_json,
+            segment,
+            day,
+            target_schedule,
+            refresh=refresh,
+            verbose=verbose,
+            max_concurrency=max_concurrency,
+            skip_activity_prompts=skip_activity_prompts,
+        )
         duration_ms = int((time.time() - start_time) * 1000)
         emit(
             "completed",
@@ -1150,46 +1331,17 @@ def run_segment_sense(
             current_agents=[],
         )
 
-    if state_machine is not None:
-        routing_day = state_machine.last_segment_day or day
-        changes = state_machine.update(sense_json, segment, day)
-        # Persist completed activity records before running activity agents
-        ended_triples = [
-            (c["id"], c["facet"], c.get("_change"))
-            for c in changes
-            if c.get("state") == "ended"
-        ]
-        completed_lookup = {}
-        for rec in state_machine.get_completed_activities():
-            completed_lookup.setdefault(rec["id"], rec)
-        if state_machine.journal_root is not None:
-            try:
-                snapshot = {
-                    "last_segment_key": state_machine.last_segment_key,
-                    "last_segment_day": state_machine.last_segment_day,
-                    "active": {
-                        facet: {k: v for k, v in entry.items() if k != "_change"}
-                        for facet, entry in state_machine.state.items()
-                    },
-                }
-                atomic_replace(
-                    state_machine.journal_root / "awareness" / "activity_state.json",
-                    json.dumps(snapshot),
-                )
-            except Exception:
-                logging.debug("Failed to write activity state snapshot", exc_info=True)
-        _persist_and_maybe_run_activity_prompts(
-            routing_day=routing_day,
-            log_day=day,
-            segment=segment,
-            target_schedule=target_schedule,
-            ended_triples=ended_triples,
-            completed_lookup=completed_lookup,
-            refresh=refresh,
-            verbose=verbose,
-            max_concurrency=max_concurrency,
-            skip_activity_prompts=skip_activity_prompts,
-        )
+    _run_activity_state_tail(
+        state_machine,
+        sense_json,
+        segment,
+        day,
+        target_schedule,
+        refresh=refresh,
+        verbose=verbose,
+        max_concurrency=max_concurrency,
+        skip_activity_prompts=skip_activity_prompts,
+    )
 
     duration_ms = int((time.time() - start_time) * 1000)
     emit(
@@ -3415,11 +3567,15 @@ def main() -> None:
             batch_start = time.time()
             batch_success = 0
             batch_failed = 0
-            batch_state_machine = ActivityStateMachine()
+            batch_state_machines: dict = {}
 
             for i, seg in enumerate(segments, 1):
                 seg_key = seg["key"]
                 seg_stream = seg.get("stream")
+                sm = batch_state_machines.get(seg_stream)
+                if sm is None:
+                    sm = ActivityStateMachine()
+                    batch_state_machines[seg_stream] = sm
                 logging.info(
                     f"Processing segment {i}/{total}: {seg_key} ({seg['start']}-{seg['end']})"
                 )
@@ -3432,18 +3588,12 @@ def main() -> None:
                         max_concurrency=args.jobs,
                         stream=seg_stream,
                         timeout=None if args.no_timeout else 610,
-                        state_machine=batch_state_machine,
+                        state_machine=sm,
                         skip_activity_prompts=args.no_activity_prompts,
                         skip_talents=skip_talents,
                         live=False,
+                        predecessor=resolve_predecessor(day, seg_stream, seg_key),
                     )
-                    # Touch stream.updated marker after each segment
-                    try:
-                        health_dir = day_path(day) / "health"
-                        health_dir.mkdir(parents=True, exist_ok=True)
-                        (health_dir / "stream.updated").touch()
-                    except Exception:
-                        pass
                     batch_success += success
                     batch_failed += failed
                     _update_status(segments_completed=i, segments_total=total)
@@ -3451,6 +3601,15 @@ def main() -> None:
                     logging.exception(f"Segment {seg_key} failed with exception")
                     batch_failed += 1
                     _update_status(segments_completed=i, segments_total=total)
+
+            _flush_batch_state_machines(
+                batch_state_machines,
+                day,
+                refresh=args.refresh,
+                verbose=args.verbose,
+                max_concurrency=args.jobs,
+                skip_activity_prompts=args.no_activity_prompts,
+            )
 
             duration_ms = int((time.time() - batch_start) * 1000)
             logging.info(
@@ -3600,6 +3759,7 @@ def main() -> None:
                 skip_activity_prompts=args.no_activity_prompts,
                 skip_talents=skip_talents,
                 live=args.live,
+                predecessor=resolve_predecessor(day, resolved_stream, args.segment),
             )
         else:
             success_count, fail_count, failed_names, applicable_units = (
@@ -3613,15 +3773,6 @@ def main() -> None:
             )
         _run_result["success"] = success_count
         _run_result["failed"] = fail_count
-
-        # Touch stream.updated marker after segment processing
-        if args.segment:
-            try:
-                health_dir = day_path(day) / "health"
-                health_dir.mkdir(parents=True, exist_ok=True)
-                (health_dir / "stream.updated").touch()
-            except Exception:
-                pass
 
         # POST-PHASE: Final indexing and stats (daily only)
         if not args.segment:

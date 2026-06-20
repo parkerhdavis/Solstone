@@ -35,6 +35,7 @@ from solstone.convey.reasons import (
     AUTH_REQUIRED,
     FEATURE_UNAVAILABLE,
     FILE_READ_FAILED,
+    INGEST_CONTRACT_INVALID,
     INGEST_NO_FILES,
     INGEST_STORAGE_FAILED,
     INVALID_DAY,
@@ -54,12 +55,18 @@ from solstone.observe.utils import (
     compute_file_sha256,
     find_available_segment,
 )
+from solstone.think.contract.journal import (
+    ContractIssue,
+    build_bundle,
+    schema_for_filename,
+    validate_contract_file,
+)
 from solstone.think.link.auth import AuthorizedClients
 from solstone.think.link.paths import authorized_clients_path
 from solstone.think.streams import stream_name, update_stream, write_segment_stream
 from solstone.think.utils import day_path, iter_segments, now_ms, segment_path
 
-from .share_delete import DELETABLE_SOURCE_STREAMS, SHARE_STREAM, delete_source_stream
+from .share_delete import DELETABLE_SOURCE_STREAMS, delete_source_stream
 from .utils import (
     ObserverRegistry,
     append_history_record,
@@ -110,6 +117,64 @@ def _error_body(reason: Reason, *, detail: str | None = None) -> dict[str, str]:
 
 def _sse_error_event(reason: Reason, *, detail: str) -> str:
     return f"event: error\ndata: {json.dumps(_error_body(reason, detail=detail))}\n\n"
+
+
+def _validate_ingest_contract(
+    *,
+    observer: dict,
+    key_prefix: str,
+    segment: str,
+    day: str,
+    stream: str,
+    file_data: list[tuple[str, str, bytes, str]],
+    meta: dict[str, Any] | None = None,
+) -> list[ContractIssue]:
+    bundle = build_bundle()
+    schema_entries = bundle.get("schemas", {})
+    ingest_entry = (
+        schema_entries.get("observer-ingest-envelope", {})
+        if isinstance(schema_entries, dict)
+        else {}
+    )
+    ingest_schema = (
+        ingest_entry.get("schema") if isinstance(ingest_entry, dict) else None
+    )
+    issues: list[ContractIssue] = []
+    if isinstance(ingest_schema, dict):
+        envelope = {
+            "day": day,
+            "segment": segment,
+            "stream": stream,
+            "observer": str(observer.get("name") or key_prefix),
+            "files": [
+                {
+                    "submitted": submitted,
+                    "written": written,
+                    "size": len(content),
+                    "sha256": sha256,
+                }
+                for submitted, written, content, sha256 in file_data
+            ],
+        }
+        if isinstance(meta, dict):
+            for key in ("host", "platform"):
+                if isinstance(meta.get(key), str):
+                    envelope[key] = meta[key]
+            envelope["meta"] = meta
+        issues.extend(
+            validate_contract_file(
+                "observer-ingest-envelope",
+                json.dumps(envelope).encode("utf-8"),
+                ingest_schema,
+            )
+        )
+
+    for _submitted, simple_filename, content, _sha256 in file_data:
+        file_schema = schema_for_filename(simple_filename, bundle)
+        if file_schema is None:
+            continue
+        issues.extend(validate_contract_file(simple_filename, content, file_schema))
+    return issues
 
 
 def _generate_key() -> str:
@@ -496,12 +561,6 @@ def api_delete(key_prefix: str) -> Any:
     return jsonify({"status": "ok"})
 
 
-@observer_bp.route("/api/delete-source", methods=["POST"])
-def api_delete_source() -> Any:
-    """Delete everything the iOS Share Sheet contributed."""
-    return jsonify(delete_source_stream(SHARE_STREAM))
-
-
 @observer_bp.route("/api/<key_prefix>/key")
 def api_get_key(key_prefix: str) -> Any:
     """Get full key and ingest URL for an observer."""
@@ -668,6 +727,7 @@ def _process_ingest_files(
     uploaded_files,
     *,
     source: str | None = None,
+    meta: dict[str, Any] | None = None,
 ) -> tuple[dict, int]:
     """Shared ingest pipeline: read/hash files, dedup, deconflict, save, record history, update stats.
 
@@ -687,6 +747,8 @@ def _process_ingest_files(
         List of Flask FileStorage objects from request.files.getlist("files").
     source : str or None
         If provided, added as "source" field to history record (e.g., "transfer").
+    meta : dict or None
+        Client metadata used to validate the ingest envelope.
 
     Returns
     -------
@@ -718,6 +780,32 @@ def _process_ingest_files(
 
     if not file_data:
         return _error_body(INGEST_NO_FILES, detail="No valid files uploaded"), 400
+
+    contract_issues = _validate_ingest_contract(
+        observer=observer,
+        key_prefix=key_prefix,
+        segment=segment,
+        day=day,
+        stream=stream,
+        file_data=file_data,
+        meta=meta,
+    )
+    if contract_issues:
+        day_dir = day_path(day)
+        day_dir.mkdir(parents=True, exist_ok=True)
+        failed_dir = _save_to_failed(day_dir, file_data, segment)
+        return (
+            {
+                "status": "failed",
+                **_error_body(
+                    INGEST_CONTRACT_INVALID,
+                    detail="Uploaded file did not match the journal contract",
+                ),
+                "failed_path": str(failed_dir.relative_to(day_dir.parent)),
+                "invalid_files": [str(issue) for issue in contract_issues],
+            },
+            INGEST_CONTRACT_INVALID.status,
+        )
 
     # Check for duplicate submission by SHA256
     incoming_sha256s = {fd[3] for fd in file_data}
@@ -958,7 +1046,7 @@ def ingest_upload() -> Any:
             stream = stream_name(observer=observer_name)
 
     body, status = _process_ingest_files(
-        observer, key_prefix, segment, day, stream, files
+        observer, key_prefix, segment, day, stream, files, meta=meta
     )
     if status != 200 or body.get("status") == "duplicate":
         return jsonify(body), status
