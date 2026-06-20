@@ -81,7 +81,13 @@ def test_chat_bar_terminal_overwrites_liveness_without_retry_button(chat_html):
         in chat_html
     )
     assert "clearPendingLivenessStatus();" in chat_html
-    assert "setStatus(msg.text || '', msg.notes || msg.text || '');" in chat_html
+    assert "setStatus(msg.text || '', statusTitleFor(msg));" in chat_html
+    assert "function statusTitleFor(msg)" in chat_html
+    status_title_block = chat_html.split("function statusTitleFor(msg)", 1)[1].split(
+        "function renderJobsIndicator()", 1
+    )[0]
+    assert "window.solChatCopy.CHAT_DISPATCH_ORIGIN_PREFIX" in status_title_block
+    assert "msg.notes || msg.text || ''" in status_title_block
     assert (
         "setStatus(renderedReason.message, renderedReason.message, renderedReason.action);"
         in chat_html
@@ -96,6 +102,35 @@ def test_chat_bar_terminal_overwrites_liveness_without_retry_button(chat_html):
     )
     retry_class = "-".join(("chat", "error", "retry"))
     assert retry_class not in app_template
+
+
+def test_support_draft_card_structure_and_result_helper(chat_html):
+    assert (
+        '<div id="chatBarResult" class="chat-bar-result" aria-live="polite" hidden>'
+        in chat_html
+    )
+    assert 'class="chat-bar-draft-card" role="group" aria-label=""' in chat_html
+    assert (
+        "draftCardEl.setAttribute('aria-label', 'support draft for review')"
+        in chat_html
+    )
+    assert "chat-bar-draft-route-from" in chat_html
+    assert "chat-bar-draft-route-to" in chat_html
+    assert "window.solChatCopy.CHAT_CAPACITY_SUPPORT_ROUTE_FROM" in chat_html
+    assert "window.solChatCopy.CHAT_CAPACITY_SUPPORT_ROUTE_TO" in chat_html
+    assert "chat-bar-draft-lead" not in chat_html
+    assert "function showSupportDraft(draft)" in chat_html
+    assert "showSupportDraft(msg.draft);" in chat_html
+
+    assert "function renderSupportOutcome(msg)" in chat_html
+    assert '"support draft submitted"' in chat_html
+    assert '"support draft failed"' in chat_html
+    assert '"support draft ambiguous"' in chat_html
+    assert '"support draft cancelled"' in chat_html
+    assert "if (!renderSupportOutcome(msg))" in chat_html
+    assert "function hideSupportResult()" in chat_html
+    assert "window.solChatCopy.CHAT_RESULT_TRY_AGAIN_MESSAGE" in chat_html
+    assert chat_html.count("setStatus(msg.text || '', statusTitleFor(msg));") == 2
 
 
 def test_chat_bar_talent_terminal_clears_liveness(chat_html):

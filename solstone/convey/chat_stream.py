@@ -12,6 +12,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from solstone.apps.chat.copy import talent_label_for
 from solstone.think.utils import (
     day_path,
     get_journal,
@@ -27,9 +28,11 @@ _CHAT_STREAM = "chat"
 _SEGMENT_WINDOW_MS = 300_000
 _APPENDED_CHAT_PATHS: dict[int, Path] = {}
 # owner_message may carry optional `source`; extras flow through unchanged.
-# sol_message may carry optional `thinking` and `offer`; talent_finished may
-# carry optional `thinking`; extras flow through unchanged and are not part of
-# the required-field tuples below.
+# sol_message may carry optional `thinking`, `offer`, `draft`, `sources`,
+# `answer_state`, and folded-turn `origin`; result may carry optional `ticket_id`,
+# `error`, `ambiguous`, and `cancelled`; talent_finished may carry optional
+# `thinking`. talent_queued records a deferred spawn intent. Extras flow through
+# unchanged and are not part of the required-field tuples below.
 _VALID_KINDS = {
     "owner_message": ("text", "app", "path", "facet"),
     "sol_message": (
@@ -40,6 +43,16 @@ _VALID_KINDS = {
         "requested_task",
     ),
     "talent_spawned": ("use_id", "name", "task", "started_at"),
+    "talent_queued": (
+        "use_id",
+        "name",
+        "task",
+        "queued_at",
+        "chat_use_id",
+        "ask",
+        "context",
+        "location",
+    ),
     "talent_finished": ("use_id", "name", "summary"),
     "talent_errored": ("use_id", "name", "reason"),
     "reflection_ready": ("day", "url"),
@@ -60,6 +73,15 @@ _VALID_KINDS = {
     "sol_chat_request_superseded": ("request_id", "replaced_by"),
     "owner_chat_open": ("request_id", "surface"),
     "owner_chat_dismissed": ("request_id", "surface", "reason"),
+    "support_draft": (
+        "draft_id",
+        "captured_day",
+        "verb",
+        "payload",
+        "diagnostics_snapshot",
+    ),
+    "result": ("draft_id", "ok"),
+    "support_submit_claim": ("draft_id",),
 }
 _TRIGGER_KINDS = {
     "owner_message",
@@ -67,6 +89,13 @@ _TRIGGER_KINDS = {
     "talent_errored",
     "sol_chat_request",
 }
+
+
+def _talent_label(name: Any, status: str) -> str:
+    try:
+        return talent_label_for(str(name), status)
+    except ValueError:
+        return str(name)
 
 
 def append_chat_event(kind: str, **fields: Any) -> dict[str, Any]:
@@ -214,6 +243,9 @@ def reduce_chat_state(day: str) -> dict[str, Any]:
     latest_sol_message: dict[str, Any] | None = None
     active_talents: dict[str, dict[str, Any]] = {}
     completed_talents: list[dict[str, Any]] = []
+    errored_talents: list[dict[str, Any]] = []
+    queued_talents: dict[str, dict[str, Any]] = {}
+    chat_error: dict[str, Any] | None = None
     queue_depth = 0
 
     for event in read_chat_events(day):
@@ -231,19 +263,36 @@ def reduce_chat_state(day: str) -> dict[str, Any]:
                 "requested_target": event["requested_target"],
                 "requested_task": event["requested_task"],
                 "offer": event.get("offer"),
+                "draft": event.get("draft"),
+                "origin": event.get("origin"),
+                "sources": event.get("sources", []),
+                "answer_state": event.get("answer_state", "answered"),
+            }
+            chat_error = None
+            continue
+
+        if kind == "talent_queued":
+            queued_talents[str(event["use_id"])] = {
+                "use_id": event["use_id"],
+                "name": event["name"],
+                "task": event["task"],
+                "queued_at": event["queued_at"],
             }
             continue
 
         if kind == "talent_spawned":
+            queued_talents.pop(str(event["use_id"]), None)
             active_talents[str(event["use_id"])] = {
                 "use_id": event["use_id"],
                 "name": event["name"],
                 "task": event["task"],
                 "started_at": event["started_at"],
+                "label": _talent_label(event["name"], "running"),
             }
             continue
 
         if kind == "talent_finished":
+            queued_talents.pop(str(event["use_id"]), None)
             started = active_talents.pop(str(event["use_id"]), None)
             completed_talents.append(
                 {
@@ -252,12 +301,30 @@ def reduce_chat_state(day: str) -> dict[str, Any]:
                     "task": started["task"] if started else None,
                     "summary": event["summary"],
                     "finished_at": event["ts"],
+                    "label": _talent_label(event["name"], "finished"),
                 }
             )
             continue
 
         if kind == "talent_errored":
+            queued_talents.pop(str(event["use_id"]), None)
             active_talents.pop(str(event["use_id"]), None)
+            errored_talents.append(
+                {
+                    "use_id": event["use_id"],
+                    "name": event["name"],
+                    "finished_at": event["ts"],
+                    "label": _talent_label(event["name"], "errored"),
+                }
+            )
+            continue
+
+        if kind == "chat_error":
+            chat_error = {
+                "reason": event["reason"],
+                "provider": event.get("provider", ""),
+                "detail": event.get("detail", ""),
+            }
             continue
 
         if kind == "reflection_ready":
@@ -272,7 +339,16 @@ def reduce_chat_state(day: str) -> dict[str, Any]:
                 str(talent["use_id"]),
             ),
         ),
+        "queued_talents": sorted(
+            queued_talents.values(),
+            key=lambda talent: (
+                int(talent.get("queued_at", 0) or 0),
+                str(talent["use_id"]),
+            ),
+        ),
         "completed_talents": completed_talents,
+        "errored_talents": errored_talents,
+        "chat_error": chat_error,
         "queue_depth": queue_depth,
     }
 
@@ -345,6 +421,11 @@ def _require_journal_root() -> Path:
 
 def _day_for_ts(ts_ms: int) -> str:
     return _ts_to_local_datetime(ts_ms).strftime("%Y%m%d")
+
+
+def day_for_ts(ts: int) -> str:
+    """Return the chat-stream day bucket for an event timestamp (ms)."""
+    return _day_for_ts(ts)
 
 
 def _current_segment_key(day: str, ts_ms: int) -> str:

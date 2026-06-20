@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from solstone.think.catchup_state import read_backoff_summary
 from solstone.think.cluster import cluster_segments
 from solstone.think.cogitate_policy import DETERMINISTIC_FAILURE_REASON_CODES
 from solstone.think.utils import (
@@ -45,6 +46,7 @@ WHY_SENSED_NOT_THOUGHT = "sensed_not_thought"
 
 REASON_CORRUPT_RAW = "corrupt_raw"
 REASON_FAILING_STEP = "failing_step"
+REASON_CATCHUP_BACKOFF = "catchup_backoff"
 
 BACKLOG_STATE_COMPLETE = "complete"
 BACKLOG_STATE_PENDING = "pending"
@@ -58,6 +60,7 @@ class SegmentProgress:
 
     sensed: bool
     density: str | None
+    change_class: str | None
     dispatched: frozenset[str]
     completed: frozenset[str]
     unconfigured: frozenset[str]
@@ -177,6 +180,11 @@ class BacklogDay:
     provider: str | None
     model: str | None
     error: BacklogError | None
+    backoff_stuck: bool = False
+    backoff_attempts: int = 0
+    backoff_consecutive_non_completion: int = 0
+    backoff_last_outcome: str | None = None
+    backoff_next_retry_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -627,6 +635,7 @@ def read_segment_progress(day: str) -> dict[tuple[str | None, str], SegmentProgr
     This function does not create, modify, or delete journal state.
     """
     latest_sense: dict[tuple[str | None, str], tuple[int, str | None]] = {}
+    latest_change: dict[tuple[str | None, str], tuple[int, str | None]] = {}
     dispatched: dict[tuple[str | None, str], set[str]] = {}
     terminals: dict[tuple[str | None, str], dict[str, tuple[int, bool]]] = {}
     unconfigured: dict[tuple[str | None, str], set[str]] = {}
@@ -678,6 +687,20 @@ def read_segment_progress(day: str) -> dict[tuple[str | None, str], SegmentProgr
                             density = None
                         if key not in latest_sense or ts >= latest_sense[key][0]:
                             latest_sense[key] = (ts, density)
+                    elif event == "sense.change_detect":
+                        try:
+                            ts = int(rec["ts"])
+                        except (KeyError, TypeError, ValueError):
+                            logger.debug(
+                                "pipeline_health: skipping sense.change_detect with invalid ts in %s",
+                                path,
+                            )
+                            continue
+                        change_class = rec.get("change_class")
+                        if not isinstance(change_class, str):
+                            change_class = None
+                        if key not in latest_change or ts >= latest_change[key][0]:
+                            latest_change[key] = (ts, change_class)
                     elif event == "talent.dispatch":
                         name = rec.get("name")
                         if isinstance(name, str):
@@ -722,13 +745,20 @@ def read_segment_progress(day: str) -> dict[tuple[str | None, str], SegmentProgr
         )
         return {}
 
-    segments = set(latest_sense) | set(dispatched) | set(terminals) | set(unconfigured)
+    segments = (
+        set(latest_sense)
+        | set(latest_change)
+        | set(dispatched)
+        | set(terminals)
+        | set(unconfigured)
+    )
     progress: dict[tuple[str | None, str], SegmentProgress] = {}
     for key in sorted(segments, key=lambda k: (k[1], k[0] is not None, k[0] or "")):
         segment_terminals = terminals.get(key, {})
         progress[key] = SegmentProgress(
             sensed=key in latest_sense,
             density=latest_sense.get(key, (0, None))[1],
+            change_class=latest_change.get(key, (0, None))[1],
             dispatched=frozenset(dispatched.get(key, set())),
             completed=frozenset(
                 name
@@ -756,6 +786,8 @@ def segment_fully_thought(progress: SegmentProgress | None) -> tuple[bool, str |
     if progress is None or not progress.sensed:
         return False, "no_sense_complete"
     if progress.density == "idle":
+        return True, None
+    if progress.change_class == "redundant":
         return True, None
     for name in SEGMENT_FLOOR_TALENTS:
         if name not in progress.completed and name not in progress.unconfigured:
@@ -1181,6 +1213,7 @@ def read_backlog_view(window: int = BACKLOG_DEFAULT_WINDOW) -> BacklogView:
         why = _segment_backlog_units(
             day, segments, progress, terminal_states, stream_ms
         ) + _non_segment_failed_units(terminal_states, stream_ms)
+        backoff = read_backoff_summary(day)
         segment_depth = completion.not_sensed + completion.not_thought
         if any(unit.why == WHY_CORRUPT_RAW and unit.stuck for unit in why):
             reason = REASON_CORRUPT_RAW
@@ -1190,7 +1223,12 @@ def read_backlog_view(window: int = BACKLOG_DEFAULT_WINDOW) -> BacklogView:
             reason = None
 
         representative = _representative_reason_unit(why)
-        if any(unit.stuck for unit in why):
+        reason_code = representative.reason_code if representative else None
+        if reason is None and backoff:
+            reason = REASON_CATCHUP_BACKOFF
+            reason_code = "catchup_backoff"
+
+        if any(unit.stuck for unit in why) or backoff:
             state = BACKLOG_STATE_STUCK
         elif segment_depth > 0 or why:
             state = BACKLOG_STATE_PENDING
@@ -1206,10 +1244,17 @@ def read_backlog_view(window: int = BACKLOG_DEFAULT_WINDOW) -> BacklogView:
                 not_sensed=completion.not_sensed,
                 why=why,
                 reason=reason,
-                reason_code=representative.reason_code if representative else None,
+                reason_code=reason_code,
                 provider=representative.provider if representative else None,
                 model=representative.model if representative else None,
                 error=None,
+                backoff_stuck=bool(backoff),
+                backoff_attempts=backoff["attempts"] if backoff else 0,
+                backoff_consecutive_non_completion=(
+                    backoff["consecutive_non_completion"] if backoff else 0
+                ),
+                backoff_last_outcome=backoff["last_outcome"] if backoff else None,
+                backoff_next_retry_at=backoff["next_retry_at"] if backoff else None,
             )
         )
 

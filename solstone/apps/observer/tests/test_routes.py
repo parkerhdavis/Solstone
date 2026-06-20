@@ -581,17 +581,17 @@ def test_ingest_invalid_key(observer_env):
 
 
 def test_delete_source_requires_auth(observer_env):
-    """Deleting the share source requires observer auth."""
+    """Deleting the location source requires observer auth."""
     env = observer_env()
-    seg_dir = _plant_source_segment(env)
+    seg_dir = _plant_location_segment(env)
 
-    resp = env.client.delete("/app/observer/source/import.share")
+    resp = env.client.delete("/app/observer/source/location")
     assert resp.status_code == 401
     assert resp.get_json()["reason_code"] == "auth_required"
     assert seg_dir.exists()
 
     resp = env.client.delete(
-        "/app/observer/source/import.share",
+        "/app/observer/source/location",
         headers={"Authorization": "Bearer invalid-key-12345"},
     )
     assert resp.status_code == 401
@@ -625,65 +625,38 @@ def test_delete_source_hard_pin_rejects_other_stream(observer_env):
         day="20250104",
         segment="140000_300",
     )
-    resp = env.client.delete(
-        "/app/observer/source/import.share",
-        headers=headers,
-        data={"stream": "import.audio"},
-    )
+    resp = env.client.delete("/app/observer/source/import.share", headers=headers)
     assert resp.status_code == 400
     assert resp.get_json()["detail"] == "Only known source streams can be deleted"
     assert share_seg.exists()
 
+    form_location_seg = _plant_location_segment(
+        env,
+        day="20250105",
+        segment="120000_300",
+    )
     resp = env.client.delete(
-        "/app/observer/source/import.share",
+        "/app/observer/source/location",
+        headers=headers,
+        data={"stream": "import.share"},
+    )
+    assert resp.status_code == 400
+    assert resp.get_json()["detail"] == "Only known source streams can be deleted"
+    assert form_location_seg.exists()
+
+    meta_location_seg = _plant_location_segment(
+        env,
+        day="20250106",
+        segment="120000_300",
+    )
+    resp = env.client.delete(
+        "/app/observer/source/location",
         headers=headers,
         data={"meta": json.dumps({"stream": "import.audio"})},
     )
     assert resp.status_code == 400
     assert resp.get_json()["detail"] == "Only known source streams can be deleted"
-    assert share_seg.exists()
-
-
-def test_delete_source_happy_path(observer_env):
-    """A valid observer key deletes the import.share source."""
-    env = observer_env()
-    create_resp = env.client.post(
-        "/app/observer/api/create",
-        json={"name": "test-observer"},
-        content_type="application/json",
-    )
-    key = create_resp.get_json()["key"]
-    seg_dir = _plant_source_segment(env)
-
-    resp = env.client.delete(
-        "/app/observer/source/import.share",
-        headers={"Authorization": f"Bearer {key}"},
-    )
-
-    assert resp.status_code == 200
-    receipt = resp.get_json()
-    assert receipt["target"]["stream"] == "import.share"
-    assert receipt["removed"]["segments"] == 1
-    assert receipt["removed"]["originals"] == 1
-    assert receipt["removed"]["in_segment_derived"] == 1
-    assert not seg_dir.exists()
-
-
-def test_api_delete_source_hardcodes_share_stream(observer_env):
-    env = observer_env()
-    share_seg = _plant_source_segment(env)
-    location_seg = _plant_location_segment(env, segment="130000_300")
-
-    resp = env.client.post("/app/observer/api/delete-source")
-
-    assert resp.status_code == 200
-    receipt = resp.get_json()
-    assert receipt["target"]["stream"] == "import.share"
-    assert receipt["removed"]["segments"] == 1
-    assert receipt["removed"]["originals"] == 1
-    assert receipt["removed"]["in_segment_derived"] == 1
-    assert not share_seg.exists()
-    assert location_seg.exists()
+    assert meta_location_seg.exists()
 
 
 def test_delete_source_location_happy_path(observer_env):
@@ -708,58 +681,6 @@ def test_delete_source_location_happy_path(observer_env):
     assert receipt["removed"]["originals"] == 1
     assert receipt["removed"]["in_segment_derived"] == 0
     assert not seg_dir.exists()
-
-
-def test_delete_source_path_wins_over_candidate(observer_env):
-    env = observer_env()
-    create_resp = env.client.post(
-        "/app/observer/api/create",
-        json={"name": "test-observer"},
-        content_type="application/json",
-    )
-    key = create_resp.get_json()["key"]
-    headers = {"Authorization": f"Bearer {key}"}
-    form_location_seg = _plant_location_segment(
-        env,
-        day="20250105",
-        segment="120000_300",
-    )
-    form_share_seg = _plant_source_segment(
-        env,
-        day="20250105",
-        segment="130000_300",
-    )
-
-    form_resp = env.client.delete(
-        "/app/observer/source/location",
-        headers=headers,
-        data={"stream": "import.share"},
-    )
-
-    assert form_resp.status_code == 200
-    assert not form_location_seg.exists()
-    assert form_share_seg.exists()
-
-    meta_location_seg = _plant_location_segment(
-        env,
-        day="20250106",
-        segment="120000_300",
-    )
-    meta_share_seg = _plant_source_segment(
-        env,
-        day="20250106",
-        segment="130000_300",
-    )
-
-    meta_resp = env.client.delete(
-        "/app/observer/source/location",
-        headers=headers,
-        data={"meta": json.dumps({"stream": "import.share"})},
-    )
-
-    assert meta_resp.status_code == 200
-    assert not meta_location_seg.exists()
-    assert meta_share_seg.exists()
 
 
 def test_ingest_missing_segment(observer_env):
@@ -2477,6 +2398,90 @@ def test_ingest_mixed_zero_byte_files(observer_env):
     expected_file = _day_dir(env) / "test-observer" / "120000_300" / "audio.flac"
     assert expected_file.exists()
     assert expected_file.read_bytes() == valid_data
+
+
+def test_ingest_contract_sidecar_invalid_quarantined_without_emit(
+    observer_env, monkeypatch
+):
+    env = observer_env()
+    emitted = []
+    monkeypatch.setattr(
+        routes_module,
+        "emit",
+        lambda tract, event, **fields: emitted.append((tract, event, fields)),
+    )
+
+    resp = env.client.post(
+        "/app/observer/api/create",
+        json={"name": "contract-test"},
+        content_type="application/json",
+    )
+    key = resp.get_json()["key"]
+
+    invalid_audio = b'{"raw":"audio.flac"}\n{"start":"00:00:00"}\n'
+    resp = env.client.post(
+        "/app/observer/ingest",
+        headers={"Authorization": f"Bearer {key}"},
+        data={
+            "day": "20250103",
+            "segment": "120000_300",
+            "files": (io.BytesIO(invalid_audio), "120000_300_audio.jsonl"),
+        },
+    )
+
+    body = resp.get_json()
+    assert resp.status_code == 422
+    assert body["status"] == "failed"
+    assert body["reason_code"] == "ingest_contract_invalid"
+    assert any(
+        "audio.jsonl" in item and "text" in item for item in body["invalid_files"]
+    )
+    assert emitted == []
+
+    assert not (_day_dir(env) / "contract-test" / "120000_300").exists()
+    failed_dir = env.journal / "chronicle" / body["failed_path"]
+    assert failed_dir.exists()
+    assert (failed_dir / "120000_300_audio.jsonl").read_bytes() == invalid_audio
+
+
+def test_ingest_contract_sidecars_valid_are_accepted(observer_env, monkeypatch):
+    env = observer_env()
+    emitted = []
+    monkeypatch.setattr(
+        routes_module,
+        "emit",
+        lambda tract, event, **fields: emitted.append((tract, event, fields)),
+    )
+
+    resp = env.client.post(
+        "/app/observer/api/create",
+        json={"name": "contract-valid-test"},
+        content_type="application/json",
+    )
+    key = resp.get_json()["key"]
+
+    audio = b'{"raw":"audio.flac"}\n{"start":"00:00:00","text":"hello"}\n'
+    screen = b'{"raw":"screen.mp4","qualified_count":1}\n{"timestamp":1.0}\n'
+    stream = b'{"stream":"contract-valid-test","prev_day":null,"prev_segment":null,"seq":1}\n'
+    resp = env.client.post(
+        "/app/observer/ingest",
+        headers={"Authorization": f"Bearer {key}"},
+        data={
+            "day": "20250103",
+            "segment": "120000_300",
+            "files": [
+                (io.BytesIO(audio), "120000_300_audio.jsonl"),
+                (io.BytesIO(screen), "screen.jsonl"),
+                (io.BytesIO(stream), "stream.json"),
+            ],
+        },
+    )
+
+    body = resp.get_json()
+    assert resp.status_code == 200
+    assert body["status"] == "ok"
+    assert body["files"] == ["audio.jsonl", "screen.jsonl", "stream.json"]
+    assert len(emitted) == 1
 
 
 def test_ingest_stream_qualifier_preserved(observer_env):
